@@ -245,6 +245,25 @@ def game_starts_soon(commence_str, minutes=60):
     except Exception:
         return False
 
+def _game_already_started(time_str: str, grace_min: int = 5) -> bool:
+    """
+    Returns True if the game started more than grace_min minutes ago.
+    Accepts both 'YYYY-MM-DDTHH:MM:SSZ' and 'YYYY-MM-DDTHH:MM' formats.
+    """
+    try:
+        ts = time_str.strip()
+        if ts.endswith("Z"):
+            ct = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
+        elif "T" in ts and len(ts) >= 16:
+            naive = datetime.strptime(ts[:16], "%Y-%m-%dT%H:%M")
+            ct = naive.replace(tzinfo=ET)
+        else:
+            return False
+        elapsed = (datetime.now(pytz.utc) - ct.astimezone(pytz.utc)).total_seconds() / 60
+        return elapsed > grace_min
+    except Exception:
+        return False
+
 def _days_until(commence_str: str) -> float:
     """Days (float) from now until game. Returns 999 on parse error."""
     try:
@@ -1288,13 +1307,19 @@ def notify_arbitrage(arbs):
         if not _should_alert(arb_key, edge=arb["profit_pct"]):
             continue
 
-        # ── All-risky filter: skip if every leg uses a risky book ──────────
+        # ── Book safety filter: skip if ANY leg uses a risky book ──────────
         if arb.get("legs") == 3:
             all_books = [arb["book_a"], arb["book_b"], arb["book_c"]]
         else:
             all_books = [arb["book_a"], arb["book_b"]]
-        if all(_is_risky_book(b) for b in all_books):
-            print(f"  ⛔ ARB omitido — todas las casas de apuestas riesgosas: {arb['match']}")
+        risky = [b for b in all_books if _is_risky_book(b)]
+        if risky:
+            print(f"  ⛔ ARB omitido — casa(s) riesgosa(s) [{', '.join(risky)}]: {arb['match']}")
+            continue
+
+        # ── Never alert games that already started (>5 min grace) ─────────
+        if _game_already_started(arb.get("game_time", ""), grace_min=5):
+            print(f"  ⏰ ARB omitido — juego ya comenzó: {arb.get('match','')}")
             continue
         # ───────────────────────────────────────────────────────────────────
 
@@ -2606,6 +2631,11 @@ def notify_totals(total_bets):
         if b.get("stake", 0) < MIN_STAKE:
             continue
 
+        # Never alert games that already started (>5 min grace)
+        if _game_already_started(b.get("time", ""), grace_min=5):
+            print(f"  ⏰ Totals omitido — juego ya comenzó: {b.get('match','')}")
+            continue
+
         home, away = b["match"].split(" vs ", 1)
         dedup_key = f"{home}_{away}_{b['team']}_totals"
         if not _should_alert(dedup_key, odds=b["odds"], edge=b["edge"]):
@@ -3640,6 +3670,12 @@ def notify_game_analysis(analyses, sport_key):
         home_es = _es(home)
         away_es = _es(away)
         match_es = f"{home_es} vs {away_es}"
+
+        # Never alert games that already started (>5 min grace)
+        if _game_already_started(a.get("time", ""), grace_min=5):
+            print(f"  ⏰ Análisis omitido — juego ya comenzó: {a.get('match','')}")
+            continue
+
         analysis_key = f"{home}_{away}_analysis"
         if not _should_alert(analysis_key, edge=a["best_ev"]):
             continue
@@ -4764,11 +4800,72 @@ def _team_id(team_name: str) -> int | None:
             return v
     return None
 
+def _splits_from_schedule(tid: int, team_name: str) -> "dict | None":
+    """
+    Fallback: compute home/away RS/RA from completed regular-season games
+    this season via the schedule+linescore endpoint.
+    Returns {home_rs, home_ra, home_wpct, away_rs, away_ra, away_wpct} or None.
+    """
+    try:
+        data = _mlb_rest("/schedule", {
+            "teamId":   tid,
+            "season":   MLB_YEAR,
+            "gameType": "R",
+            "sportId":  1,
+            "hydrate":  "linescore",
+        })
+        h_rs = h_ra = h_w = h_l = 0
+        a_rs = a_ra = a_w = a_l = 0
+        for date_entry in (data.get("dates") or []):
+            for g in date_entry.get("games", []):
+                if g.get("status", {}).get("abstractGameState") != "Final":
+                    continue
+                teams = g.get("teams", {})
+                is_home = teams.get("home", {}).get("team", {}).get("id") == tid
+                h_sc = teams.get("home", {}).get("score")
+                a_sc = teams.get("away", {}).get("score")
+                if h_sc is None or a_sc is None:
+                    ls   = g.get("linescore", {}).get("teams", {})
+                    h_sc = ls.get("home", {}).get("runs")
+                    a_sc = ls.get("away", {}).get("runs")
+                if h_sc is None or a_sc is None:
+                    continue
+                h_sc, a_sc = int(h_sc), int(a_sc)
+                if is_home:
+                    h_rs += h_sc; h_ra += a_sc
+                    h_w  += (1 if h_sc > a_sc else 0)
+                    h_l  += (1 if h_sc < a_sc else 0)
+                else:
+                    a_rs += a_sc; a_ra += h_sc
+                    a_w  += (1 if a_sc > h_sc else 0)
+                    a_l  += (1 if a_sc < h_sc else 0)
+        hg = max(h_w + h_l, 1); ag = max(a_w + a_l, 1)
+        if (h_w + h_l) < 3 or (a_w + a_l) < 3:
+            return None   # too few games to be meaningful
+        result = {
+            "home_rs":   round(h_rs / hg, 2),
+            "home_ra":   round(h_ra / hg, 2),
+            "home_wpct": round(h_w  / hg, 3),
+            "away_rs":   round(a_rs / ag, 2),
+            "away_ra":   round(a_ra / ag, 2),
+            "away_wpct": round(a_w  / ag, 3),
+            "_source":   "schedule",
+        }
+        print(f"  📊 Splits [{team_name}] via schedule: "
+              f"Home {result['home_rs']}/{result['home_ra']} "
+              f"Away {result['away_rs']}/{result['away_ra']}")
+        return result
+    except Exception as e:
+        print(f"  ⚠️  _splits_from_schedule error [{team_name}]: {e}")
+        return None
+
+
 def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
     """
     Real home/away splits from MLB Stats API.
+    Primary:  /teams/{tid}/stats?stats=homeAndAway  (fast, single call)
+    Fallback: compute from /schedule linescore data (slower but always works)
     Returns {home_rs, home_ra, home_wpct, away_rs, away_ra, away_wpct} or None.
-    Returns None (not fake defaults) when data is unavailable.
     Cached per team per calendar day.
     """
     today = datetime.now(ET).strftime("%Y-%m-%d")
@@ -4779,6 +4876,7 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
     try:
         tid = _team_id(team_name)
         if tid is None:
+            print(f"  ⚠️  _team_id not found for '{team_name}'")
             _splits_cache[ck] = None
             return None
 
@@ -4798,9 +4896,23 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
         pit_splits = (pit_data.get("stats", [{}])[0].get("splits", [])
                       if pit_data and pit_data.get("stats") else [])
 
+        # ── Debug: log what the API actually returned ─────────────────────────
         if not hit_splits and not pit_splits:
-            _splits_cache[ck] = None
-            return None
+            hit_keys = list((hit_data or {}).keys())
+            pit_keys = list((pit_data or {}).keys())
+            print(f"  ⚠️  homeAndAway splits empty [{team_name}] "
+                  f"hit_keys={hit_keys} pit_keys={pit_keys}")
+            # Fallback: compute from schedule
+            result = _splits_from_schedule(tid, team_name)
+            _splits_cache[ck] = result
+            return result
+        else:
+            # Sample first split to show structure
+            sample = hit_splits[0] if hit_splits else pit_splits[0]
+            sample_keys = {k: str(v)[:40] for k, v in sample.items()
+                           if k in ("split", "isHome", "stat")}
+            print(f"  📊 homeAndAway [{team_name}] splits={len(hit_splits)} "
+                  f"sample={sample_keys}")
 
         result: dict = {}
 
