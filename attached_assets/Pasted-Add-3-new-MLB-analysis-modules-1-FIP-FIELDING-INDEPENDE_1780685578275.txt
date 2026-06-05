@@ -1,0 +1,143 @@
+Add 3 new MLB analysis modules:
+
+━━━━━━━━━━━━━━━━━━━━
+1. FIP (FIELDING INDEPENDENT PITCHING)
+━━━━━━━━━━━━━━━━━━━━
+FIP is more accurate than ERA because
+it removes defense luck.
+Formula: FIP = ((13×HR + 3×BB - 2×K) 
+/ IP) + 3.10
+
+Fetch from MLB Stats API:
+https://statsapi.mlb.com/api/v1/people/
+{pitcherId}/stats?stats=season
+&group=pitching&season=2026
+
+Extract: homeRuns, baseOnBalls, 
+strikeOuts, inningsPitched
+
+Calculate FIP for each pitcher.
+
+Show both ERA and FIP:
+"🔵 Gerrit Cole
+   Promedio carreras (ERA): 1.89 élite 🌟
+   Rendimiento real (FIP): 2.10 élite 🌟"
+
+Use FIP tiers same as ERA:
+< 2.00 → élite 🌟
+2.00-2.75 → dominante 🔥
+2.75-3.50 → sólido ✅
+3.50-4.25 → promedio ⚪
+4.25-5.00 → débil ⚠️
+> 5.00 → vulnerable 🔴
+
+When ERA and FIP differ significantly:
+- FIP much worse than ERA (1.0+):
+  Add "⚠️ Ha tenido suerte — 
+  rendimiento real es peor"
+- FIP much better than ERA (1.0+):
+  Add "📈 Ha sido víctima de mala 
+  suerte — es mejor de lo que parece"
+
+Use FIP (not ERA) for all pitcher
+intelligence rules (dominant/weak).
+
+━━━━━━━━━━━━━━━━━━━━
+2. MATCHUP ZURDO/DERECHO (L/R)
+━━━━━━━━━━━━━━━━━━━━
+Fetch pitcher handedness from:
+https://statsapi.mlb.com/api/v1/people/
+{pitcherId}
+
+Fetch team batting splits vs L/R from:
+https://statsapi.mlb.com/api/v1/teams/
+{teamId}/stats?stats=vsLeft&vsRight
+&group=hitting&season=2026
+
+Show matchup advantage:
+"⚔ Matchup: Cole (diestro) vs 
+   lineup Red Sox
+   Red Sox vs pitchers diestros:
+   Promedio de bateo: .218 (débil)
+   → Ventaja para el pitcher ✅"
+
+OR:
+"⚔️ Matchup: Sale (zurdo) vs
+   lineup Yankees
+   Yankees vs pitchers zurdos:
+   Promedio de bateo: .271 (fuerte)
+   → Ventaja para los bateadores ⚠️"
+
+Use this to adjust projected total:
+- Lineup weak vs pitcher handedness
+  → reduce projected runs by 0.4
+- Lineup strong vs pitcher handedness
+  → increase projected runs by 0.4
+
+━━━━━━━━━━━━━━━━━━━━
+3. HEAD-TO-HEAD (H2H)
+━━━━━━━━━━━━━━━━━━━━
+Fetch last 5 meetings between teams:
+https://statsapi.mlb.com/api/v1/schedule
+?sportId=1&teamId={team1}
+&opponentId={team2}&season=2026
+&gameType=R
+
+Calculate:
+- Average total runs in last 5 H2H
+- Over/Under record in H2H
+- Home team record in H2H
+
+Show in alert:
+"📊 Últimos 5 enfrentamientos:
+   Promedio de carreras: 8.2 por juego
+   Over/Under: Over ganó 3 de 5
+   
+   Yankees en casa vs Red Sox: 
+   3 ganados, 2 perdidos"
+
+Use H2H average to weight the 
+projected total:
+Final projection = 70% model + 
+                   30% H2H average
+
+If H2H strongly contradicts model
+(difference > 2 runs):
+Add: "⚠️ Historial sugiere diferente
+— considerar antes de apostar"
+
+━━━━━━━━━━━━━━━━━━━━
+COMBINED EXAMPLE OUTPUT:
+━━━━━━━━━━━━━━━━━━━━
+⚾ Yankees vs Red Sox
+⏰ Hoy 7:05 PM ET
+━━━━━━━━━━━━
+🎯 APUESTA: UNDER 8.5 carreras
+💰 $50 @ 1.91 — Bovada
+━━━━━━━━━━━━
+📊 POR QUÉ:
+Modelo proyecta: 6.8 carreras
+El libro pone:   8.5 carreras
+Diferencia:      1.7 carreras de edge
+
+🔵 Cole (diestro)
+   ERA: 1.89 élite 🌟
+   FIP: 2.10 élite 🌟
+
+🔴 Sale (zurdo)
+   ERA: 3.21 sólido ✅
+   FIP: 2.95 sólido ✅
+   📈 Mejor de lo que parece
+
+⚔ Cole vs Red Sox:
+   Batean .218 vs diestros → débil
+   → Ventaja pitcher ✅
+
+📊 Últimos 5 encuentros:
+   Promedio: 7.1 carreras/juego
+   Under ganó 4 de 5 ✅
+━━━━━━━━━━━━
+🟢 APOSTAR: $50
+
+Apply try/except to all 3 modules.
+Skip silently if data unavailable.

@@ -1365,6 +1365,8 @@ def fetch_probable_pitchers_today():
                     'away_era':  round(a_era, 2),
                     'home_name': home_p.get('fullName', 'TBD'),
                     'away_name': away_p.get('fullName', 'TBD'),
+                    'home_id':   home_p.get('id'),
+                    'away_id':   away_p.get('id'),
                 }
     except Exception as e:
         print(f'  ⚠️  Pitcher fetch error: {e}')
@@ -1403,6 +1405,162 @@ def pitcher_run_adjustment(home_era, away_era):
         elif era > 4.50:
             adj += 0.2
     return round(adj, 1)
+
+# ── MODULE 8B: FIP · Handedness · L/R matchup · H2H ──────────────────────────
+_fip_cache_d:  dict = {}
+_hand_cache_d: dict = {}
+_lr_cache_d:   dict = {}
+_h2h_mlb_cache: dict = {}
+
+def _parse_ip(ip_val) -> float:
+    """Convert MLB IP string '142.2' → decimal innings (142.667)."""
+    try:
+        s = str(ip_val)
+        if "." in s:
+            whole, frac = s.split(".", 1)
+            return float(whole) + float(frac) / 3.0
+        return float(s)
+    except Exception:
+        return 1.0
+
+
+def _fetch_pitcher_fip_by_id(player_id) -> "float | None":
+    """FIP for a pitcher this season. Returns float or None on failure."""
+    if not player_id:
+        return None
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck = f"{player_id}_{today}"
+    if ck in _fip_cache_d:
+        return _fip_cache_d[ck]
+    try:
+        d  = _mlb_rest(f"/people/{player_id}/stats",
+                       {"stats": "season", "group": "pitching", "season": MLB_YEAR})
+        sp = (d.get("stats") or [{}])[0].get("splits") or [{}]
+        st = sp[-1].get("stat", {}) if sp else {}
+        hr = float(st.get("homeRuns",    0) or 0)
+        bb = float(st.get("baseOnBalls", 0) or 0)
+        k  = float(st.get("strikeOuts",  0) or 0)
+        ip = _parse_ip(st.get("inningsPitched", 0))
+        if ip < 1:
+            _fip_cache_d[ck] = None
+            return None
+        fip = round(((13 * hr + 3 * bb - 2 * k) / ip) + 3.10, 2)
+        _fip_cache_d[ck] = fip
+        return fip
+    except Exception:
+        _fip_cache_d[ck] = None
+        return None
+
+
+def _fetch_pitcher_hand_by_id(player_id) -> "str | None":
+    """Pitcher throw hand code: L / R / S. Cached for the session."""
+    if not player_id:
+        return None
+    if player_id in _hand_cache_d:
+        return _hand_cache_d[player_id]
+    try:
+        d    = _mlb_rest(f"/people/{player_id}")
+        hand = (d.get("people") or [{}])[0].get("pitchHand", {}).get("code")
+        _hand_cache_d[player_id] = hand
+        return hand
+    except Exception:
+        _hand_cache_d[player_id] = None
+        return None
+
+
+def _fetch_team_batting_vs_hand(team_id, hand: str) -> "dict | None":
+    """
+    Team batting splits vs left (L) or right (R) pitchers.
+    Returns {"avg": float, "ops": float} or None.
+    """
+    if not team_id or not hand:
+        return None
+    split_type = "vsLeft" if hand == "L" else "vsRight"
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck = f"{team_id}_{split_type}_{today}"
+    if ck in _lr_cache_d:
+        return _lr_cache_d[ck]
+    try:
+        d   = _mlb_rest(f"/teams/{team_id}/stats",
+                        {"stats": split_type, "group": "hitting", "season": MLB_YEAR})
+        sp  = (d.get("stats") or [{}])[0].get("splits") or [{}]
+        st  = sp[-1].get("stat", {}) if sp else {}
+        avg_s = st.get("avg", "")
+        if not avg_s:
+            _lr_cache_d[ck] = None
+            return None
+        result = {
+            "avg":   float(avg_s),
+            "ops":   float(st.get("ops", 0) or 0),
+            "split": split_type,
+        }
+        _lr_cache_d[ck] = result
+        return result
+    except Exception:
+        _lr_cache_d[ck] = None
+        return None
+
+
+def _fetch_h2h_data(home_id, away_id, home_name: str) -> "dict | None":
+    """
+    Last ≤5 completed regular-season H2H games this season.
+    Returns {avg_total, totals, home_wins, home_losses, games_found} or None.
+    """
+    if not home_id or not away_id:
+        return None
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck = f"{home_id}_{away_id}_{today}"
+    if ck in _h2h_mlb_cache:
+        return _h2h_mlb_cache[ck]
+    try:
+        d = _mlb_rest("/schedule", {
+            "sportId":   1,
+            "teamId":    home_id,
+            "opponentId": away_id,
+            "season":    MLB_YEAR,
+            "gameType":  "R",
+            "hydrate":   "linescore",
+        })
+        records = []
+        for date_entry in d.get("dates", []):
+            for g in date_entry.get("games", []):
+                if g.get("status", {}).get("abstractGameState", "") != "Final":
+                    continue
+                teams = g.get("teams", {})
+                h_sc  = teams.get("home", {}).get("score")
+                a_sc  = teams.get("away", {}).get("score")
+                if h_sc is None:
+                    ls   = g.get("linescore", {}).get("teams", {})
+                    h_sc = ls.get("home", {}).get("runs")
+                    a_sc = ls.get("away", {}).get("runs")
+                if h_sc is None or a_sc is None:
+                    continue
+                total     = int(h_sc) + int(a_sc)
+                game_home = teams.get("home", {}).get("team", {}).get("name", "")
+                our_home  = any(w in game_home.lower() for w in home_name.lower().split())
+                home_won  = int(h_sc) > int(a_sc)
+                records.append({
+                    "total":    total,
+                    "home_won": home_won if our_home else not home_won,
+                })
+        if not records:
+            _h2h_mlb_cache[ck] = None
+            return None
+        last5  = records[-5:]
+        totals = [r["total"] for r in last5]
+        result = {
+            "avg_total":   round(sum(totals) / len(totals), 1),
+            "totals":      totals,
+            "home_wins":   sum(1 for r in last5 if     r["home_won"]),
+            "home_losses": sum(1 for r in last5 if not r["home_won"]),
+            "games_found": len(last5),
+        }
+        _h2h_mlb_cache[ck] = result
+        return result
+    except Exception:
+        _h2h_mlb_cache[ck] = None
+        return None
+
 
 # ── IMPROVEMENT 2: WORLD CUP 2026 LIVE FORM ───────────────────────────────────
 
@@ -1885,6 +2043,71 @@ def analyze_game_full(game, sport_key, prev_map=None):
         home_exp = max(0.1, home_exp + half_adj + w_adj / 2)
         away_exp = max(0.1, away_exp + half_adj + w_adj / 2)
 
+        # ── MLB A4: FIP ────────────────────────────────────────────────────
+        h_pid = p_data.get("home_id")
+        a_pid = p_data.get("away_id")
+        h_fip = a_fip = None
+        try:
+            h_fip = _fetch_pitcher_fip_by_id(h_pid)
+            a_fip = _fetch_pitcher_fip_by_id(a_pid)
+        except Exception:
+            pass
+
+        # ── MLB A5: L/R matchup splits ─────────────────────────────────────
+        h_hand = a_hand = None
+        lr_matchup_h = lr_matchup_a = None
+        lr_notes: list = []
+        try:
+            h_hand = _fetch_pitcher_hand_by_id(h_pid)
+            a_hand = _fetch_pitcher_hand_by_id(a_pid)
+            h_tid  = _team_id(home)
+            a_tid  = _team_id(away)
+            if a_hand and h_tid:         # home lineup bats vs away pitcher
+                lr_matchup_h = _fetch_team_batting_vs_hand(h_tid, a_hand)
+            if h_hand and a_tid:         # away lineup bats vs home pitcher
+                lr_matchup_a = _fetch_team_batting_vs_hand(a_tid, h_hand)
+        except Exception:
+            pass
+
+        for lineup, matchup, pname, hand, is_home_ln in [
+            (home, lr_matchup_h, a_pname, a_hand, True),
+            (away, lr_matchup_a, h_pname, h_hand, False),
+        ]:
+            if matchup and matchup.get("avg"):
+                avg     = matchup["avg"]
+                hand_es = ("zurdo" if hand == "L" else
+                           "diestro" if hand == "R" else "ambidiestro")
+                if avg < 0.220:
+                    if is_home_ln:
+                        home_exp = max(0.1, home_exp - 0.4)
+                    else:
+                        away_exp = max(0.1, away_exp - 0.4)
+                    lr_notes.append({"lineup": lineup, "pitcher": pname,
+                                     "hand": hand_es, "avg": avg,
+                                     "verdict": "débil", "favor": "pitcher ✅"})
+                elif avg > 0.260:
+                    if is_home_ln:
+                        home_exp = min(home_exp + 0.4, 12.0)
+                    else:
+                        away_exp = min(away_exp + 0.4, 12.0)
+                    lr_notes.append({"lineup": lineup, "pitcher": pname,
+                                     "hand": hand_es, "avg": avg,
+                                     "verdict": "fuerte", "favor": "bateadores ⚠️"})
+                else:
+                    lr_notes.append({"lineup": lineup, "pitcher": pname,
+                                     "hand": hand_es, "avg": avg,
+                                     "verdict": "normal", "favor": "neutral"})
+
+        # ── MLB A6: H2H last 5 meetings ────────────────────────────────────
+        h2h_data = None
+        try:
+            _h2h_raw = _fetch_h2h_data(_team_id(home), _team_id(away), home)
+            if _h2h_raw and _h2h_raw.get("games_found", 0) >= 2:
+                h2h_data = _h2h_raw
+        except Exception:
+            pass
+        # ──────────────────────────────────────────────────────────────────
+
         p_home = pythagorean_win_prob(home_exp, away_exp)
         p_away = 1.0 - p_home
 
@@ -1907,16 +2130,31 @@ def analyze_game_full(game, sport_key, prev_map=None):
         _pitch_notes   = []
         _pitch_reason  = ""
         _contradiction = False
+        _h2h_note      = ""
         if totals_data:
             book_line, over_odds, under_odds, bk_name = totals_data
             adj_total = home_exp + away_exp
 
-            # ── Pitcher Intelligence Rules ─────────────────────────────────
+            # ── H2H blend (30% weight on projection) ──────────────────────
+            _model_raw = adj_total
+            if h2h_data and h2h_data.get("avg_total"):
+                adj_total = round(0.70 * adj_total + 0.30 * h2h_data["avg_total"], 2)
+                if abs(h2h_data["avg_total"] - _model_raw) > 2.0:
+                    _h2h_note = (
+                        f"⚠️ Historial H2H sugiere diferente "
+                        f"({h2h_data['avg_total']} carreras/juego) — "
+                        f"considerar antes de apostar"
+                    )
+            # ──────────────────────────────────────────────────────────────
+
+            # ── Pitcher Intelligence Rules (FIP preferred over ERA) ────────
             _over_min_edge = 0.0
-            dom_h  = h_era < 2.75
-            dom_a  = a_era < 2.75
-            weak_h = h_era > 4.25
-            weak_a = a_era > 4.25
+            _h_metric = h_fip if h_fip is not None else h_era
+            _a_metric = a_fip if a_fip is not None else a_era
+            dom_h  = _h_metric < 2.75
+            dom_a  = _a_metric < 2.75
+            weak_h = _h_metric > 4.25
+            weak_a = _a_metric > 4.25
 
             # Rule 1: any dominant pitcher → reduce total, require bigger edge for OVER
             if dom_h or dom_a:
@@ -2066,6 +2304,14 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "pname_away":    a_pname,   # raw pitcher name
             "era_home":      h_era,     # raw ERA float
             "era_away":      a_era,     # raw ERA float
+            "fip_home":      h_fip,     # MLB A4
+            "fip_away":      a_fip,     # MLB A4
+            "hand_home":     h_hand,    # MLB A5
+            "hand_away":     a_hand,    # MLB A5
+            "lr_notes":      lr_notes,  # MLB A5
+            "h2h_data":      h2h_data,   # MLB A6
+            "h2h_book_line": totals_data[0] if totals_data else None,  # MLB A6
+            "h2h_note":      _h2h_note, # MLB A6 contradiction warning
             "pitch_intel": {            # intelligence rules output
                 "notes":         _pitch_notes,
                 "reasoning":     _pitch_reason,
@@ -2365,14 +2611,47 @@ def notify_game_analysis(analyses, sport_key):
             pn_a = ctx.get("pname_away", "TBD")
             er_h = ctx.get("era_home", 4.50)
             er_a = ctx.get("era_away", 4.50)
-            ctx_lines = (
-                f"🔵 Pitcher local: {pn_h}\n"
-                f"   Promedio de carreras recibidas: {er_h:.2f}\n"
-                f"   Nivel: {_era_label(er_h)}\n"
-                f"🔴 Pitcher visita: {pn_a}\n"
-                f"   Promedio de carreras recibidas: {er_a:.2f}\n"
-                f"   Nivel: {_era_label(er_a)}\n"
+            fip_h  = ctx.get("fip_home")
+            fip_a  = ctx.get("fip_away")
+            hnd_h  = ctx.get("hand_home")
+            hnd_a  = ctx.get("hand_away")
+
+            def _hand_es(c):
+                return "zurdo" if c == "L" else ("diestro" if c == "R" else None)
+
+            def _fip_luck(era, fip):
+                """Return luck warning string or ''."""
+                if fip is None:
+                    return ""
+                diff = fip - era
+                if diff > 1.0:
+                    return "   ⚠️ Ha tenido suerte — rendimiento real es peor\n"
+                elif diff < -1.0:
+                    return "   📈 Mejor de lo que parece — ha sido víctima de mala suerte\n"
+                return ""
+
+            # Home pitcher block
+            h_hand_txt = f" ({_hand_es(hnd_h)})" if _hand_es(hnd_h) else ""
+            ctx_lines  = (
+                f"🔵 Pitcher local: {pn_h}{h_hand_txt}\n"
+                f"   ERA: {er_h:.2f} — {_era_label(er_h)}\n"
             )
+            if fip_h is not None:
+                ctx_lines += (
+                    f"   FIP (rendimiento real): {fip_h:.2f} — {_era_label(fip_h)}\n"
+                    + _fip_luck(er_h, fip_h)
+                )
+            # Away pitcher block
+            a_hand_txt = f" ({_hand_es(hnd_a)})" if _hand_es(hnd_a) else ""
+            ctx_lines += (
+                f"🔴 Pitcher visita: {pn_a}{a_hand_txt}\n"
+                f"   ERA: {er_a:.2f} — {_era_label(er_a)}\n"
+            )
+            if fip_a is not None:
+                ctx_lines += (
+                    f"   FIP (rendimiento real): {fip_a:.2f} — {_era_label(fip_a)}\n"
+                    + _fip_luck(er_a, fip_a)
+                )
             # Runs scored / allowed
             ctx_lines += (
                 f"⚾ {home_es} — Carreras anotadas: {ctx['rs_home']} por juego\n"
@@ -2440,6 +2719,42 @@ def notify_game_analysis(analyses, sport_key):
                 ctx_lines += f"{note}\n"
             if p_intel.get("reasoning"):
                 ctx_lines += f"{p_intel['reasoning']}\n"
+
+            # ── L/R Matchup (MLB A5) ──────────────────────────────────────
+            for lr in ctx.get("lr_notes", []):
+                if lr["verdict"] == "normal":
+                    continue
+                avg_pct = f"{lr['avg']:.3f}".lstrip("0")  # ".218"
+                ctx_lines += (
+                    f"⚔️ {_es(lr['lineup'])} vs pitchers {lr['hand']}s:\n"
+                    f"   Promedio de bateo: {avg_pct} ({lr['verdict']})\n"
+                    f"   → Ventaja para {lr['favor']}\n"
+                )
+
+            # ── H2H últimos encuentros (MLB A6) ───────────────────────────
+            h2h = ctx.get("h2h_data")
+            if h2h and h2h.get("games_found", 0) >= 2:
+                bl = ctx.get("h2h_book_line")
+                totals_list = h2h.get("totals", [])
+                if bl and totals_list:
+                    ov = sum(1 for t in totals_list if t > bl)
+                    un = sum(1 for t in totals_list if t < bl)
+                    ou_txt = (f"Over ganó {ov} de {h2h['games_found']}" if ov > un
+                              else f"Under ganó {un} de {h2h['games_found']}" if un > ov
+                              else f"Empate {ov}-{un}")
+                else:
+                    ou_txt = f"{h2h['games_found']} partidos analizados"
+                ctx_lines += (
+                    f"📊 Últimos {h2h['games_found']} enfrentamientos:\n"
+                    f"   Promedio: {h2h['avg_total']} carreras/juego\n"
+                    f"   {ou_txt}\n"
+                    f"   {home_es} en casa: "
+                    f"{h2h['home_wins']} ganados, {h2h['home_losses']} perdidos\n"
+                )
+                h2h_note = ctx.get("h2h_note", "")
+                if h2h_note:
+                    ctx_lines += f"{h2h_note}\n"
+            # ──────────────────────────────────────────────────────────────
         else:
             # Soccer — ELO as tier
             ctx_lines = (
