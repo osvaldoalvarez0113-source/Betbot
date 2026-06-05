@@ -7957,6 +7957,17 @@ def _fetch_confirmed_lineup(home: str, away: str, commence: str) -> "dict | None
 
 # ── B3: Steam move detection ───────────────────────────────────────────────────
 
+# Steam detection constants
+_STEAM_MIN_BOOKS    = 5     # Rule 1: need 5+ books moving same direction
+_STEAM_MIN_PCT_MOVE = 0.04  # Rule 4: minimum 4% price drop to count a book
+_STEAM_US_SLUGS     = {     # Rule 2: at least one of these must appear
+    "bovada", "fanduel", "draftkings", "betonline", "mybookie",
+    "pointsbet", "betmgm", "caesars", "bet365",
+}
+_STEAM_PREMIUM_BOOKS = 7    # Rule 5: 7+ books → premium steam
+_STEAM_PREMIUM_US    = 2    # Rule 5: 2+ US books required for premium
+
+
 def detect_steam_moves_for_game(
     game_id: str,
     home: str,
@@ -7966,16 +7977,21 @@ def detect_steam_moves_for_game(
     new_map: dict,
 ) -> "list[dict]":
     """
-    Steam move: 3+ books all move the same direction (≥ 0.05) in one scan.
+    Strict steam detection:
+      Rule 1 — 5+ books must all move the same direction (was 3)
+      Rule 2 — at least 1 US book (Bovada/FanDuel/DraftKings/BetOnline/MyBookie)
+      Rule 3 — odds must DROP (money in = shorter price); rising odds → skip
+      Rule 4 — each book must show ≥ 4% price move
+      Rule 5 — 7+ books incl. 2+ US → flag as PREMIUM steam
     Also writes per-book odds into new_map for the next scan comparison.
     """
     results = []
     for team in (home, away):
-        ups: list   = []
-        downs: list = []
+        downs: list = []   # books where this team's odds shortened ≥ 4%
+
         for bk in bookmakers:
-            slug    = bk["title"].lower().replace(" ", "_").replace(".", "")
-            bk_key  = f"{game_id}_{team}_{slug}"
+            slug      = bk["title"].lower().replace(" ", "_").replace(".", "")
+            bk_key    = f"{game_id}_{team}_{slug}"
             cur_price = None
             for m in bk.get("markets", []):
                 if m["key"] == "h2h":
@@ -7987,55 +8003,104 @@ def detect_steam_moves_for_game(
                 continue
             new_map[bk_key] = cur_price
             prev_price = prev_map.get(bk_key)
-            if prev_price is None:
+            if prev_price is None or prev_price <= 0:
                 continue
-            delta = cur_price - prev_price
-            if delta > 0.05:
-                ups.append(  {"book": bk["title"], "prev": prev_price, "now": cur_price})
-            elif delta < -0.05:
-                downs.append({"book": bk["title"], "prev": prev_price, "now": cur_price})
 
-        if len(ups) >= 3 or len(downs) >= 3:
-            steam_books = ups if len(ups) >= len(downs) else downs
-            direction   = "up" if len(ups) >= len(downs) else "down"
-            _steam_game_ids.add(game_id)   # Module P: mark for PREMIUM signals
-            results.append({
-                "match":     f"{home} vs {away}",
-                "team":      team,
-                "direction": direction,
-                "books":     steam_books,
-                "odds_from": steam_books[0]["prev"],
-                "odds_to":   steam_books[-1]["now"],
+            delta    = cur_price - prev_price
+            pct_move = abs(delta) / prev_price
+
+            # Rule 3: odds must DROP (money coming in = price shortens)
+            # Rule 4: minimum 4% move per book
+            if delta >= 0 or pct_move < _STEAM_MIN_PCT_MOVE:
+                continue
+
+            is_us = any(us in bk["title"].lower() for us in _STEAM_US_SLUGS)
+            downs.append({
+                "book":     bk["title"],
+                "prev":     prev_price,
+                "now":      cur_price,
+                "pct_move": round(pct_move * 100, 1),
+                "is_us":    is_us,
             })
+
+        # Rule 1: need 5+ qualifying books
+        if len(downs) < _STEAM_MIN_BOOKS:
+            continue
+
+        # Rule 2: at least one US book must be present
+        us_books = [b for b in downs if b["is_us"]]
+        if not us_books:
+            continue
+
+        # Rule 5: premium if 7+ books and 2+ US books
+        is_premium = (len(downs) >= _STEAM_PREMIUM_BOOKS
+                      and len(us_books) >= _STEAM_PREMIUM_US)
+
+        _steam_game_ids.add(game_id)   # Module P: mark for PREMIUM signals
+        avg_move = round(sum(b["pct_move"] for b in downs) / len(downs), 1)
+        results.append({
+            "match":      f"{home} vs {away}",
+            "team":       team,
+            "direction":  "down",
+            "books":      downs,
+            "n_us":       len(us_books),
+            "is_premium": is_premium,
+            "avg_move":   avg_move,
+            "odds_from":  downs[0]["prev"],
+            "odds_to":    downs[-1]["now"],
+        })
     return results
 
 
 def notify_steam_moves(steam_list: list):
-    """Send immediate urgent alert for each confirmed steam move."""
+    """Send immediate urgent alert for each confirmed steam move.
+    PREMIUM alert (💎) when 7+ books including 2+ US books."""
     for s in steam_list:
         home, away = s["match"].split(" vs ", 1)
         key = f"{home}_{away}_{s['team']}_steam"
         if not _should_alert(key, odds=s["odds_to"]):
             continue
-        arrow      = "▲" if s["direction"] == "up" else "▼"
-        book_names = ", ".join(b["book"] for b in s["books"][:4])
+
         n_books    = len(s["books"])
+        n_us       = s.get("n_us", 0)
+        avg_move   = s.get("avg_move", 0.0)
+        is_premium = s.get("is_premium", False)
+
+        all_names = ", ".join(b["book"] for b in s["books"][:5])
+        us_names  = ", ".join(b["book"] for b in s["books"] if b.get("is_us"))
+
+        if is_premium:
+            title    = f"💎 STEAM PREMIUM | {_es(s['team'])} | {s['match']}"
+            priority = "urgent"
+            badge    = "💎 STEAM PREMIUM — dinero institucional"
+            action   = "🟢 APOSTAR AHORA — múltiples US books confirman"
+        else:
+            title    = f"🚂 STEAM | {_es(s['team'])} | {s['match']}"
+            priority = "urgent"
+            badge    = "🚂 STEAM FUERTE — 5+ casas confirman"
+            action   = "🟢 APOSTAR — línea seguirá cayendo"
+
         body = (
             f"⚾ {s['match']}\n"
             f"{_DIV}\n"
-            f"📉 Línea movió: {s['odds_from']:.2f} → {s['odds_to']:.2f} {arrow}\n"
-            f"   en {book_names}\n"
-            f"   ({n_books} casas de apuestas en menos de 10 minutos)\n"
+            f"📉 Línea cayó: {s['odds_from']:.2f} → {s['odds_to']:.2f} ▼  "
+            f"(−{avg_move:.1f}% promedio)\n"
+            f"   {n_books} casas simultáneas en < 10 min\n"
+            f"   🇺🇸 US ({n_us}): {us_names or 'N/A'}\n"
+            f"   📋 Todas: {all_names}\n"
             f"\n"
+            f"{badge}\n"
             f"💎 Dinero serio entrando en {_es(s['team'])}\n"
             f"⭐ ACCIÓN: {_es(s['team'])} ML ahora\n"
-            f"💰 {s['odds_to']:.2f} — {s['books'][-1]['book']}\n"
+            f"💰 {s['odds_to']:.2f} — mejor precio actual\n"
             f"{_DIV3}\n"
-            f"🟢 APOSTAR AHORA — línea seguirá moviendo\n"
+            f"{action}\n"
             f"{_DIV2}"
         )
-        ntfy_post(f"🚂 STEAM | {_es(s['team'])} | {s['match']}", body, "urgent")
-        print(f"  🚂 Steam: {s['team']} en {s['match']} ({n_books} casas de apuestas)")
+        ntfy_post(title, body, priority)
+        badge_sym = "💎" if is_premium else "🚂"
+        print(f"  {badge_sym} Steam: {s['team']} en {s['match']} "
+              f"({n_books} casas, {n_us} US, −{avg_move:.1f}%)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PARLAY DETECTOR
