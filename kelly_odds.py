@@ -7603,6 +7603,14 @@ def build_daily_card(sport_key: str) -> str:
     parlay_candidates = [r for r in gems + values
                          if not r.get("claude_info", {}).get("vetoed")
                          and r.get("best_odds")]
+    # Deduplicate by match — never two legs from the same game
+    _seen_pc = set()
+    _deduped = []
+    for _r in parlay_candidates:
+        if _r["match"] not in _seen_pc:
+            _seen_pc.add(_r["match"])
+            _deduped.append(_r)
+    parlay_candidates = _deduped
     parlay_block = ""
     if len(parlay_candidates) >= 2:
         top_p  = parlay_candidates[:3]
@@ -8216,7 +8224,10 @@ def detect_and_notify_parlays(all_analyses: list):
     for i in range(len(eligible)):
         for j in range(i + 1, len(eligible)):
             p1, p2 = eligible[i], eligible[j]
-            if p1["game_id"] == p2["game_id"]:
+            # Block same-game legs: check both game_id AND match name
+            same_id    = p1["game_id"] and p1["game_id"] == p2["game_id"]
+            same_match = p1["match"]   == p2["match"]
+            if same_id or same_match:
                 continue
             if p1["bet_type"] != p2["bet_type"]:
                 continue
