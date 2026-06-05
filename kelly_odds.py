@@ -1165,6 +1165,17 @@ def notify_arbitrage(arbs):
         arb_key = f"{home}_{away}_arb"
         if not _should_alert(arb_key, edge=arb["profit_pct"]):
             continue
+
+        # ── All-risky filter: skip if every leg uses a risky book ──────────
+        if arb.get("legs") == 3:
+            all_books = [arb["book_a"], arb["book_b"], arb["book_c"]]
+        else:
+            all_books = [arb["book_a"], arb["book_b"]]
+        if all(_is_risky_book(b) for b in all_books):
+            print(f"  ⛔ ARB omitido — todos los libros riesgosos: {arb['match']}")
+            continue
+        # ───────────────────────────────────────────────────────────────────
+
         if i > 0:
             time.sleep(2)
         sport     = arb.get("sport", "")
@@ -1174,41 +1185,51 @@ def notify_arbitrage(arbs):
         pct       = arb["profit_pct"]
         game_time = arb.get("game_time", "")
         gt        = _fmt_smart_gt(game_time)
-        # ARB exception: always fires, but warn about far-out games
         arb_days  = _days_until(game_time)
         arb_timing_note = (f"⚠️ Partido en {int(arb_days)} días — verificar lineup\n"
                            if arb_days >= 3 else "")
 
         verdict = _verdict_line(pct)
 
+        # Tag each leg: ✅ safe, ⚠️ risky
+        tag_a = _arb_leg_tag(arb["book_a"])
+        tag_b = _arb_leg_tag(arb["book_b"])
+
         if arb.get("legs") == 3:
+            tag_c       = _arb_leg_tag(arb["book_c"])
             total_stake = round(arb["stake_a"] + arb["stake_b"] + arb["stake_c"], 2)
+            has_risky   = any(_is_risky_book(b) for b in [arb["book_a"], arb["book_b"], arb["book_c"]])
+            risky_note  = "⚠️ Un libro es riesgoso — apuesta sólo en los marcados ✅ si es posible\n" if has_risky else ""
             body = (
                 f"{emoji} {match}\n"
                 f"💰 Ganancia garantizada: ${profit} ({pct}%)\n"
                 f"{_DIV}\n"
-                f"🔵 ${arb['stake_a']:>8} → {arb['team_a']} @ {arb['odds_a']} — {arb['book_a']}\n"
-                f"🤝 ${arb['stake_b']:>8} → Empate @ {arb['odds_b']} — {arb['book_b']}\n"
-                f"🔴 ${arb['stake_c']:>8} → {arb['team_c']} @ {arb['odds_c']} — {arb['book_c']}\n"
+                f"🔵 ${arb['stake_a']:>8} → {arb['team_a']} @ {arb['odds_a']} — {arb['book_a']} {tag_a}\n"
+                f"🤝 ${arb['stake_b']:>8} → Empate @ {arb['odds_b']} — {arb['book_b']} {tag_b}\n"
+                f"🔴 ${arb['stake_c']:>8} → {arb['team_c']} @ {arb['odds_c']} — {arb['book_c']} {tag_c}\n"
                 f"{_DIV}\n"
                 f"💵 Total apostado: ${total_stake}\n"
                 f"⏰ {gt}\n"
                 f"{arb_timing_note}"
+                f"{risky_note}"
                 f"{verdict}\n"
                 f"{_DIV2}"
             )
         else:
             total_stake = round(arb["stake_a"] + arb["stake_b"], 2)
+            has_risky   = any(_is_risky_book(b) for b in [arb["book_a"], arb["book_b"]])
+            risky_note  = "⚠️ Un libro es riesgoso — apuesta sólo en los marcados ✅ si es posible\n" if has_risky else ""
             body = (
                 f"{emoji} {match}\n"
                 f"💰 Ganancia garantizada: ${profit} ({pct}%)\n"
                 f"{_DIV}\n"
-                f"🔵 ${arb['stake_a']:>8} → {arb['team_a']} @ {arb['odds_a']} — {arb['book_a']}\n"
-                f"🔴 ${arb['stake_b']:>8} → {arb['team_b']} @ {arb['odds_b']} — {arb['book_b']}\n"
+                f"🔵 ${arb['stake_a']:>8} → {arb['team_a']} @ {arb['odds_a']} — {arb['book_a']} {tag_a}\n"
+                f"🔴 ${arb['stake_b']:>8} → {arb['team_b']} @ {arb['odds_b']} — {arb['book_b']} {tag_b}\n"
                 f"{_DIV}\n"
                 f"💵 Total apostado: ${total_stake}\n"
                 f"⏰ {gt}\n"
                 f"{arb_timing_note}"
+                f"{risky_note}"
                 f"{verdict}\n"
                 f"{_DIV2}"
             )
@@ -2930,12 +2951,14 @@ def notify_sharp_money(sharp_moves):
 
 # ── Module 3: book safety ─────────────────────────────────────────────────────
 SAFE_BOOKS = {
-    "bovada", "bodog", "betmgm", "fanduel", "draftkings", "mybookie",
-    "pointsbet", "caesars", "unibet", "williamhill", "william hill",
+    "bovada", "bodog", "fanduel", "draftkings", "mybookie",
+    "pointsbet", "caesars", "betmgm", "unibet",
+    "williamhill", "william hill", "pinnacle",
     "betonline.ag", "betonline",
 }
 RISKY_BOOKS = {
     "1xbet", "gtbets", "betfred", "smarkets", "ladbrokes", "betway",
+    "everygame", "betvictor", "cloudbet", "stake",
 }
 
 def _book_warning(bookmaker):
@@ -2944,6 +2967,24 @@ def _book_warning(bookmaker):
     if any(r in bk for r in RISKY_BOOKS):
         return ("\n⚠️ LIBRO RIESGOSO — limitan cuentas ganadoras. "
                 "Busca línea similar en Bovada o BetOnline")
+    return ""
+
+def _is_risky_book(book: str) -> bool:
+    """True when the book name matches any RISKY_BOOKS entry."""
+    bk = (book or "").lower()
+    return any(r in bk for r in RISKY_BOOKS)
+
+def _is_safe_book(book: str) -> bool:
+    """True when the book name matches any SAFE_BOOKS entry."""
+    bk = (book or "").lower()
+    return any(s in bk for s in SAFE_BOOKS)
+
+def _arb_leg_tag(book: str) -> str:
+    """Return ✅ for safe books, ⚠️ for risky books, empty for unknown."""
+    if _is_safe_book(book):
+        return "✅"
+    if _is_risky_book(book):
+        return "⚠️"
     return ""
 
 # ── Module 9: line shopping top-3 ─────────────────────────────────────────────
