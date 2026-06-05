@@ -3,7 +3,7 @@ BetBot Pro — Professional Multi-Module Sports Betting System
 Modules: Morning Report | Lineup Monitor | Math Models | Sharp Radar | Arb Scanner
 """
 import requests, time, csv, os, json, math
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import pytz
 
 try:
@@ -39,12 +39,55 @@ PREFERRED_BOOKS = {"bovada", "bodog"}
 # Target arb pair — both US-accessible from same regions
 ARB_BOOK_PAIR   = {"bovada", "bodog", "betonline.ag"}
 
+OPENWEATHER_KEY   = os.environ.get("OPENWEATHER_API_KEY", "")
+BANKROLL_LOG_FILE = "bankroll_log.csv"
+CLV_LOG_FILE      = "clv_log.csv"
+PENDING_BETS_FILE = "pending_bets.json"
+
+# MLB ballpark coordinates — used for wind fetching (home team → (city, lat, lon))
+MLB_PARK_CITIES = {
+    "Arizona Diamondbacks":   ("Phoenix",       33.4455, -112.0667),
+    "Atlanta Braves":         ("Atlanta",        33.8907,  -84.4677),
+    "Baltimore Orioles":      ("Baltimore",      39.2838,  -76.6217),
+    "Boston Red Sox":         ("Boston",         42.3467,  -71.0972),
+    "Chicago Cubs":           ("Chicago",        41.9484,  -87.6553),
+    "Chicago White Sox":      ("Chicago",        41.8299,  -87.6338),
+    "Cincinnati Reds":        ("Cincinnati",     39.0973,  -84.5082),
+    "Cleveland Guardians":    ("Cleveland",      41.4962,  -81.6852),
+    "Colorado Rockies":       ("Denver",         39.7559, -104.9942),
+    "Detroit Tigers":         ("Detroit",        42.3390,  -83.0485),
+    "Houston Astros":         ("Houston",        29.7573,  -95.3555),
+    "Kansas City Royals":     ("Kansas City",    39.0517,  -94.4803),
+    "Los Angeles Angels":     ("Anaheim",        33.8003, -117.8827),
+    "Los Angeles Dodgers":    ("Los Angeles",    34.0739, -118.2400),
+    "Miami Marlins":          ("Miami",          25.7781,  -80.2197),
+    "Milwaukee Brewers":      ("Milwaukee",      43.0280,  -87.9712),
+    "Minnesota Twins":        ("Minneapolis",    44.9817,  -93.2776),
+    "New York Mets":          ("New York",       40.7571,  -73.8458),
+    "New York Yankees":       ("New York",       40.8296,  -73.9262),
+    "Oakland Athletics":      ("Oakland",        37.7516, -122.2005),
+    "Philadelphia Phillies":  ("Philadelphia",   39.9061,  -75.1665),
+    "Pittsburgh Pirates":     ("Pittsburgh",     40.4469,  -80.0057),
+    "San Diego Padres":       ("San Diego",      32.7076, -117.1570),
+    "San Francisco Giants":   ("San Francisco",  37.7786, -122.3893),
+    "Seattle Mariners":       ("Seattle",        47.5914, -122.3325),
+    "St. Louis Cardinals":    ("St. Louis",      38.6226,  -90.1928),
+    "Tampa Bay Rays":         ("Tampa",          27.7683,  -82.6534),
+    "Texas Rangers":          ("Arlington",      32.7512,  -97.0832),
+    "Toronto Blue Jays":      ("Toronto",        43.6414,  -79.3894),
+    "Washington Nationals":   ("Washington DC",  38.8730,  -77.0074),
+}
+
 # ── RUNTIME STATE ─────────────────────────────────────────────────────────────
 alerted_bets:        set  = set()
 daily_bets:          list = []
 last_reset:          date = datetime.now(CDT).date()
 last_morning_report: date = date(2000, 1, 1)   # force first run at 8 AM
 lineup_scan_counter: int  = 0                  # increments each main scan
+
+_pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
+_wc_form_cache: dict = {}   # (team_name, date_str) → {goals_for, goals_against, matches}
+_weather_cache: dict = {}   # "lat,lon" → {speed, deg, label, fetched_at}
 
 # ── CORE HELPERS ──────────────────────────────────────────────────────────────
 
@@ -670,6 +713,212 @@ def fetch_team_run_stats(team_name):
     except Exception:
         return None
 
+# ── IMPROVEMENT 1: MLB STARTING PITCHER ERA ───────────────────────────────────
+
+def _fetch_pitcher_era_by_id(player_id):
+    """Season ERA for a pitcher by MLB player ID. Returns float (default 4.50)."""
+    try:
+        if HAS_STATSAPI:
+            data = statsapi.player_stat_data(player_id, group='pitching', type='season')
+            splits = data.get('stats', [])
+            if splits:
+                return float(splits[0].get('stats', {}).get('era', 4.50))
+        else:
+            d = _mlb_rest(f'/people/{player_id}/stats',
+                          {'stats': 'season', 'group': 'pitching', 'season': MLB_YEAR})
+            sp = (d.get('stats', [{}]) or [{}])[0].get('splits', [{}]) or [{}]
+            return float(sp[-1].get('stat', {}).get('era', 4.50))
+    except Exception:
+        pass
+    return 4.50
+
+def fetch_probable_pitchers_today():
+    """
+    Fetch today's probable starters from MLB Stats API.
+    Returns dict keyed by "<home_team>|<away_team>" (lowercased) →
+      {home_era, away_era, home_name, away_name}
+    Cached per calendar day.
+    """
+    today_str = datetime.now(CDT).strftime('%Y-%m-%d')
+    if today_str in _pitcher_cache:
+        return _pitcher_cache[today_str]
+
+    result = {}
+    try:
+        data = _mlb_rest('/schedule', {
+            'sportId': 1,
+            'date': today_str,
+            'hydrate': 'probablePitcher,teams',
+        })
+        for date_entry in data.get('dates', []):
+            for g in date_entry.get('games', []):
+                teams   = g.get('teams', {})
+                home_t  = teams.get('home', {})
+                away_t  = teams.get('away', {})
+                home_tn = home_t.get('team', {}).get('name', '')
+                away_tn = away_t.get('team', {}).get('name', '')
+                home_p  = home_t.get('probablePitcher', {})
+                away_p  = away_t.get('probablePitcher', {})
+                h_era   = _fetch_pitcher_era_by_id(home_p['id']) if home_p.get('id') else 4.50
+                a_era   = _fetch_pitcher_era_by_id(away_p['id']) if away_p.get('id') else 4.50
+                key     = f"{home_tn.lower()}|{away_tn.lower()}"
+                result[key] = {
+                    'home_era':  round(h_era, 2),
+                    'away_era':  round(a_era, 2),
+                    'home_name': home_p.get('fullName', 'TBD'),
+                    'away_name': away_p.get('fullName', 'TBD'),
+                }
+    except Exception as e:
+        print(f'  ⚠️  Pitcher fetch error: {e}')
+
+    _pitcher_cache[today_str] = result
+    return result
+
+def _lookup_pitcher_data(home, away, pitchers):
+    """
+    Fuzzy lookup in the pitchers dict using team name substrings.
+    Returns pitcher dict or empty dict.
+    """
+    for key, val in pitchers.items():
+        h_key, a_key = key.split('|', 1)
+        if (any(w in h_key for w in home.lower().split()) and
+                any(w in a_key for w in away.lower().split())):
+            return val
+    return {}
+
+def pitcher_run_adjustment(home_era, away_era):
+    """
+    Signed run-total adjustment from starter quality.
+    Elite starter (ERA < 3.50): -0.6 runs each
+    Slightly above avg (ERA < 4.00): -0.2 runs
+    Slightly below avg (ERA > 4.50): +0.2 runs
+    Poor starter (ERA > 5.00): +0.6 runs each
+    """
+    adj = 0.0
+    for era in (home_era, away_era):
+        if era < 3.50:
+            adj -= 0.6
+        elif era < 4.00:
+            adj -= 0.2
+        elif era > 5.00:
+            adj += 0.6
+        elif era > 4.50:
+            adj += 0.2
+    return round(adj, 1)
+
+# ── IMPROVEMENT 2: WORLD CUP 2026 LIVE FORM ───────────────────────────────────
+
+def fetch_wc_team_form(team_name):
+    """
+    Fetch last ≤5 completed WC matches for a team from ESPN's free API.
+    Returns {'goals_for': float, 'goals_against': float, 'matches': int} or None.
+    Cached per team per calendar day.
+    """
+    today_str = datetime.now(CDT).strftime('%Y-%m-%d')
+    ck = (team_name.lower(), today_str)
+    if ck in _wc_form_cache:
+        return _wc_form_cache[ck]
+
+    goals_for:     list = []
+    goals_against: list = []
+
+    try:
+        for days_back in range(1, 20):
+            if len(goals_for) >= 5:
+                break
+            dt = (datetime.now(CDT) - timedelta(days=days_back)).strftime('%Y%m%d')
+            url = (f'https://site.api.espn.com/apis/site/v2/sports/'
+                   f'soccer/fifa.world/scoreboard?dates={dt}')
+            resp = requests.get(url, timeout=8)
+            if resp.status_code != 200:
+                continue
+            for event in resp.json().get('events', []):
+                comp       = event.get('competitions', [{}])[0]
+                completed  = comp.get('status', {}).get('type', {}).get('completed', False)
+                if not completed:
+                    continue
+                competitors = comp.get('competitors', [])
+                for c in competitors:
+                    cname = c.get('team', {}).get('displayName', '')
+                    if (team_name.lower() not in cname.lower() and
+                            cname.lower() not in team_name.lower()):
+                        continue
+                    opp = next((x for x in competitors if x is not c), {})
+                    goals_for.append(int(c.get('score', 0)))
+                    goals_against.append(int(opp.get('score', 0)))
+                    break   # found this team in this match
+    except Exception:
+        pass
+
+    if not goals_for:
+        _wc_form_cache[ck] = None
+        return None
+
+    res = {
+        'goals_for':     round(sum(goals_for) / len(goals_for), 2),
+        'goals_against': round(sum(goals_against) / len(goals_against), 2),
+        'matches':       len(goals_for),
+    }
+    _wc_form_cache[ck] = res
+    return res
+
+# ── IMPROVEMENT 5: MLB WEATHER / WIND ─────────────────────────────────────────
+
+def fetch_wind(lat, lon):
+    """
+    Current wind from OpenWeatherMap (imperial units).
+    Cached 30 min per location. Returns dict or None.
+    """
+    if not OPENWEATHER_KEY:
+        return None
+    city_key = f"{lat},{lon}"
+    cached   = _weather_cache.get(city_key)
+    if cached:
+        age_min = (datetime.now(pytz.utc) - cached['fetched_at']).total_seconds() / 60
+        if age_min < 30:
+            return cached
+    try:
+        r = requests.get(
+            'https://api.openweathermap.org/data/2.5/weather',
+            params={'lat': lat, 'lon': lon, 'appid': OPENWEATHER_KEY, 'units': 'imperial'},
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        w     = r.json().get('wind', {})
+        speed = round(float(w.get('speed', 0)), 1)
+        deg   = float(w.get('deg', 0))
+        # Wind direction convention: degrees = direction wind is COMING FROM
+        # OUT = blowing from west (toward east / outfield in most parks)
+        # IN  = blowing from east (toward west / home plate)
+        if 225 <= deg <= 315:
+            label = 'OUT'
+        elif 45 <= deg <= 135:
+            label = 'IN'
+        else:
+            label = 'CROSS'
+        result = {'speed': speed, 'deg': deg, 'label': label,
+                  'fetched_at': datetime.now(pytz.utc)}
+        _weather_cache[city_key] = result
+        return result
+    except Exception:
+        return None
+
+def wind_run_adj(wind):
+    """
+    Return (signed_adjustment: float, description: str).
+    Only acts when speed > 15 mph and direction is OUT or IN.
+    """
+    if wind is None or wind['speed'] <= 15:
+        return 0.0, ''
+    lbl = wind['label']
+    spd = wind['speed']
+    if lbl == 'OUT':
+        return +0.8, f"Wind: {spd}mph OUT → +0.8 runs"
+    if lbl == 'IN':
+        return -0.8, f"Wind: {spd}mph IN  → -0.8 runs"
+    return 0.0, f"Wind: {spd}mph CROSS → no adj"
+
 def get_book_total(game):
     """
     Extract totals line + odds from a game's bookmaker list.
@@ -703,8 +952,11 @@ def analyze_totals(games, sport_key):
     edge_unit = "runs" if is_mlb else "goals"
     total_bets = []
 
+    # Improvement 1: pre-fetch all probable pitchers once per scan (MLB only)
+    pitchers = fetch_probable_pitchers_today() if is_mlb else {}
+
     for g in games:
-        game_id  = g.get("id", "")
+        game_id    = g.get("id", "")
         home, away = g["home_team"], g["away_team"]
         commence   = g.get("commence_time", "")
 
@@ -723,17 +975,60 @@ def analyze_totals(games, sport_key):
             if h is None or a is None:
                 continue
             LEAGUE_AVG = 4.5
-            home_exp  = h["rs_pg"] * (a["ra_pg"] / LEAGUE_AVG)
-            away_exp  = a["rs_pg"] * (h["ra_pg"] / LEAGUE_AVG)
-            park      = MLB_PARK_FACTORS.get(home, 1.0)
-            our_line  = round((home_exp + away_exp) * park, 1)
+            home_exp   = h["rs_pg"] * (a["ra_pg"] / LEAGUE_AVG)
+            away_exp   = a["rs_pg"] * (h["ra_pg"] / LEAGUE_AVG)
+            park       = MLB_PARK_FACTORS.get(home, 1.0)
+            base_line  = (home_exp + away_exp) * park
+
+            # Improvement 1: starting pitcher ERA adjustment
+            p_data    = _lookup_pitcher_data(home, away, pitchers)
+            h_era     = p_data.get("home_era", 4.50)
+            a_era     = p_data.get("away_era", 4.50)
+            h_pname   = p_data.get("home_name", "TBD")
+            a_pname   = p_data.get("away_name", "TBD")
+            pitch_adj = pitcher_run_adjustment(h_era, a_era)
+
+            # Improvement 5: wind adjustment
+            park_city      = MLB_PARK_CITIES.get(home)
+            wind           = fetch_wind(park_city[1], park_city[2]) if park_city else None
+            w_adj, w_label = wind_run_adj(wind)
+
+            our_line = round(base_line + pitch_adj + w_adj, 1)
+            extra = {
+                "pitcher_home": f"{h_pname} (ERA {h_era:.2f})",
+                "pitcher_away": f"{a_pname} (ERA {a_era:.2f})",
+                "pitch_adj":    pitch_adj,
+                "wind_info":    w_label or "Wind: N/A",
+                "form_home":    "",
+                "form_away":    "",
+            }
+
         else:
-            # Soccer: Poisson with ELO-adjusted averages
-            elo_h  = _elo_ratings.get(home, 1500)
-            elo_a  = _elo_ratings.get(away, 1500)
-            adj_h  = 1.35 * (1 + (elo_h - 1500) / 4000)
-            adj_a  = 1.25 * (1 + (elo_a - 1500) / 4000)
-            our_line = round(adj_h + adj_a, 2)
+            # Improvement 2: World Cup 2026 — 60% live tournament form + 40% ELO
+            elo_h      = _elo_ratings.get(home, 1500)
+            elo_a      = _elo_ratings.get(away, 1500)
+            elo_base_h = 1.35 * (1 + (elo_h - 1500) / 4000)
+            elo_base_a = 1.25 * (1 + (elo_a - 1500) / 4000)
+
+            form_h = fetch_wc_team_form(home)
+            form_a = fetch_wc_team_form(away)
+
+            blend_h = (0.6 * form_h["goals_for"] + 0.4 * elo_base_h) if form_h else elo_base_h
+            blend_a = (0.6 * form_a["goals_for"] + 0.4 * elo_base_a) if form_a else elo_base_a
+
+            our_line    = round(blend_h + blend_a, 2)
+            form_note_h = (f"{form_h['goals_for']:.1f} gpg ({form_h['matches']} WC)"
+                           if form_h else "ELO only")
+            form_note_a = (f"{form_a['goals_for']:.1f} gpg ({form_a['matches']} WC)"
+                           if form_a else "ELO only")
+            extra = {
+                "form_home":    form_note_h,
+                "form_away":    form_note_a,
+                "pitcher_home": "",
+                "pitcher_away": "",
+                "pitch_adj":    0.0,
+                "wind_info":    "",
+            }
 
         diff = our_line - book_line
         if abs(diff) < threshold:
@@ -752,31 +1047,32 @@ def analyze_totals(games, sport_key):
 
         conf = "HIGH" if edge_val >= threshold * 2 else "MEDIUM"
         total_bets.append({
-            "match":       f"{home} vs {away}",
-            "team":        bet_side,
-            "side":        str(book_line),
-            "odds":        bet_odds,
-            "edge":        edge_val,
-            "stake":       r["stake"],
-            "kelly_pct":   r["kelly_pct"],
-            "confidence":  conf,
-            "time":        commence[:16],
-            "line_moved":  False,
-            "line_dir":    "",
-            "line_delta":  0.0,
-            "game_id":     game_id,
-            "bookmaker":   bookmaker,
-            "market_type": "totals",
+            "match":        f"{home} vs {away}",
+            "team":         bet_side,
+            "side":         str(book_line),
+            "odds":         bet_odds,
+            "edge":         edge_val,
+            "stake":        r["stake"],
+            "kelly_pct":    r["kelly_pct"],
+            "confidence":   conf,
+            "time":         commence[:16],
+            "line_moved":   False,
+            "line_dir":     "",
+            "line_delta":   0.0,
+            "game_id":      game_id,
+            "bookmaker":    bookmaker,
+            "market_type":  "totals",
             "closing_edge": "",
-            "ev":          0,
-            "roi":         0,
-            "value_pct":   0,
-            "elo_prob":    0,
-            "bovada_odds": None,
-            "book_line":   book_line,
-            "our_line":    our_line,
-            "edge_unit":   edge_unit,
-            "sport":       sport_key.split("_", 1)[-1].upper(),
+            "ev":           0,
+            "roi":          0,
+            "value_pct":    0,
+            "elo_prob":     0,
+            "bovada_odds":  None,
+            "book_line":    book_line,
+            "our_line":     our_line,
+            "edge_unit":    edge_unit,
+            "sport":        sport_key.split("_", 1)[-1].upper(),
+            **extra,
         })
 
     return total_bets
@@ -787,19 +1083,270 @@ def notify_totals(total_bets):
         key = f"{b['game_id']}|totals|{b['team']}"
         if key in alerted_bets:
             continue
+
+        is_mlb = b.get("edge_unit") == "runs"
+        if is_mlb:
+            extra_lines = (
+                f"Pitchers:  {b.get('pitcher_home','TBD')} vs {b.get('pitcher_away','TBD')}\n"
+                f"Pitch Adj: {b.get('pitch_adj', 0.0):+.1f} runs\n"
+                f"{b.get('wind_info', '')}"
+            ).rstrip()
+        else:
+            extra_lines = (
+                f"Home form: {b.get('form_home','ELO only')}\n"
+                f"Away form: {b.get('form_away','ELO only')}"
+            )
+
         body = (
             f"{b['team']} {b['side']} | {b['match']}\n"
             f"Our Line:  {b['our_line']} {b['edge_unit']}\n"
             f"Book Line: {b['side']} {b['edge_unit']}\n"
             f"Edge:      {b['edge']} {b['edge_unit']}\n"
             f"Odds:      {b['odds']} | Stake: ${b['stake']}\n"
-            f"Confidence:{b['confidence']} | Book: {b['bookmaker']}"
+            f"Confidence:{b['confidence']} | Book: {b['bookmaker']}\n"
+            f"{extra_lines}"
         )
         priority = "high" if b["confidence"] == "HIGH" else "default"
         ntfy_post(f"{b['team']} {b['side']} | {b['match']}", body, priority)
         alerted_bets.add(key)
+        save_pending_bet(b)   # Improvement 3: CLV tracking
         print(f"    🎯 {b['team']} {b['side']} {b['match']} | "
               f"Our:{b['our_line']} | Edge:{b['edge']} {b['edge_unit']}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# IMPROVEMENT 3: CLV (CLOSING LINE VALUE) TRACKING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def save_pending_bet(bet):
+    """Persist an alerted totals bet to pending_bets.json for CLV tracking."""
+    pending = []
+    if os.path.exists(PENDING_BETS_FILE):
+        try:
+            with open(PENDING_BETS_FILE) as f:
+                pending = json.load(f)
+        except Exception:
+            pass
+    pending.append({
+        'game_id':    bet.get('game_id', ''),
+        'match':      bet.get('match', ''),
+        'sport':      bet.get('sport', ''),
+        'market_type': bet.get('market_type', 'totals'),
+        'bet_side':   bet.get('team', ''),
+        'book_line':  bet.get('book_line', ''),
+        'alert_odds': bet.get('odds', ''),
+        'alert_time': datetime.now(CDT).strftime('%Y-%m-%d %H:%M CDT'),
+        'game_time':  bet.get('time', ''),
+    })
+    try:
+        with open(PENDING_BETS_FILE, 'w') as f:
+            json.dump(pending, f, indent=2)
+    except Exception:
+        pass
+
+def check_closing_lines(current_games_by_sport):
+    """
+    For each pending totals bet whose game starts in ≤5 min, fetch the live
+    book total and compute CLV = alert_line − closing_line (positive = value).
+    Appends to clv_log.csv; removes closed bets from pending_bets.json.
+    """
+    if not os.path.exists(PENDING_BETS_FILE):
+        return
+    try:
+        with open(PENDING_BETS_FILE) as f:
+            pending = json.load(f)
+    except Exception:
+        return
+
+    remaining  = []
+    clv_rows   = []
+
+    for bet in pending:
+        gt_raw = bet.get('game_time', '')
+        if not gt_raw:
+            remaining.append(bet)
+            continue
+
+        # Parse game time (ISO or truncated)
+        gt = None
+        for fmt in ('%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M CDT'):
+            try:
+                parsed = datetime.strptime(gt_raw, fmt)
+                if fmt.endswith('Z'):
+                    gt = parsed.replace(tzinfo=pytz.utc).astimezone(CDT)
+                elif fmt.endswith('CDT'):
+                    gt = CDT.localize(parsed)
+                else:
+                    gt = CDT.localize(parsed)
+                break
+            except Exception:
+                pass
+
+        if gt is None:
+            remaining.append(bet)
+            continue
+
+        mins_to_game = (gt - datetime.now(CDT)).total_seconds() / 60
+
+        if mins_to_game > 5:
+            remaining.append(bet)   # not time yet
+            continue
+        if mins_to_game < -90:
+            continue                # game long past — drop silently
+
+        # Find the live book total for this game
+        sport_key = next(
+            (sk for sk in SPORT_KEYS
+             if bet.get('sport', '').lower() in sk.lower()),
+            None,
+        )
+        games = current_games_by_sport.get(sport_key, [])
+        closing_line = None
+        for g in games:
+            name = f"{g['home_team']} vs {g['away_team']}"
+            if bet['match'].lower() == name.lower():
+                bd = get_book_total(g)
+                if bd:
+                    closing_line = bd[0]
+                break
+
+        if closing_line is None:
+            remaining.append(bet)
+            continue
+
+        try:
+            al = float(bet.get('book_line', closing_line))
+            # CLV for totals: positive means the line moved in our favour
+            clv = (al - closing_line) if bet.get('bet_side') == 'UNDER' \
+                  else (closing_line - al)
+        except Exception:
+            clv = None
+
+        clv_rows.append({
+            'alert_time':   bet.get('alert_time', ''),
+            'clv_time':     datetime.now(CDT).strftime('%Y-%m-%d %H:%M CDT'),
+            'match':        bet.get('match', ''),
+            'sport':        bet.get('sport', ''),
+            'market_type':  bet.get('market_type', 'totals'),
+            'bet_side':     bet.get('bet_side', ''),
+            'book_line':    bet.get('book_line', ''),
+            'alert_odds':   bet.get('alert_odds', ''),
+            'closing_line': closing_line,
+            'clv':          round(clv, 2) if clv is not None else '',
+        })
+
+    if clv_rows:
+        clv_fields = ['alert_time', 'clv_time', 'match', 'sport', 'market_type',
+                      'bet_side', 'book_line', 'alert_odds', 'closing_line', 'clv']
+        exists = os.path.exists(CLV_LOG_FILE)
+        with open(CLV_LOG_FILE, 'a', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=clv_fields, extrasaction='ignore')
+            if not exists:
+                w.writeheader()
+            w.writerows(clv_rows)
+        print(f"  📊 CLV logged for {len(clv_rows)} closing bet(s) → {CLV_LOG_FILE}")
+
+    try:
+        with open(PENDING_BETS_FILE, 'w') as f:
+            json.dump(remaining, f, indent=2)
+    except Exception:
+        pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# IMPROVEMENT 4: BANKROLL & P&L DASHBOARD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_bankroll_state():
+    """Read bankroll_log.csv and return current state dict."""
+    bets = []
+    if os.path.exists(BANKROLL_LOG_FILE):
+        try:
+            with open(BANKROLL_LOG_FILE, newline='') as f:
+                bets = list(csv.DictReader(f))
+        except Exception:
+            pass
+    current = BANKROLL
+    if bets:
+        try:
+            current = float(bets[-1].get('running_bankroll', BANKROLL))
+        except Exception:
+            pass
+    return {'current': current, 'bets': bets}
+
+def print_dashboard():
+    """Print P&L dashboard to stdout on every scan cycle."""
+    state   = load_bankroll_state()
+    bets    = state['bets']
+    current = state['current']
+
+    settled = [b for b in bets if b.get('result') in ('W', 'L', 'P')]
+    wins    = [b for b in settled if b.get('result') == 'W']
+    losses  = [b for b in settled if b.get('result') == 'L']
+    pushes  = [b for b in settled if b.get('result') == 'P']
+
+    roi      = (current - BANKROLL) / BANKROLL * 100 if BANKROLL else 0
+    win_rate = len(wins) / len(settled) * 100 if settled else 0.0
+
+    # Peak-to-trough drawdown
+    try:
+        bankrolls = [BANKROLL] + [float(b.get('running_bankroll', BANKROLL)) for b in bets]
+        peak      = max(bankrolls)
+        drawdown  = (peak - current) / peak * 100 if peak else 0.0
+    except Exception:
+        drawdown = 0.0
+
+    # Per-sport ROI
+    sport_pnl: dict = {}
+    for b in settled:
+        sp = b.get('sport', 'unknown')
+        try:
+            pnl   = float(b.get('profit_loss', 0))
+            stake = float(b.get('stake', 0))
+            sport_pnl.setdefault(sp, {'pnl': 0.0, 'stake': 0.0})
+            sport_pnl[sp]['pnl']   += pnl
+            sport_pnl[sp]['stake'] += stake
+        except Exception:
+            pass
+    sport_roi = {
+        sp: (v['pnl'] / v['stake'] * 100 if v['stake'] else 0.0)
+        for sp, v in sport_pnl.items()
+    }
+    best_sp  = max(sport_roi, key=sport_roi.get) if sport_roi else None
+    worst_sp = min(sport_roi, key=sport_roi.get) if sport_roi else None
+
+    br_pending = len(bets) - len(settled)
+    print(f"\n  {'─'*44}")
+    print(f"  💼 Bankroll: ${current:,.2f}   ROI: {roi:+.1f}%")
+    print(f"  📈 W {len(wins)} / L {len(losses)} / P {len(pushes)} / Pending {br_pending}"
+          f"   Win Rate: {win_rate:.1f}%   Drawdown: {drawdown:.1f}%")
+    if best_sp and worst_sp:
+        print(f"  🏆 Best:  {best_sp} ({sport_roi[best_sp]:+.1f}%)"
+              f"   Worst: {worst_sp} ({sport_roi[worst_sp]:+.1f}%)")
+    print(f"  {'─'*44}")
+
+def log_bankroll_entry(sport, match, market_type, stake, result, profit_loss):
+    """
+    Append one settled bet to bankroll_log.csv.
+    Call this externally (or from a future results-tracker) to record outcomes.
+    """
+    state   = load_bankroll_state()
+    current = state['current'] + float(profit_loss)
+    exists  = os.path.exists(BANKROLL_LOG_FILE)
+    fields  = ['date', 'sport', 'match', 'market_type', 'stake',
+               'result', 'profit_loss', 'running_bankroll']
+    with open(BANKROLL_LOG_FILE, 'a', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        if not exists:
+            w.writeheader()
+        w.writerow({
+            'date':             datetime.now(CDT).strftime('%Y-%m-%d %H:%M CDT'),
+            'sport':            sport,
+            'match':            match,
+            'market_type':      market_type,
+            'stake':            round(float(stake), 2),
+            'result':           result,
+            'profit_loss':      round(float(profit_loss), 2),
+            'running_bankroll': round(current, 2),
+        })
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE — ODDS FETCHING & LINE MOVEMENT
@@ -1055,6 +1602,12 @@ FIELDNAMES = [
     "book_line", "our_line", "edge_unit",
     "line_moved", "line_dir", "line_delta",
     "game_time", "result", "profit_loss",
+    # Improvement 1 & 5: pitcher + weather columns
+    "pitcher_home", "pitcher_away", "pitch_adj", "wind_info",
+    # Improvement 2: WC form columns
+    "form_home", "form_away",
+    # Improvement 3: CLV columns
+    "closing_line", "clv",
 ]
 
 def log_bets(bets, sport_key):
@@ -1091,6 +1644,17 @@ def log_bets(bets, sport_key):
                 "game_time":    b["time"],
                 "result":       "",
                 "profit_loss":  "",
+                # Improvement 1 & 5
+                "pitcher_home": b.get("pitcher_home", ""),
+                "pitcher_away": b.get("pitcher_away", ""),
+                "pitch_adj":    b.get("pitch_adj", ""),
+                "wind_info":    b.get("wind_info", ""),
+                # Improvement 2
+                "form_home":    b.get("form_home", ""),
+                "form_away":    b.get("form_away", ""),
+                # Improvement 3 — filled later by check_closing_lines
+                "closing_line": "",
+                "clv":          "",
             })
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1137,7 +1701,13 @@ def run_scan():
     all_sharp  = []
     all_arbs   = []
     all_totals = []
-    now_month = datetime.now(CDT).month
+    now_month  = datetime.now(CDT).month
+
+    # Improvement 4: bankroll dashboard at top of every scan
+    print_dashboard()
+
+    # Collect live game dicts per sport for CLV lookup
+    current_games_by_sport: dict = {}
 
     for sport_key in SPORT_KEYS:
         if not is_in_season(sport_key):
@@ -1149,6 +1719,8 @@ def run_scan():
             if not games:
                 print(f"  ⚠️  {sport_key} — no data")
                 continue
+
+            current_games_by_sport[sport_key] = games   # for CLV check
 
             bets, sharp_moves = analyze(games, prev_map, new_map)
             total_bets = analyze_totals(games, sport_key)
@@ -1204,7 +1776,13 @@ def run_scan():
     if all_arbs:
         notify_arbitrage(all_arbs)
 
-    # Lineup check every 15 min (every 3rd 5-min scan)
+    # Improvement 3: check pending bets for closing lines / CLV
+    try:
+        check_closing_lines(current_games_by_sport)
+    except Exception as e:
+        print(f"  ⚠️  CLV check error: {e}")
+
+    # Lineup check every 15 min (every 3rd 10-min scan)
     lineup_scan_counter += 1
     if lineup_scan_counter >= 3:
         check_lineup_changes()
