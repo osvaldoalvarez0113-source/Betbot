@@ -1967,6 +1967,69 @@ def park_tendency_adj(home_team: str) -> "tuple[float, str]":
     return adj, note
 
 
+# ── DATA QUALITY / VALIDATION LAYER ─────────────────────────────────────────
+_data_quality:         dict = {}   # f"{team}_{date}" → {"verified": bool, "source": str}
+_espn_mlb_team_cache:  dict = {}   # team_name → ESPN team id (str)
+
+def _fetch_espn_mlb_team_id(team_name: str) -> "str | None":
+    """Resolve MLB team name → ESPN team id via ESPN teams API (cached daily)."""
+    ck = f"espn_id_{team_name}_{datetime.now(CDT).strftime('%Y-%m-%d')}"
+    if ck in _espn_mlb_team_cache:
+        return _espn_mlb_team_cache[ck]
+    try:
+        r = requests.get(
+            "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/teams",
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        sports = r.json().get("sports", [{}])[0]
+        teams  = sports.get("leagues", [{}])[0].get("teams", [])
+        tname_lower = team_name.lower()
+        for entry in teams:
+            t = entry.get("team", {})
+            if (tname_lower in t.get("displayName", "").lower() or
+                    tname_lower in t.get("shortDisplayName", "").lower()):
+                tid = str(t.get("id", ""))
+                _espn_mlb_team_cache[ck] = tid
+                return tid
+    except Exception:
+        pass
+    _espn_mlb_team_cache[ck] = None
+    return None
+
+
+def _fetch_espn_bullpen_era(team_name: str) -> "float | None":
+    """
+    Fetch pitching ERA from ESPN team statistics API.
+    Used as cross-validation source against MLB Stats API bullpen ERA.
+    Returns float ERA or None on failure.
+    """
+    tid = _fetch_espn_mlb_team_id(team_name)
+    if not tid:
+        return None
+    try:
+        r = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb"
+            f"/teams/{tid}/statistics",
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        for category in r.json().get("results", []):
+            cat_name = category.get("name", "").lower()
+            if "pitch" not in cat_name:
+                continue
+            for stat in category.get("stats", []):
+                if stat.get("name", "").upper() == "ERA":
+                    val = stat.get("value")
+                    if val is not None:
+                        return round(float(val), 2)
+    except Exception:
+        pass
+    return None
+
+
 _bullpen_era_cache: dict = {}
 
 def fetch_bullpen_era(team_name: str, starter_era: float = 4.20) -> "tuple[float, str]":
@@ -2054,6 +2117,30 @@ def fetch_bullpen_era(team_name: str, starter_era: float = 4.20) -> "tuple[float
         bullpen_era = round((total_er / total_ip) * 9, 2)
         bullpen_era = round(max(0.0, min(bullpen_era, 9.99)), 2)
 
+        # ── Validation 1: plausibility range check ────────────────────────
+        if not (2.00 <= bullpen_era <= 7.00):
+            print(f"  ⚠️  Bullpen ERA {_es(team_name)} fuera de rango: {bullpen_era} — dato no verificado")
+            _data_quality[ck] = {"verified": False, "source": "MLB API", "reason": "out_of_range"}
+            pend_note = (
+                f"⚾ Bullpen {_es(team_name)}: datos pendientes\n"
+                f"   ⚠️ Dato no verificado (ERA {bullpen_era:.2f} fuera de rango)"
+            )
+            result = (4.20, pend_note)   # safe fallback; 4.20 won't trigger >5.0 adj
+            _bullpen_era_cache[ck] = result
+            return result
+
+        # ── Validation 2: ESPN cross-check ────────────────────────────────
+        espn_era = _fetch_espn_bullpen_era(team_name)
+        if espn_era is not None and abs(bullpen_era - espn_era) > 0.50:
+            print(
+                f"  ⚠️  Discrepancia detectada {_es(team_name)}: "
+                f"MLB API={bullpen_era} | ESPN={espn_era} — usando ESPN"
+            )
+            bullpen_era = espn_era
+            _data_quality[ck] = {"verified": True, "source": "ESPN"}
+        else:
+            _data_quality[ck] = {"verified": True, "source": "MLB API"}
+
         if bullpen_era < 3.50:
             quality = "sólido ✅"
         elif bullpen_era < 4.50:
@@ -2063,6 +2150,7 @@ def fetch_bullpen_era(team_name: str, starter_era: float = 4.20) -> "tuple[float
         else:
             quality = "vulnerable 🔴"
 
+        source_tag = _data_quality[ck]["source"]
         note = f"⚾ Bullpen {_es(team_name)}: ERA {bullpen_era:.2f} {quality}"
         if bullpen_era > 5.0:
             note += (
@@ -2073,7 +2161,7 @@ def fetch_bullpen_era(team_name: str, starter_era: float = 4.20) -> "tuple[float
         result = (bullpen_era, note)
         _bullpen_era_cache[ck] = result
         print(f"  ⚾ Bullpen ERA {_es(team_name)}: {bullpen_era} "
-              f"({len(pitcher_ids)} pitchers, {total_ip:.1f} IP)")
+              f"[{source_tag}] ({len(pitcher_ids)} pitchers, {total_ip:.1f} IP)")
         return result
 
     except Exception as _be:
@@ -2190,6 +2278,7 @@ def analyze_totals(games, sport_key):
         book_line, over_odds, under_odds, bookmaker = book_data
 
         # ── Project our total ──────────────────────────────────────────────────
+        _data_unverified = False   # set True if any key stat fails validation
         if is_mlb:
             h = fetch_team_run_stats(home)
             a = fetch_team_run_stats(away)
@@ -2246,8 +2335,12 @@ def analyze_totals(games, sport_key):
                     _bera, _bnote = fetch_bullpen_era(_t, _sera)
                     if _bnote:
                         _bull_parts.append(_bnote)
-                    if _bera > 5.0:
+                    # Only use adjustment when data is verified (note has no "pendientes")
+                    _bull_verified = bool(_bnote) and "pendientes" not in _bnote
+                    if _bull_verified and _bera > 5.0:
                         _bull_adj += 0.4
+                    if not _bull_verified and _bnote:
+                        _data_unverified = True
                 except Exception:
                     pass
             our_line   = round(our_line + _bull_adj, 1)
@@ -2402,6 +2495,10 @@ def analyze_totals(games, sport_key):
             continue
 
         conf = "HIGH" if edge_val >= threshold * 2 else "MEDIUM"
+        # Cap to MEDIUM when key stats could not be verified
+        if _data_unverified and conf == "HIGH":
+            conf = "MEDIUM"
+            print(f"  ⚠️  Confianza cappada a MEDIA — datos sin verificar ({home} vs {away})")
 
         # ── Claude AI: validate totals pick ───────────────────────────────
         _tc_data = {
@@ -2450,7 +2547,8 @@ def analyze_totals(games, sport_key):
             "our_line":     our_line,
             "edge_unit":    edge_unit,
             "sport":        sport_key.split("_", 1)[-1].upper(),
-            "claude_intel": _tc_claude,
+            "claude_intel":  _tc_claude,
+            "data_verified": not _data_unverified,
             **extra,
         })
 
@@ -2532,7 +2630,9 @@ def notify_totals(total_bets):
                 f"{_claude_tot_blk}"
                 f"{_DIV}\n"
                 f"{action}\n"
-                f"{_DIV2}"
+                + ("✅ Datos verificados\n" if b.get("data_verified", True)
+                   else "⚠️ Verificar antes de apostar — algunos datos sin confirmar\n")
+                + f"{_DIV2}"
             )
             match_es_tot = f"{_es(home)} vs {_es(away)}"
             title    = f"⚾ TOTAL | {side} {line} | {match_es_tot}"
@@ -2599,7 +2699,9 @@ def notify_totals(total_bets):
                 + (f"\n{form_block}\n" if form_block else "")
                 + f"{_DIV}\n"
                 f"{action}\n"
-                f"{_DIV2}"
+                + ("✅ Datos verificados\n" if b.get("data_verified", True)
+                   else "⚠️ Verificar antes de apostar — algunos datos sin confirmar\n")
+                + f"{_DIV2}"
             )
             title    = f"{emoji} TOTAL | {side} {line} | {match_es_tot}"
             priority = "high" if is_high else "default"
@@ -3873,6 +3975,8 @@ def notify_game_analysis(analyses, sport_key):
             verdict = _verdict_line(best["ev_pct"], best["true_prob"])
 
         _claude_blk = _claude_block(a.get("claude_intel"))
+        _dq_line_a  = ("✅ Datos verificados\n" if not has_warning
+                       else "⚠️ Verificar antes de apostar — algunos datos sin confirmar\n")
         body = (
             f"{emoji} {match_es}\n"
             f"{action_line}\n"
@@ -3888,6 +3992,7 @@ def notify_game_analysis(analyses, sport_key):
             f"{high_ev_flag}"
             f"{_claude_blk}"
             f"{verdict}\n"
+            f"{_dq_line_a}"
             f"{_DIV2}"
         )
 
