@@ -113,11 +113,12 @@ MLB_PARK_CITIES = {
 }
 
 # ── RUNTIME STATE ─────────────────────────────────────────────────────────────
-alerted_bets:        set  = set()
-daily_bets:          list = []
-last_reset:          date = datetime.now(CDT).date()
-last_morning_report: date = date(2000, 1, 1)   # force first run at 8 AM
-lineup_scan_counter: int  = 0                  # increments each main scan
+alerted_bets:          set  = set()
+alerted_game_analysis: set  = set()
+daily_bets:            list = []
+last_reset:            date = datetime.now(CDT).date()
+last_morning_report:   date = date(2000, 1, 1)   # force first run at 8 AM
+lineup_scan_counter:   int  = 0                  # increments each main scan
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
 _wc_form_cache: dict = {}   # (team_name, date_str) → {goals_for, goals_against, matches}
@@ -1265,6 +1266,359 @@ def notify_totals(total_bets):
         print(f"    🎯 {side} {line} {b['match']} | Our:{b['our_line']} | Edge:{b['edge']} {unit}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MODULE 7 — FULL GAME ANALYSIS (SOCCER + MLB)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _extract_h2h_best(game):
+    """Best decimal odds per outcome name across all books. Returns {name: (price, book)}."""
+    best = {}
+    for bk in game.get("bookmakers", []):
+        for m in bk.get("markets", []):
+            if m["key"] == "h2h":
+                for o in m.get("outcomes", []):
+                    name, price = o["name"], o["price"]
+                    if name not in best or price > best[name][0]:
+                        best[name] = (price, bk["title"])
+    return best
+
+def _extract_spread_best(game):
+    """
+    Best decimal odds per team in spreads market (run line / handicap).
+    Returns {name: (point, price, book)}.
+    """
+    best = {}
+    for bk in game.get("bookmakers", []):
+        for m in bk.get("markets", []):
+            if m["key"] == "spreads":
+                for o in m.get("outcomes", []):
+                    name, price = o["name"], o["price"]
+                    point = float(o.get("point", 0))
+                    if name not in best or price > best[name][1]:
+                        best[name] = (point, price, bk["title"])
+    return best
+
+def poisson_runline_prob(home_exp, away_exp, home_spread, max_runs=15):
+    """
+    P(home covers run line) given home_spread (e.g. -1.5 = home must win by 2+).
+    Uses Poisson simulation over discrete score pairs.
+    """
+    p = 0.0
+    for i in range(max_runs + 1):
+        for j in range(max_runs + 1):
+            if i + home_spread > j:   # home covers: home_score + spread > away_score
+                p += poisson_prob(home_exp, i) * poisson_prob(away_exp, j)
+    return max(0.01, min(0.99, p))
+
+EV_MIN_PCT   = 3.0   # minimum EV% to include a bet in Full Game Analysis
+_RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
+
+def analyze_game_full(game, sport_key, prev_map=None):
+    """
+    Full per-game analysis across ML, Totals, and Spread/Handicap.
+    Returns result dict or None (if no bet reaches EV_MIN_PCT).
+    """
+    if prev_map is None:
+        prev_map = {}
+
+    is_mlb = "mlb" in sport_key
+
+    home, away = game["home_team"], game["away_team"]
+    game_id    = game.get("id", f"{home}|{away}")
+    commence   = game.get("commence_time", "")
+
+    if game_starts_soon(commence, 60):
+        return None
+
+    candidates = []   # {label, true_prob, odds, book, ev_pct, kelly_pct, stake, safest}
+    context    = {}
+
+    h2h_odds    = _extract_h2h_best(game)
+    spread_odds = _extract_spread_best(game)
+    totals_data = get_book_total(game)
+
+    # ── MLB ───────────────────────────────────────────────────────────────────
+    if is_mlb:
+        h_stats = fetch_team_run_stats(home)
+        a_stats = fetch_team_run_stats(away)
+        if h_stats is None or a_stats is None:
+            return None
+
+        LEAGUE_AVG = 4.5
+        park       = MLB_PARK_FACTORS.get(home, 1.0)
+        home_exp   = h_stats["rs_pg"] * (a_stats["ra_pg"] / LEAGUE_AVG) * park
+        away_exp   = a_stats["rs_pg"] * (h_stats["ra_pg"] / LEAGUE_AVG) * park
+
+        pitchers  = fetch_probable_pitchers_today()
+        p_data    = _lookup_pitcher_data(home, away, pitchers)
+        h_era     = p_data.get("home_era", 4.50)
+        a_era     = p_data.get("away_era", 4.50)
+        h_pname   = p_data.get("home_name", "TBD")
+        a_pname   = p_data.get("away_name", "TBD")
+        pitch_adj = pitcher_run_adjustment(h_era, a_era)
+
+        park_city      = MLB_PARK_CITIES.get(home)
+        wind           = fetch_wind(park_city[1], park_city[2]) if park_city else None
+        w_adj, w_label = wind_run_adj(wind)
+
+        half_adj = pitch_adj / 2
+        home_exp = max(0.1, home_exp + half_adj + w_adj / 2)
+        away_exp = max(0.1, away_exp + half_adj + w_adj / 2)
+
+        p_home = pythagorean_win_prob(home_exp, away_exp)
+        p_away = 1.0 - p_home
+
+        # ML
+        for team, true_p, lbl in [
+            (home, p_home, f"🔵 {home} ML"),
+            (away, p_away, f"🔴 {away} ML"),
+        ]:
+            if team not in h2h_odds:
+                continue
+            odds, book = h2h_odds[team]
+            ev = (true_p * odds - 1) * 100
+            r  = kelly_stake(true_p, odds)
+            if ev >= EV_MIN_PCT and r["stake"] > 0:
+                candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
+                                   "book": book, "ev_pct": round(ev, 1),
+                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # Totals
+        if totals_data:
+            book_line, over_odds, under_odds, bk_name = totals_data
+            adj_total = home_exp + away_exp
+            for side_label, p, odds in [
+                (f"📈 OVER {book_line} carreras",  poisson_ou_prob(adj_total, book_line, True),  over_odds),
+                (f"📉 UNDER {book_line} carreras", poisson_ou_prob(adj_total, book_line, False), under_odds),
+            ]:
+                ev = (p * odds - 1) * 100
+                r  = kelly_stake(p, odds)
+                if ev >= EV_MIN_PCT and r["stake"] > 0:
+                    candidates.append({"label": side_label, "true_prob": p, "odds": odds,
+                                       "book": bk_name, "ev_pct": round(ev, 1),
+                                       "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # Run line
+        for team, is_home in [(home, True), (away, False)]:
+            if team not in spread_odds:
+                continue
+            pt, odds, book = spread_odds[team]
+            if is_home:
+                rl = pt if pt != 0 else -1.5
+                p_cover = poisson_runline_prob(home_exp, away_exp, rl)
+            else:
+                rl_home = -(pt) if pt != 0 else -1.5   # away +1.5 → home -1.5
+                p_cover = 1.0 - poisson_runline_prob(home_exp, away_exp, rl_home)
+            sign = f"{pt:+.1f}" if pt != 0 else ("-1.5" if is_home else "+1.5")
+            lbl  = f"🏃 {team} RL {sign}"
+            ev   = (p_cover * odds - 1) * 100
+            r    = kelly_stake(p_cover, odds)
+            if ev >= EV_MIN_PCT and r["stake"] > 0:
+                candidates.append({"label": lbl, "true_prob": p_cover, "odds": odds,
+                                   "book": book, "ev_pct": round(ev, 1),
+                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # Line movement flag
+        h_cur = h2h_odds.get(home, (0,))[0]
+        a_cur = h2h_odds.get(away, (0,))[0]
+        moved_h, dir_h, dlt_h = detect_line_movement(game_id, home, h_cur, prev_map)
+        moved_a, dir_a, dlt_a = detect_line_movement(game_id, away, a_cur, prev_map)
+
+        context = {
+            "pitcher_home": f"{h_pname} (ERA {h_era:.2f})",
+            "pitcher_away": f"{a_pname} (ERA {a_era:.2f})",
+            "rs_home": f"{h_stats['rs_pg']:.1f}", "ra_home": f"{h_stats['ra_pg']:.1f}",
+            "rs_away": f"{a_stats['rs_pg']:.1f}", "ra_away": f"{a_stats['ra_pg']:.1f}",
+            "park_factor": park,
+            "wind_info":   w_label,
+            "line_moved":  moved_h or moved_a,
+            "line_note":   (f"Línea {home} {dir_h}{dlt_h}" if moved_h
+                           else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
+        }
+
+    # ── SOCCER ────────────────────────────────────────────────────────────────
+    else:
+        elo_h = _elo_ratings.get(home, 1500)
+        elo_a = _elo_ratings.get(away, 1500)
+
+        elo_base_h = 1.35 * (1 + (elo_h - 1500) / 4000)
+        elo_base_a = 1.25 * (1 + (elo_a - 1500) / 4000)
+
+        form_h = fetch_wc_team_form(home)
+        form_a = fetch_wc_team_form(away)
+
+        blend_h = (0.6 * form_h["goals_for"] + 0.4 * elo_base_h) if form_h else elo_base_h
+        blend_a = (0.6 * form_a["goals_for"] + 0.4 * elo_base_a) if form_a else elo_base_a
+
+        p_win, p_draw, p_loss = poisson_match_probs(blend_h, blend_a)
+
+        # ML — 3 outcomes
+        draw_key = next((k for k in h2h_odds if k.lower() in ("draw", "the draw")), None)
+        for lbl, team_key, true_p in [
+            (f"🔵 {home} ML", home,     p_win),
+            ("🤝 Empate",     draw_key,  p_draw),
+            (f"🔴 {away} ML", away,      p_loss),
+        ]:
+            if team_key is None or team_key not in h2h_odds:
+                continue
+            odds, book = h2h_odds[team_key]
+            ev = (true_p * odds - 1) * 100
+            r  = kelly_stake(true_p, odds)
+            if ev >= EV_MIN_PCT and r["stake"] > 0:
+                candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
+                                   "book": book, "ev_pct": round(ev, 1),
+                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # Totals
+        if totals_data:
+            book_line, over_odds, under_odds, bk_name = totals_data
+            exp_total = blend_h + blend_a
+            for side_label, p, odds in [
+                (f"📈 OVER {book_line} goles",  poisson_ou_prob(exp_total, book_line, True),  over_odds),
+                (f"📉 UNDER {book_line} goles", poisson_ou_prob(exp_total, book_line, False), under_odds),
+            ]:
+                ev = (p * odds - 1) * 100
+                r  = kelly_stake(p, odds)
+                if ev >= EV_MIN_PCT and r["stake"] > 0:
+                    candidates.append({"label": side_label, "true_prob": p, "odds": odds,
+                                       "book": bk_name, "ev_pct": round(ev, 1),
+                                       "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # Handicap -0.5 / +0.5
+        for team, true_p, lbl in [
+            (home, p_win,           f"🔵 {home} -0.5"),
+            (away, p_draw + p_loss, f"🔴 {away} +0.5"),
+        ]:
+            if team not in spread_odds:
+                continue
+            _pt, odds, book = spread_odds[team]
+            ev = (true_p * odds - 1) * 100
+            r  = kelly_stake(true_p, odds)
+            if ev >= EV_MIN_PCT and r["stake"] > 0:
+                candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
+                                   "book": book, "ev_pct": round(ev, 1),
+                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # Line movement flag
+        h_cur = h2h_odds.get(home, (0,))[0]
+        a_cur = h2h_odds.get(away, (0,))[0]
+        moved_h, dir_h, dlt_h = detect_line_movement(game_id, home, h_cur, prev_map)
+        moved_a, dir_a, dlt_a = detect_line_movement(game_id, away, a_cur, prev_map)
+
+        form_note_h = (f"{form_h['goals_for']:.1f} goles/partido ({form_h['matches']} WC)"
+                       if form_h else "ELO only")
+        form_note_a = (f"{form_a['goals_for']:.1f} goles/partido ({form_a['matches']} WC)"
+                       if form_a else "ELO only")
+
+        context = {
+            "elo_home": elo_h, "elo_away": elo_a, "elo_diff": elo_h - elo_a,
+            "form_home": form_note_h,
+            "form_away": form_note_a,
+            "conceded_home": (f"{form_h['goals_against']:.1f}" if form_h else "N/A"),
+            "conceded_away": (f"{form_a['goals_against']:.1f}" if form_a else "N/A"),
+            "p_draw":    round(p_draw * 100, 1),
+            "line_moved": moved_h or moved_a,
+            "line_note": (f"Línea {home} {dir_h}{dlt_h}" if moved_h
+                         else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
+        }
+
+    if not candidates:
+        return None
+
+    # Rank by EV%, keep top 3, tag safest (prob ≥ 60%)
+    candidates.sort(key=lambda x: x["ev_pct"], reverse=True)
+    top3 = candidates[:3]
+    for c in top3:
+        c["safest"] = c["true_prob"] >= 0.60
+
+    return {
+        "game_id":    game_id,
+        "match":      f"{home} vs {away}",
+        "time":       commence,
+        "sport":      sport_key,
+        "is_mlb":     is_mlb,
+        "candidates": top3,
+        "context":    context,
+        "best_label": top3[0]["label"],
+        "best_ev":    top3[0]["ev_pct"],
+    }
+
+
+def notify_game_analysis(analyses, sport_key):
+    """Send one ntfy alert per game containing full analysis context + top picks."""
+    global alerted_game_analysis
+    is_mlb = "mlb" in sport_key
+    emoji  = _sport_emoji(sport_key)
+
+    for i, a in enumerate(analyses):
+        if a["game_id"] in alerted_game_analysis:
+            continue
+        if i > 0:
+            time.sleep(2)
+
+        gt  = _fmt_et(a["time"])
+        ctx = a["context"]
+
+        # Context block
+        if is_mlb:
+            ctx_lines = (
+                f"🔵 Pitcher local:  {ctx['pitcher_home']}\n"
+                f"🔴 Pitcher visita: {ctx['pitcher_away']}\n"
+                f"📊 RS/RA local:    {ctx['rs_home']} / {ctx['ra_home']} por juego\n"
+                f"📊 RS/RA visita:   {ctx['rs_away']} / {ctx['ra_away']} por juego\n"
+                f"🏟️  Factor parque:  x{ctx['park_factor']:.2f}\n"
+            )
+            if ctx.get("wind_info"):
+                ctx_lines += f"💨 {ctx['wind_info']}\n"
+        else:
+            sign = "+" if ctx["elo_diff"] >= 0 else ""
+            ctx_lines = (
+                f"🔵 ELO local:    {ctx['elo_home']} ({sign}{ctx['elo_diff']})\n"
+                f"📊 Forma local:  {ctx['form_home']}\n"
+                f"   Concedidos:   {ctx['conceded_home']} / partido\n"
+                f"📊 Forma visita: {ctx['form_away']}\n"
+                f"   Concedidos:   {ctx['conceded_away']} / partido\n"
+                f"🤝 Prob. empate: {ctx['p_draw']}%\n"
+            )
+
+        if ctx.get("line_moved") and ctx.get("line_note"):
+            ctx_lines += f"📉 {ctx['line_note']}\n"
+
+        # Picks block
+        picks_lines = ""
+        for idx, c in enumerate(a["candidates"]):
+            rank_emoji = _RANK_EMOJIS[idx] if idx < 3 else "🔹"
+            safe_tag   = " ✅ SEGURO" if c["safest"] else ""
+            picks_lines += (
+                f"{rank_emoji} {c['label']} | EV +{c['ev_pct']}% | "
+                f"Prob {round(c['true_prob']*100):.0f}%{safe_tag}\n"
+                f"   💰 ${c['stake']} @ {c['odds']} ({c['kelly_pct']}% Kelly) — {c['book']}\n"
+            )
+
+        body = (
+            f"{emoji} {a['match']}\n"
+            f"⏰ {gt}\n"
+            f"{_DIV}\n"
+            f"📋 CONTEXTO\n"
+            f"{_DIV}\n"
+            f"{ctx_lines}"
+            f"{_DIV}\n"
+            f"📊 TOP PICKS (EV > {EV_MIN_PCT:.0f}%)\n"
+            f"{_DIV}\n"
+            f"{picks_lines}"
+            f"{_DIV2}"
+        )
+
+        # Strip decorative emojis from title
+        clean = (a["best_label"]
+                 .replace("🔵 ", "").replace("🔴 ", "").replace("🤝 ", "")
+                 .replace("📈 ", "").replace("📉 ", "").replace("🏃 ", ""))
+        title = f"🔍 {a['match']} | Mejor: {clean} +{a['best_ev']}%"
+        ntfy_post(title, body, "high")
+        alerted_game_analysis.add(a["game_id"])
+        print(f"  🔍 Análisis: {a['match']} — {len(a['candidates'])} pick(s), "
+              f"mejor EV +{a['best_ev']}%")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # IMPROVEMENT 3: CLV (CLOSING LINE VALUE) TRACKING
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1508,7 +1862,7 @@ def get_odds(sport_key):
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
             params={"apiKey": API_KEY, "regions": "us,uk,eu",
-                    "markets": "h2h,totals", "oddsFormat": "decimal"},
+                    "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
         return r.json() if r.status_code == 200 else []
@@ -1908,6 +2262,16 @@ def run_scan():
             for b in bets:
                 b["sport"] = short
 
+            # Full game analysis (Module 7)
+            full_analyses = []
+            for g in games:
+                try:
+                    result = analyze_game_full(g, sport_key, prev_map)
+                    if result:
+                        full_analyses.append(result)
+                except Exception as _fe:
+                    pass
+
             if bets:
                 print(f"\n  ✅ {short} — {len(bets)} value bet(s):")
                 for b in bets:
@@ -1938,6 +2302,10 @@ def run_scan():
             if arbs:
                 print(f"  💰 {short} — {len(arbs)} arb opportunity(ies)")
                 all_arbs.extend(arbs)
+
+            if full_analyses:
+                print(f"  🔍 {short} — {len(full_analyses)} full analysis(es)")
+                notify_game_analysis(full_analyses, sport_key)
 
         except Exception as e:
             print(f"  ⚠️  {sport_key} error (skipping): {e}")
