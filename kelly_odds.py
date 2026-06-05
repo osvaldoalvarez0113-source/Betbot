@@ -1562,6 +1562,98 @@ def _fetch_h2h_data(home_id, away_id, home_name: str) -> "dict | None":
         return None
 
 
+# ── MODULE 8C: TEAM BATTING METRICS (AVG / OPS / K% / BB%) ───────────────────
+_batting_cache: dict = {}
+
+def _fetch_team_batting_full(team_id) -> "dict | None":
+    """
+    Full batting metrics for a team this season.
+    Returns {avg, ops, k_pct, bb_pct, rs_pg} or None.
+    """
+    if not team_id:
+        return None
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck = f"bat_{team_id}_{today}"
+    if ck in _batting_cache:
+        return _batting_cache[ck]
+    try:
+        d  = _mlb_rest(f"/teams/{team_id}/stats",
+                       {"stats": "season", "group": "hitting", "season": MLB_YEAR})
+        sp = (d.get("stats") or [{}])[0].get("splits") or [{}]
+        st = sp[-1].get("stat", {}) if sp else {}
+
+        avg_s = st.get("avg", "")
+        ops_s = st.get("ops", "")
+        if not avg_s:
+            _batting_cache[ck] = None
+            return None
+
+        pa = float(st.get("plateAppearances", 0) or 0)
+        so = float(st.get("strikeOuts",      0) or 0)
+        bb = float(st.get("baseOnBalls",     0) or 0)
+
+        k_pct  = round(so / pa * 100, 1) if pa > 0 else None
+        bb_pct = round(bb / pa * 100, 1) if pa > 0 else None
+
+        result = {
+            "avg":    float(avg_s),
+            "ops":    float(ops_s) if ops_s else None,
+            "k_pct":  k_pct,
+            "bb_pct": bb_pct,
+            "rs_pg":  float(st.get("runsPerGame", 4.5)),
+        }
+        _batting_cache[ck] = result
+        return result
+    except Exception:
+        _batting_cache[ck] = None
+        return None
+
+
+def _ops_label(ops: float) -> str:
+    """Plain-Spanish OPS quality tier."""
+    if ops > 0.850:  return "fuerte 💪"
+    if ops > 0.750:  return "bueno ✅"
+    if ops > 0.700:  return "promedio ⚪"
+    return "débil ⚠️"
+
+
+def _batting_insight(team_name: str, ops, k_pct) -> str:
+    """One-line batting insight for the alert."""
+    if ops is None and k_pct is None:
+        return ""
+    parts = []
+    if ops is not None:
+        if ops > 0.820:
+            parts.append(f"pegan bien (OPS {ops:.3f})")
+        elif ops < 0.700:
+            parts.append(f"ofensiva débil (OPS {ops:.3f})")
+    if k_pct is not None:
+        if k_pct > 28:
+            parts.append(f"se ponchan mucho (K% {k_pct:.0f}%)")
+        elif k_pct < 18:
+            parts.append(f"hacen buen contacto (K% {k_pct:.0f}%)")
+    if not parts:
+        return ""
+    te = _es(team_name)
+    base = f" pero ".join(parts)
+    # Resolve combined verdict
+    if ops is not None and k_pct is not None:
+        if ops > 0.820 and k_pct > 28:
+            verdict = "→ Moderado contra pitcher élite"
+        elif ops > 0.820 and k_pct < 18:
+            verdict = "→ Lineup peligroso"
+        elif ops < 0.700 and k_pct > 28:
+            verdict = "→ Lineup débil"
+        else:
+            verdict = ""
+    else:
+        verdict = ""
+    line = f"💡 {te} {base}"
+    if verdict:
+        line += f"\n   {verdict}"
+    return line
+
+
 # ── IMPROVEMENT 2: WORLD CUP 2026 LIVE FORM ───────────────────────────────────
 
 def fetch_wc_team_form(team_name):
@@ -2108,6 +2200,42 @@ def analyze_game_full(game, sport_key, prev_map=None):
             pass
         # ──────────────────────────────────────────────────────────────────
 
+        # ── MLB A7: team batting metrics (OPS / K% / BB%) ─────────────────
+        bat_h = bat_a = None
+        try:
+            h_tid_bat = _team_id(home)
+            a_tid_bat = _team_id(away)
+            bat_h = _fetch_team_batting_full(h_tid_bat)
+            bat_a = _fetch_team_batting_full(a_tid_bat)
+        except Exception:
+            pass
+
+        # Apply OPS & K% run-total adjustments
+        if bat_h and bat_a:
+            ops_h = bat_h.get("ops") or 0.0
+            ops_a = bat_a.get("ops") or 0.0
+            k_h   = bat_h.get("k_pct") or 0.0
+            k_a   = bat_a.get("k_pct") or 0.0
+
+            # OPS: both strong → hitter-friendly; both weak → pitcher-friendly
+            if ops_h > 0.820 and ops_a > 0.820:
+                home_exp = min(home_exp + 0.25, 12.0)
+                away_exp = min(away_exp + 0.25, 12.0)
+            elif ops_h < 0.700 and ops_a < 0.700:
+                home_exp = max(0.1, home_exp - 0.25)
+                away_exp = max(0.1, away_exp - 0.25)
+
+            # K%: high K% = that team scores fewer; low K% = scores more
+            if k_h > 28:
+                home_exp = max(0.1, home_exp - 0.3)
+            elif k_h < 18:
+                home_exp = min(home_exp + 0.3, 12.0)
+            if k_a > 28:
+                away_exp = max(0.1, away_exp - 0.3)
+            elif k_a < 18:
+                away_exp = min(away_exp + 0.3, 12.0)
+        # ──────────────────────────────────────────────────────────────────
+
         p_home = pythagorean_win_prob(home_exp, away_exp)
         p_away = 1.0 - p_home
 
@@ -2312,6 +2440,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "h2h_data":      h2h_data,   # MLB A6
             "h2h_book_line": totals_data[0] if totals_data else None,  # MLB A6
             "h2h_note":      _h2h_note, # MLB A6 contradiction warning
+            "bat_home":      bat_h,     # MLB A7
+            "bat_away":      bat_a,     # MLB A7
             "pitch_intel": {            # intelligence rules output
                 "notes":         _pitch_notes,
                 "reasoning":     _pitch_reason,
@@ -2659,6 +2789,47 @@ def notify_game_analysis(analyses, sport_key):
                 f"⚾ {away_es} — Carreras anotadas: {ctx['rs_away']} por juego\n"
                 f"🛡️ {away_es} — Carreras recibidas: {ctx['ra_away']} por juego\n"
             )
+            # ── Batting metrics (MLB A7) ──────────────────────────────────
+            def _k_label(k):
+                if k is None:   return "N/D"
+                if k > 28:      return f"{k:.0f}% (mucho)"
+                if k < 18:      return f"{k:.0f}% (poco)"
+                return          f"{k:.0f}% (normal)"
+
+            def _bb_label(bb):
+                if bb is None:  return "N/D"
+                if bb > 10:     return f"{bb:.0f}% (bueno)"
+                if bb < 7:      return f"{bb:.0f}% (bajo)"
+                return          f"{bb:.0f}% (normal)"
+
+            for tname, tname_es, bat in (
+                (home, home_es, ctx.get("bat_home")),
+                (away, away_es, ctx.get("bat_away")),
+            ):
+                if not bat:
+                    continue
+                ops = bat.get("ops")
+                ctx_lines += (
+                    f"🏏 Ofensiva {tname_es}:\n"
+                    f"   Promedio de bateo: {bat['avg']:.3f}\n"
+                )
+                if ops is not None:
+                    ctx_lines += (
+                        f"   OPS: {ops:.3f} ({_ops_label(ops)})\n"
+                    )
+                if bat.get("k_pct") is not None:
+                    ctx_lines += (
+                        f"   Se poncha: {_k_label(bat['k_pct'])}\n"
+                    )
+                if bat.get("bb_pct") is not None:
+                    ctx_lines += (
+                        f"   Toma bases por bolas: {_bb_label(bat['bb_pct'])}\n"
+                    )
+                insight = _batting_insight(tname, ops, bat.get("k_pct"))
+                if insight:
+                    ctx_lines += f"{insight}\n"
+            # ──────────────────────────────────────────────────────────────
+
             # Park factor
             ctx_lines += f"{_park_label(ctx['park_factor'])}\n"
             # Team last 5 games
