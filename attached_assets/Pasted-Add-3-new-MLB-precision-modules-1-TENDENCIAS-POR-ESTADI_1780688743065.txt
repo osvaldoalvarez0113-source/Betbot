@@ -1,0 +1,123 @@
+Add 3 new MLB precision modules:
+
+━━━━━━━━━━━━━━━━━━━━
+1. TENDENCIAS POR ESTADIO
+━━━━━━━━━━━━━━━━━━━━
+Add hardcoded park over/under 
+tendencies based on historical data:
+
+OVER-friendly parks (favor high scoring):
+- Coors Field (Colorado) → +1.5 runs
+  "🏟️ Coors Field: estadio de más 
+   carreras en MLB → favorece Over"
+- Great American Ball Park (Cincinnati) 
+  → +0.8 runs
+- Globe Life Field (Texas) → +0.6 runs
+- Fenway Park (Boston) → +0.5 runs
+- Yankee Stadium (NY) → +0.4 runs
+
+UNDER-friendly parks (favor low scoring):
+- Oracle Park (SF Giants) → -0.8 runs
+  "🏟️ Oracle Park: estadio de pocas 
+   carreras → favorece Under"
+- Petco Park (San Diego) → -0.7 runs
+- Dodger Stadium (LA) → -0.5 runs
+- Tropicana Field (Tampa) → -0.5 runs
+- T-Mobile Park (Seattle) → -0.4 runs
+
+NEUTRAL parks → no adjustment
+
+Apply adjustment to projected total
+BEFORE generating pick.
+
+Show in alert:
+"🏟️ Coors Field — favorece Over
+   Ajuste: +1.5 carreras al total"
+
+━━━━━━━━━━━━━━━━━━━━
+2. BULLPEN DATA
+━━━━━━━━━━━━━━━━━━━━
+Fetch team bullpen ERA from:
+https://statsapi.mlb.com/api/v1/teams/
+{teamId}/stats?stats=season
+&group=pitching&season=2026
+
+Calculate bullpen ERA separately
+from starter ERA.
+
+Show in alert:
+"⚾ Bullpen Yankees:
+   ERA promedio: 3.45 sólido ✅"
+
+Use bullpen data when:
+- Starter has high pitch count history
+  (>100 pitches avg → likely exits 
+   by inning 6)
+- Late innings matter for the total
+
+Weighted projection:
+- Innings 1-6: use starter ERA
+- Innings 7-9: use bullpen ERA
+- Final projection = weighted average
+
+If bullpen ERA > 5.00:
+Add: "⚠️ Bullpen vulnerable —
+     carreras tardías esperadas →
+     considera Over en juegos cerrados"
+
+━━━━━━━━━━━━━━━━━━━━
+3. DÍAS DE DESCANSO
+━━━━━━━━━━━━━━━━━━━━
+Fetch pitcher's last start date from:
+https://statsapi.mlb.com/api/v1/people/
+{pitcherId}/stats?stats=gameLog
+&group=pitching&season=2026
+
+Calculate days since last start.
+
+Optimal rest = 5 days
+
+Show and adjust:
+- 3-4 days rest (short rest):
+  "⚠️ Cole con solo 4 días de descanso
+   → Rendimiento puede bajar
+   → Añade 0.5 carreras al total"
+  Adjust: +0.5 runs to projection
+
+- 5 days rest (optimal):
+  "✅ Cole con descanso óptimo (5 días)
+   → Rendimiento normal"
+  No adjustment
+
+- 6-7 days rest (extra rest):
+  "💪 Cole con 6 días de descanso
+   → Suele rendir mejor
+   → Reduce 0.3 carreras al total"
+  Adjust: -0.3 runs to projection
+
+- 8+ days rest (too much/rusty):
+  "⚠️ Cole con 8+ días sin lanzar
+   → Puede estar oxidado
+   → Añade 0.3 carreras al total"
+  Adjust: +0.3 runs to projection
+
+━━━━━━━━━━━━━━━━━━━━
+COMBINED EXAMPLE:
+━━━━━━━━━━━━━━━━━━━━
+⚾ Rockies vs Brewers
+⏰ Hoy 8:40 PM ET
+━━━━━━━━━━━━
+🎯 APUESTA: OVER 11.5 carreras
+💰 $50 @ 1.91 — Bovada
+━━━━━━━━━━━━
+📊 POR QUÉ:
+Modelo base: 9.8 carreras
+🏟️ Coors Field: +1.5 carreras
+⚠️ Pitcher con 3 días descanso: +0.5
+⚾ Bullpen Rockies ERA 5.8: +0.4
+━━━━━━━━━━
+Total proyectado: 12.2 carreras
+El libro pone:   11.5 carreras
+Edge:            0.7 carreras ✅
+━━━━━━━━━━━━
+🟢 APOSTAR: $50

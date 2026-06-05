@@ -17,7 +17,9 @@ API_KEY  = os.environ.get("ODDS_API_KEY", "")
 BANKROLL = 1000
 FRACTION = 0.25
 MIN_EDGE  = 2.0
-MIN_STAKE = 10.00     # Module 7: never alert if Kelly stake < $10
+MIN_STAKE         = 10.00   # Module 7: never alert if Kelly stake < $10
+PREMIUM_MULT      = 1.5     # Module P: stake multiplier for PREMIUM alerts
+PREMIUM_MAX_STAKE = 100.0   # Module P: max PREMIUM bet size ($)
 INTERVAL  = 600       # 10-minute main scan (API limit-friendly)
 NOTIFY   = "my-bets"
 LOG_CSV  = True
@@ -212,6 +214,10 @@ last_reset:            date = datetime.now(CDT).date()
 last_morning_report:   date = date(2000, 1, 1)   # force first run at 8 AM
 last_weekly_report:    date = date(2000, 1, 1)   # force first run Sunday 9 AM
 lineup_scan_counter:   int  = 0                  # increments each main scan
+_bankroll_mult:   float = 1.0   # Module P: scales Kelly stakes; updated daily
+_bankroll_paused: bool  = False  # True when bankroll < $400 → halt betting
+last_night_summary: date = date(2000, 1, 1)  # 11 PM nightly summary tracker
+_steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
 _wc_form_cache: dict = {}       # (team_name, date_str) → {goals_for, goals_against, matches}
@@ -296,7 +302,7 @@ def kelly_stake(prob, fair_odd):
         return {"stake": 0, "edge": 0, "has_value": False, "kelly_pct": 0}
     k     = max(0.0, (b * prob - (1 - prob)) / b)
     edge  = prob - 1.0 / fair_odd
-    stake = BANKROLL * min(k * FRACTION, 0.05)
+    stake = BANKROLL * min(k * FRACTION, 0.05) * _bankroll_mult
     return {
         "stake":     round(stake, 2),
         "edge":      round(edge * 100, 2),
@@ -4454,7 +4460,9 @@ def send_daily_ntfy_report():
             f"HOY:\n"
             f"⚾ {mlb_cnt} juegos MLB\n"
             f"⚽ Ver scan para fútbol/Mundial\n"
-            f"🔍 Escaneando desde las 10 AM ET"
+            f"💼 Mult bankroll: {_bankroll_mult}×"
+            + ("  🛑 PAUSADO" if _bankroll_paused else "  ⚠️ bajo" if _bankroll_mult < 1.0 else "") + "\n"
+            + f"🔍 Escaneando desde las 10 AM ET"
         )
         ntfy_post("📊 REPORTE DIARIO", body, "default")
         print("  📊 Reporte diario ntfy enviado")
@@ -4656,6 +4664,21 @@ def notify_bets(new_bets):
     if not new_bets:
         return
 
+    # Module P: halt if bankroll is critically low
+    if _bankroll_paused:
+        ntfy_post(
+            "🛑 BANKROLL CRÍTICO",
+            f"🛑 Bankroll < $400\nApuestas PAUSADAS hasta recuperar\n{_DIV}\n"
+            f"El bot sigue monitoreando — reactivará cuando bankroll ≥ $400.",
+            "urgent",
+        )
+        return
+
+    _br_warn = (
+        "\n\n⚠️ Bankroll bajo — apuesta con precaución"
+        if _bankroll_mult <= 0.75 else ""
+    )
+
     for b in new_bets:
         # Module 7: stake minimum filter
         if b.get("stake", 0) < MIN_STAKE:
@@ -4836,6 +4859,299 @@ def send_daily_summary():
     )
     ntfy_post("BetBot Daily Summary", body, "default")
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODULE P — BANKROLL AUTO-ADJUST  ·  PREMIUM ALERTS  ·  NIGHT SUMMARY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_MESES_ES = ["enero","febrero","marzo","abril","mayo","junio",
+             "julio","agosto","septiembre","octubre","noviembre","diciembre"]
+_DIAS_ES  = ["lunes","martes","miércoles","jueves","viernes","sábado","domingo"]
+
+def _today_es(dt=None):
+    d = dt or datetime.now(ET)
+    return f"{_DIAS_ES[d.weekday()]} {d.day} de {_MESES_ES[d.month - 1]}"
+
+
+def compute_bankroll_mult() -> float:
+    """
+    Recalculate _bankroll_mult and _bankroll_paused from current bankroll.
+    Tiers (starting bankroll $1,000):
+      < $400  → pause (mult = 0)      $400–$600 → 0.50×
+      $600–$800 → 0.75×               $800–$1,200 → 1.00×
+      > $1,200 → +0.20× per $200 above $1,200
+    """
+    global _bankroll_mult, _bankroll_paused
+    try:
+        br = load_bankroll_state()["current"]
+    except Exception:
+        br = float(BANKROLL)
+
+    if br < 400:
+        _bankroll_mult, _bankroll_paused = 0.0, True
+    elif br < 600:
+        _bankroll_mult, _bankroll_paused = 0.50, False
+    elif br < 800:
+        _bankroll_mult, _bankroll_paused = 0.75, False
+    elif br <= 1200:
+        _bankroll_mult, _bankroll_paused = 1.00, False
+    else:
+        steps = int((br - 1200) / 200)
+        _bankroll_mult   = round(1.0 + steps * 0.20, 2)
+        _bankroll_paused = False
+
+    tier = (
+        "PAUSADO 🛑"       if _bankroll_paused    else
+        f"0.50× ⚠️ (bajo)" if _bankroll_mult == 0.50 else
+        f"0.75× ⚠️ (bajo)" if _bankroll_mult == 0.75 else
+        "normal 1.0×"      if _bankroll_mult == 1.00 else
+        f"{_bankroll_mult}× 📈"
+    )
+    print(f"  💼 Bankroll mult: {tier}  (${br:,.2f})")
+    return _bankroll_mult
+
+
+def _count_premium_signals(bet: dict, context: dict, home: str, away: str) -> list:
+    """
+    Return list of (label, key) signal tuples that align for this pick.
+    Used to trigger PREMIUM alert when ≥3 signals confirm the same bet.
+    """
+    signals = []
+    team    = bet.get("team", "")
+    mtype   = bet.get("market_type", "h2h")
+    game_id = bet.get("game_id", "")
+
+    # 1. Sharp money / RLM detected on our side
+    rlm = context.get("rlm_data") or {}
+    if rlm.get("rlm") is True:
+        ss = rlm.get("sharp_side", "")
+        if ss and (ss.lower() in team.lower() or team.lower() in ss.lower()):
+            signals.append(("💎 Dinero sharp detectado", "sharp"))
+
+    # 2. Steam move confirmed for this game
+    if game_id and game_id in _steam_game_ids:
+        signals.append(("🚂 Steam move confirmado", "steam"))
+
+    # 3. Public ≥65% on the other side
+    if rlm.get("pub_pct", 0) >= 65:
+        pub_fav = rlm.get("pub_fav", "")
+        if pub_fav and (pub_fav.lower() not in team.lower()
+                        and team.lower() not in pub_fav.lower()):
+            signals.append((
+                f"👥 Público {rlm['pub_pct']}% en {_es(pub_fav)} (en contra)",
+                "public",
+            ))
+
+    # 4. Confirmed lineup — our side has all key players in
+    lineup = context.get("lineup_data") or {}
+    if lineup.get("confirmed"):
+        is_home_t = home.lower() in team.lower() or team.lower() in home.lower()
+        my_miss   = lineup.get("home_missing" if is_home_t else "away_missing", [])
+        if not my_miss:
+            signals.append(("✅ Lineup completo confirmado", "lineup"))
+
+    # 5. Pitcher dominante/élite (ERA or FIP < 2.75)
+    is_home_t = home.lower() in team.lower() or team.lower() in home.lower()
+    if mtype in ("h2h", "moneyline", ""):
+        era = float(context.get("era_home" if is_home_t else "era_away") or 9.9)
+        fip = context.get("fip_home" if is_home_t else "fip_away")
+        m   = fip if fip is not None else era
+        if m < 2.75:
+            pn = context.get("pname_home" if is_home_t else "pname_away", "")
+            signals.append((f"⚾ Pitcher élite — {pn} ({m:.2f})", "pitcher"))
+    elif mtype == "totals" and team.upper() == "UNDER":
+        era_h = float(context.get("era_home") or 9.9)
+        fip_h = context.get("fip_home")
+        era_a = float(context.get("era_away") or 9.9)
+        fip_a = context.get("fip_away")
+        m_h = fip_h if fip_h is not None else era_h
+        m_a = fip_a if fip_a is not None else era_a
+        best = min(m_h, m_a)
+        if best < 2.75:
+            dom = context.get("pname_home" if m_h < m_a else "pname_away", "")
+            signals.append((f"⚾ Pitcher élite — {dom} ({best:.2f})", "pitcher"))
+
+    # 6. H2H history supports pick (data exists, no contradiction)
+    h2h = context.get("h2h_data") or {}
+    if h2h.get("games") and not context.get("h2h_note"):
+        signals.append(("📊 Historial H2H soporta el pick", "h2h"))
+
+    # 7. Umpire tendency matches pick direction
+    ump = context.get("umpire") or {}
+    if ump.get("name"):
+        tend = ump.get("tendency", "NEUTRAL")
+        if "OVER" in tend and team.upper() == "OVER":
+            signals.append((f"👨‍⚖️ Árbitro OVER — {ump['name']}", "umpire"))
+        elif "UNDER" in tend and team.upper() == "UNDER":
+            signals.append((f"👨‍⚖️ Árbitro UNDER — {ump['name']}", "umpire"))
+
+    # 8. Wind direction favorable for pick
+    wind = (context.get("wind_info") or "").upper()
+    if "OUT" in wind and team.upper() == "OVER":
+        signals.append(("💨 Viento OUT — favorece OVER", "weather"))
+    elif "IN" in wind and team.upper() == "UNDER":
+        signals.append(("💨 Viento IN — favorece UNDER", "weather"))
+
+    return signals
+
+
+def notify_premium_bet(bet: dict):
+    """
+    Send PREMIUM ntfy alert when ≥3 signals align on the same pick.
+    Stake already boosted to min(normal × 1.5, $100).
+    Always alerts (overrides dedup) with priority=urgent.
+    """
+    team    = bet.get("team", "")
+    match   = bet.get("match", "")
+    mtype   = bet.get("market_type", "h2h")
+    side    = bet.get("side", "")
+    odds    = bet.get("odds", 0)
+    stake   = bet.get("stake", 0)
+    book    = bet.get("bookmaker", "")
+    signals = bet.get("signals", [])
+    sp_key  = bet.get("sport", "")
+
+    # Dedup: one PREMIUM alert per match+team per day
+    pkey = f"{match}_{team}_premium"
+    if not _should_alert(pkey, odds=odds):
+        return
+
+    gt = bet.get("time", "")[:16]
+    try:
+        gt = datetime.fromisoformat(gt).astimezone(ET).strftime("%I:%M %p ET")
+    except Exception:
+        gt = gt.replace("T", " ")
+
+    home_s, away_s = (match + " vs ").split(" vs ", 1)[:2]
+    home_s = home_s.strip(); away_s = away_s.strip()
+    emoji = _sport_emoji(sp_key)
+
+    if mtype == "totals":
+        apuesta_line = f"APUESTA: {team.upper()} {side} (Total)"
+    else:
+        apuesta_line = f"APUESTA: {_es(team)} ML"
+
+    sig_lines  = "\n".join(f"  {lbl}" for lbl, _ in signals[:6])
+    low_warn   = (
+        "\n\n⚠️ Bankroll bajo — apuesta con cuidado" if _bankroll_mult <= 0.75
+        else ""
+    )
+
+    body = (
+        f"💎 PICK PREMIUM | {_es(team)}"
+        f" {'ML' if mtype != 'totals' else side}\n"
+        f"{_DIV}\n"
+        f"{emoji} {_es(home_s)} vs {_es(away_s)}\n"
+        f"⏰ Hoy {gt}\n"
+        f"{_DIV}\n"
+        f"🎯 {apuesta_line}\n"
+        f"💰 ${stake:.2f} @ {odds} — {book}\n"
+        f"   (stake aumentado por señales múltiples)\n"
+        f"{_DIV}\n"
+        f"✅ Señales confirmadas ({len(signals)}/8):\n"
+        f"{sig_lines}\n"
+        f"{_DIV}\n"
+        f"🟢 CONFIANZA MÁXIMA — apostar{low_warn}"
+    )
+    title = f"💎 PREMIUM | {_es(team)} | ${stake:.2f} @ {odds}"
+    ntfy_post(title, body, "urgent")
+    print(f"  💎 PREMIUM: {match} → {_es(team)} ({len(signals)}/8 señales)")
+
+
+def send_night_summary():
+    """11 PM ET: daily recap of today's picks with resolved W/L/P or 'pendiente'."""
+    try:
+        today_str = datetime.now(ET).strftime("%Y-%m-%d")
+
+        today_bets: list = []
+        if os.path.exists(BETS_LOG_FILE):
+            try:
+                with open(BETS_LOG_FILE, newline="") as f:
+                    for b in csv.DictReader(f):
+                        if b.get("date", "").startswith(today_str):
+                            today_bets.append(b)
+            except Exception:
+                pass
+
+        state   = load_bankroll_state()
+        current = state["current"]
+        settled = [b for b in today_bets if b.get("result") in ("W", "L", "P")]
+        daily_pl = sum(float(b.get("profit_loss", 0) or 0) for b in settled)
+        daily_pl_s = f"+${daily_pl:.2f}" if daily_pl >= 0 else f"-${abs(daily_pl):.2f}"
+
+        date_es = _today_es()
+
+        if not today_bets:
+            body = (
+                f"🌙 RESUMEN DEL DÍA\n"
+                f"📅 {date_es}\n"
+                f"{_DIV}\n"
+                f"Sin picks hoy —\n"
+                f"el filtro protegió tu bankroll 🛡️\n"
+                f"{_DIV}\n"
+                f"💰 Bankroll: ${current:,.2f}"
+            )
+            ntfy_post("🌙 RESUMEN DEL DÍA", body, "default")
+            print("  🌙 Resumen nocturno: sin picks hoy")
+            return
+
+        picks_block = ""
+        premium_cnt = 0
+        for b in today_bets:
+            result = b.get("result", "")
+            pl     = float(b.get("profit_loss", 0) or 0)
+            team   = b.get("team", "")
+            mtype  = b.get("market_type", "h2h")
+            side   = b.get("side", "")
+            sport  = b.get("sport", "")
+
+            # Flag PREMIUM by stake > 75% of max premium stake
+            try:
+                is_prem = float(b.get("stake", 0) or 0) >= PREMIUM_MAX_STAKE * 0.75
+            except Exception:
+                is_prem = False
+            if is_prem:
+                premium_cnt += 1
+
+            sp_emoji = "⚾" if "MLB" in sport.upper() else "⚽"
+            prem_tag = " 💎" if is_prem else ""
+            label = (f"{team.upper()} {side}" if mtype == "totals"
+                     else f"{_es(team)} ML")
+
+            if result == "W":
+                status = f"✅ GANÓ +${pl:.2f}"
+            elif result == "L":
+                status = f"❌ PERDIÓ -${abs(pl):.2f}"
+            elif result == "P":
+                status = "🤝 EMPUJÓ $0"
+            else:
+                status = "⏳ pendiente"
+
+            picks_block += f"{sp_emoji}{prem_tag} {label} ← {status}\n"
+
+        prem_line   = f"💎 {premium_cnt} PREMIUM picks\n" if premium_cnt else ""
+        change_line = (f"📈 Cambio hoy: {daily_pl_s}"
+                       if settled else "📈 Cambio hoy: pendiente resultados")
+
+        body = (
+            f"🌙 RESUMEN DEL DÍA\n"
+            f"📅 {date_es}\n"
+            f"{_DIV}\n"
+            f"📊 PICKS DE HOY:\n\n"
+            f"{picks_block}"
+            f"{prem_line}"
+            f"{_DIV}\n"
+            f"💰 Bankroll actual: ${current:,.2f}\n"
+            f"{change_line}\n"
+            f"{_DIV}\n"
+            f"⏰ Resultados finales mañana\n"
+            f"   en el reporte de las 8 AM"
+        )
+        ntfy_post("🌙 RESUMEN DEL DÍA", body, "default")
+        print(f"  🌙 Resumen nocturno enviado ({len(today_bets)} picks)")
+    except Exception as e:
+        print(f"  ⚠️  send_night_summary error: {e}")
+
+
 def check_midnight_reset():
     global alerted_bets, daily_bets, last_reset, _sent_alerts
     today = datetime.now(CDT).date()
@@ -4846,6 +5162,7 @@ def check_midnight_reset():
         _sent_alerts  = {}
         daily_bets    = []
         last_reset    = today
+        compute_bankroll_mult()   # Module P: update stake multiplier
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE B — PUBLIC % / RLM  ·  STEAM MOVES  ·  CONFIRMED LINEUP
@@ -5015,6 +5332,7 @@ def detect_steam_moves_for_game(
         if len(ups) >= 3 or len(downs) >= 3:
             steam_books = ups if len(ups) >= len(downs) else downs
             direction   = "up" if len(ups) >= len(downs) else "down"
+            _steam_game_ids.add(game_id)   # Module P: mark for PREMIUM signals
             results.append({
                 "match":     f"{home} vs {away}",
                 "team":      team,
@@ -5215,6 +5533,8 @@ def run_scan():
     all_totals        = []
     all_full_analyses = []   # parlay detector — collects across all sports
     all_steams        = []   # steam moves — collects across all sports
+    all_premiums:     list = []  # Module P: PREMIUM picks (≥3 signals)
+    _steam_game_ids.clear()      # reset steam registry for this scan
     now_month  = datetime.now(CDT).month
 
     # Improvement 4: bankroll dashboard at top of every scan
@@ -5275,6 +5595,31 @@ def run_scan():
                         full_analyses.append(result)
                 except Exception as _fe:
                     pass
+
+            # ── Module P: PREMIUM signal injection ─────────────────────────
+            if not _bankroll_paused:
+                try:
+                    _ctx_map = {a["game_id"]: a.get("context", {})
+                                for a in full_analyses}
+                    for _bet in list(bets) + list(total_bets):
+                        _h, _a = (_bet.get("match", " vs ") + " vs ").split(
+                            " vs ", 1)[:2]
+                        _h = _h.strip(); _a = _a.strip()
+                        _ctx  = _ctx_map.get(_bet.get("game_id", ""), {})
+                        _sigs = _count_premium_signals(_bet, _ctx, _h, _a)
+                        _bet["signals"] = _sigs
+                        if len(_sigs) >= 3 and _is_safe_book(
+                                _bet.get("bookmaker", "")):
+                            _bet["premium"] = True
+                            _bet["stake"]   = min(
+                                round(_bet["stake"] * PREMIUM_MULT, 2),
+                                PREMIUM_MAX_STAKE)
+                            all_premiums.append(_bet)
+                        else:
+                            _bet["premium"] = False
+                except Exception as _pme:
+                    print(f"  ⚠️  Premium injection error: {_pme}")
+            # ──────────────────────────────────────────────────────────────
 
             if bets:
                 print(f"\n  ✅ {short} — {len(bets)} value bet(s):")
@@ -5339,6 +5684,13 @@ def run_scan():
     except Exception as _pe:
         print(f"  ⚠️  Parlay detector error: {_pe}")
 
+    # Module P: PREMIUM alerts — sent once after all sports are collected
+    for pb in all_premiums:
+        try:
+            notify_premium_bet(pb)
+        except Exception as _pbe:
+            print(f"  ⚠️  Premium alert error: {_pbe}")
+
     # Improvement 3: check pending bets for closing lines / CLV
     try:
         check_closing_lines(current_games_by_sport)
@@ -5360,6 +5712,7 @@ if __name__ == "__main__":
         print("⚠️  MLB-statsapi not found — install via: pip install MLB-statsapi")
     print("🤖 BetBot Pro — starting...")
     scan = 1
+    compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
 
     while True:
         now_cdt = datetime.now(CDT)
@@ -5382,6 +5735,14 @@ if __name__ == "__main__":
                 last_weekly_report = now_et.date()
             except Exception as e:
                 print(f"  ⚠️  Weekly summary error: {e}")
+
+        # Night summary at 11 PM ET — Module P
+        if now_et.hour == 23 and last_night_summary < now_et.date():
+            try:
+                send_night_summary()
+                last_night_summary = now_et.date()
+            except Exception as e:
+                print(f"  ⚠️  Night summary error: {e}")
 
         print(f"🔍 Scan #{scan}")
         try:
