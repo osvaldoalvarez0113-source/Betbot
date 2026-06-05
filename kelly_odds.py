@@ -225,6 +225,8 @@ lineup_scan_counter:   int  = 0                  # increments each main scan
 _bankroll_mult:   float = 1.0   # Module P: scales Kelly stakes; updated daily
 _bankroll_paused: bool  = False  # True when bankroll < $400 → halt betting
 last_night_summary: date = date(2000, 1, 1)  # 11 PM nightly summary tracker
+last_mlb_card:     date = date(2000, 1, 1)  # 2 PM ET MLB daily card
+last_soccer_card:  date = date(2000, 1, 1)  # 10 AM ET soccer daily card
 _steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
@@ -7346,6 +7348,381 @@ def notify_premium_bet(bet: dict):
     print(f"  💎 PREMIUM: {match} → {_es(team)} ({len(signals)}/8 señales)")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# DAILY CARD — 2 PM ET (MLB) / 10 AM ET (Soccer)
+# Sends one comprehensive ntfy card analysing ALL games of the day,
+# sorted into 4 tiers: 💎 IMPERDIBLES / ✅ TIENEN VALOR / ⚠️ BORDERLINE / ❌ NO VALE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _card_analyze_game(game: dict, sport_key: str) -> dict:
+    """
+    Lightweight per-game analysis for the daily card (no Claude call).
+    Always returns a result dict — even for no-value games.
+    """
+    home, away = game["home_team"], game["away_team"]
+    commence   = game.get("commence_time", "")
+    is_mlb     = "mlb" in sport_key
+
+    best_ev    = -99.0
+    best_label = None
+    best_odds  = None
+    best_stake = 0.0
+    dqs        = 50
+    pitcher_h  = pitcher_a = "TBD"
+    era_h = era_a = 4.50
+    elo_h = elo_a = 1500
+
+    h2h    = _extract_h2h_best(game)
+    totals = get_book_total(game)
+
+    def _check_ev(p, odds, lbl):
+        nonlocal best_ev, best_label, best_odds, best_stake
+        if odds and odds > 1.0:
+            ev = (p * odds - 1) * 100
+            if ev > best_ev:
+                best_ev    = round(ev, 1)
+                best_label = lbl
+                best_odds  = odds
+                r          = kelly_stake(p, odds)
+                best_stake = r["stake"]
+
+    if is_mlb:
+        h_stats = fetch_team_run_stats(home)
+        a_stats = fetch_team_run_stats(away)
+        if h_stats and a_stats:
+            park     = MLB_PARK_FACTORS.get(home, 1.0)
+            LAVG     = 4.5
+            home_exp = h_stats["rs_pg"] * (a_stats["ra_pg"] / LAVG) * park
+            away_exp = a_stats["rs_pg"] * (h_stats["ra_pg"] / LAVG) * park
+            try:
+                pitchers  = fetch_probable_pitchers_today()
+                p_data    = _lookup_pitcher_data(home, away, pitchers)
+                era_h     = p_data.get("home_era", 4.50)
+                era_a     = p_data.get("away_era", 4.50)
+                pitcher_h = p_data.get("home_name", "TBD")
+                pitcher_a = p_data.get("away_name", "TBD")
+            except Exception:
+                pass
+            adj      = pitcher_run_adjustment(era_h, era_a)
+            home_exp = max(0.5, home_exp + adj)
+            away_exp = max(0.5, away_exp - adj)
+            p_home   = pythagorean_win_prob(home_exp, away_exp)
+            p_away   = 1.0 - p_home
+            # ML
+            if home in h2h:
+                _check_ev(p_home, h2h[home][0], f"{home} ML")
+            if away in h2h:
+                _check_ev(p_away, h2h[away][0], f"{away} ML")
+            # Totals
+            if totals:
+                bl, oo, uo, _ = totals
+                adj_tot = home_exp + away_exp
+                diff    = adj_tot - bl
+                if abs(diff) >= 0.5:
+                    bet_over = diff > 0
+                    p_t  = poisson_ou_prob(adj_tot, bl, bet_over)
+                    lbl  = f"OVER {bl}" if bet_over else f"UNDER {bl}"
+                    _check_ev(p_t, oo if bet_over else uo, lbl)
+            # Data quality
+            ctx_card = {"pname_home": pitcher_h, "pname_away": pitcher_a,
+                        "era_home": era_h, "era_away": era_a}
+            dqs = _data_completeness_score(ctx_card, sport_key, home, away)
+        else:
+            dqs = 20
+    else:
+        # Soccer — use ELO win probability as quick model
+        try:
+            elo_ratings = load_elo_ratings()
+            elo_h = elo_ratings.get(home, 1500)
+            elo_a = elo_ratings.get(away, 1500)
+            p_home = elo_win_prob(home, away)
+            p_away = 1.0 - p_home
+            draw_key = f"{home}_{away}_draw"
+            if home in h2h:
+                _check_ev(p_home, h2h[home][0], f"{home} ML")
+            if away in h2h:
+                _check_ev(p_away, h2h[away][0], f"{away} ML")
+            if totals:
+                bl, oo, uo, _ = totals
+                exp_tot = 2.6
+                diff    = exp_tot - bl
+                if abs(diff) >= 0.25:
+                    bet_over = diff > 0
+                    p_t  = poisson_ou_prob(exp_tot, bl, bet_over)
+                    lbl  = f"OVER {bl}" if bet_over else f"UNDER {bl}"
+                    _check_ev(p_t, oo if bet_over else uo, lbl)
+            dqs = 60
+        except Exception:
+            dqs = 25
+
+    return {
+        "match":       f"{home} vs {away}",
+        "commence":    commence,
+        "best_ev":     best_ev,
+        "best_label":  best_label,
+        "best_odds":   best_odds,
+        "best_stake":  round(best_stake, 0),
+        "data_quality": dqs,
+        "pitcher_h":   pitcher_h,
+        "pitcher_a":   pitcher_a,
+        "era_h":       era_h,
+        "era_a":       era_a,
+        "elo_h":       elo_h,
+        "elo_a":       elo_a,
+    }
+
+
+def _card_fmt_time(commence: str) -> str:
+    try:
+        dt = datetime.fromisoformat(commence.replace("Z", "+00:00")).astimezone(ET)
+        return dt.strftime("%I:%M %p ET")
+    except Exception:
+        return commence[:16] if commence else "?"
+
+
+def build_daily_card(sport_key: str) -> str:
+    """
+    Build and return the full daily card text for one sport.
+    Runs lightweight EV analysis on all today's games,
+    then calls analyze_game_full (with Claude) on any EV >= 3% game.
+    """
+    is_mlb      = "mlb" in sport_key
+    sport_name  = "MLB ⚾" if is_mlb else "MUNDIAL 🏆"
+    today_et    = datetime.now(ET)
+    today_str   = today_et.strftime("%d/%m/%Y")
+    today_date  = today_et.date()
+
+    # ── Fetch today's games ──────────────────────────────────────────────
+    raw_games = get_odds(sport_key)
+    if not raw_games:
+        return f"Sin partidos hoy 📭"
+
+    today_games = []
+    for g in raw_games:
+        commence = g.get("commence_time", "")
+        try:
+            gdate = (datetime.fromisoformat(commence.replace("Z", "+00:00"))
+                     .astimezone(ET).date())
+            if gdate == today_date:
+                today_games.append(g)
+        except Exception:
+            today_games.append(g)
+
+    if not today_games:
+        return f"Sin partidos hoy 📭"
+
+    print(f"  📋 Daily Card {sport_name}: {len(today_games)} partidos...")
+
+    # ── Quick EV for every game (no Claude) ─────────────────────────────
+    all_results: list = []
+    for g in today_games:
+        try:
+            res = _card_analyze_game(g, sport_key)
+        except Exception as exc:
+            h, a = g.get("home_team", "?"), g.get("away_team", "?")
+            print(f"    ⚠️ Quick analysis error {h} vs {a}: {exc}")
+            res = {
+                "match": f"{h} vs {a}", "commence": g.get("commence_time", ""),
+                "best_ev": -99.0, "best_label": None, "best_odds": None,
+                "best_stake": 0, "data_quality": 0,
+                "pitcher_h": "TBD", "pitcher_a": "TBD",
+                "era_h": 4.5, "era_a": 4.5, "elo_h": 1500, "elo_a": 1500,
+            }
+        all_results.append(res)
+
+    # ── Full analysis with Claude for EV >= EV_MIN_PCT games ────────────
+    claude_results: dict = {}
+    for res in all_results:
+        if res["best_ev"] < EV_MIN_PCT:
+            continue
+        match = res["match"]
+        for g in today_games:
+            gm = f"{g['home_team']} vs {g['away_team']}"
+            if gm != match:
+                continue
+            try:
+                full = analyze_game_full(g, sport_key)
+                if full:
+                    cl_intel = full.get("claude_intel") or {}
+                    best_c   = (full.get("candidates") or [{}])[0]
+                    claude_results[match] = {
+                        "vetoed":       False,
+                        "claude_conf":  cl_intel.get("confianza", "MEDIA"),
+                        "claude_apost": cl_intel.get("apostar", True),
+                        "ev_full":      full.get("best_ev", res["best_ev"]),
+                        "label_full":   full.get("best_label", res["best_label"]),
+                        "stake_full":   best_c.get("stake", res["best_stake"]),
+                    }
+                else:
+                    claude_results[match] = {
+                        "vetoed": True, "claude_conf": "BAJA", "claude_apost": False,
+                        "ev_full": 0.0, "label_full": None, "stake_full": 0,
+                    }
+            except Exception as exc:
+                print(f"    ⚠️ Full analysis error {match}: {exc}")
+            break
+
+    # ── Tier classification ──────────────────────────────────────────────
+    gems:       list = []
+    values:     list = []
+    borderline: list = []
+    no_value:   list = []
+
+    for res in all_results:
+        match = res["match"]
+        ev    = res["best_ev"]
+        dqs   = res["data_quality"]
+        cl    = claude_results.get(match, {})
+
+        if cl.get("vetoed"):
+            ev = 0.0
+        elif cl.get("ev_full") is not None and cl["ev_full"] > 0:
+            ev = cl["ev_full"]
+
+        res["final_ev"]    = ev
+        res["claude_info"] = cl
+
+        if ev >= 10.0 and dqs >= 75:
+            gems.append(res)
+        elif ev >= 4.0 and dqs >= 60:
+            values.append(res)
+        elif ev >= 2.0:
+            borderline.append(res)
+        else:
+            no_value.append(res)
+
+    for tier in (gems, values, borderline, no_value):
+        tier.sort(key=lambda x: x.get("final_ev", -99), reverse=True)
+
+    # ── Parlay suggestion (top 2–3 IMPERDIBLES + TIENEN VALOR) ──────────
+    parlay_candidates = [r for r in gems + values
+                         if not r.get("claude_info", {}).get("vetoed")
+                         and r.get("best_odds")]
+    parlay_block = ""
+    if len(parlay_candidates) >= 2:
+        top_p  = parlay_candidates[:3]
+        combo  = 1.0
+        for r in top_p:
+            combo *= r["best_odds"]
+        p_stake  = 20
+        p_return = round(p_stake * combo, 0)
+        picks_s  = " + ".join(
+            (r.get("claude_info", {}).get("label_full") or r["best_label"] or r["match"])
+            for r in top_p
+        )
+        parlay_block = (
+            f"━━━━━━━━━━\n"
+            f"🎰 MEJOR PARLAY:\n"
+            f"{picks_s}\n"
+            f"Cuota combinada: {combo:.2f}x\n"
+            f"Apuesta $20 → Retorno ${p_return:.0f}\n"
+        )
+
+    # ── Stake totals ─────────────────────────────────────────────────────
+    def _stake(r):
+        return r.get("claude_info", {}).get("stake_full") or r.get("best_stake") or 0
+
+    total_stake = sum(_stake(r) for r in gems + values)
+    pot_gain    = sum(
+        _stake(r) * ((r.get("best_odds") or 1.0) - 1.0)
+        for r in gems + values
+    )
+
+    # ── Formatting helpers ────────────────────────────────────────────────
+    def _fmt_full(res):
+        cl      = res.get("claude_info", {})
+        ev      = res.get("final_ev", res["best_ev"])
+        lbl     = cl.get("label_full") or res["best_label"] or res["match"]
+        odds    = res.get("best_odds")
+        dqs     = res["data_quality"]
+        stake   = _stake(res)
+        tm      = _card_fmt_time(res["commence"])
+        c_conf  = cl.get("claude_conf", "")
+        c_emoji = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(c_conf, "⚪")
+        pit_line = ""
+        if is_mlb and res.get("pitcher_h", "TBD") != "TBD":
+            pit_line = (f"⚾ {res['pitcher_h']} (ERA {res['era_h']:.2f}) "
+                        f"vs {res['pitcher_a']} (ERA {res['era_a']:.2f})\n")
+        elif not is_mlb:
+            pit_line = f"📊 ELO: {res.get('elo_h',1500):.0f} vs {res.get('elo_a',1500):.0f}\n"
+        return (
+            f"📌 {res['match']}  [{tm}]\n"
+            f"{pit_line}"
+            f"🏆 Pick: {lbl}  @ {odds or '?'}\n"
+            f"📊 EV: +{ev:.1f}%  Calidad: {dqs}/100  {c_emoji} Claude: {c_conf or 'N/D'}\n"
+            f"💰 Stake sugerido: ${stake:.0f}"
+        )
+
+    def _fmt_brief(res):
+        ev  = res.get("final_ev", res["best_ev"])
+        lbl = res["best_label"] or res["match"]
+        tm  = _card_fmt_time(res["commence"])
+        return f"• {res['match']} — {lbl}  EV+{max(ev,0):.1f}%  [{tm}]"
+
+    # ── Assemble card text ────────────────────────────────────────────────
+    DIVIDER = "━━━━━━━━━━"
+
+    gem_body = ("\n\n".join(_fmt_full(r) + "\n🟢 APOSTAR" for r in gems)
+                if gems else "  (ninguno hoy)")
+    val_body = ("\n\n".join(_fmt_full(r) + "\n🟡 APOSTAR MITAD" for r in values)
+                if values else "  (ninguno hoy)")
+    brd_body = ("\n".join(_fmt_brief(r) + " — Edge pequeño" for r in borderline)
+                if borderline else "  (ninguno hoy)")
+    nov_body = ("\n".join(
+                    f"• {r['match']}  [{_card_fmt_time(r['commence'])}]"
+                    for r in no_value)
+                if no_value else "  (ninguno hoy)")
+
+    total_block = ""
+    if total_stake > 0:
+        total_block = (
+            f"{DIVIDER}\n"
+            f"💵 Total apostado sugerido: ${total_stake:.0f}\n"
+            f"📈 Potencial ganancia: ${pot_gain:.0f}"
+        )
+
+    card = (
+        f"📋 TARJETA DEL DÍA — {sport_name}\n"
+        f"📅 {today_str}  ({len(today_games)} partidos)\n"
+        f"{DIVIDER}\n"
+        f"💎 IMPERDIBLES ({len(gems)}):\n"
+        f"{gem_body}\n\n"
+        f"✅ TIENEN VALOR ({len(values)}):\n"
+        f"{val_body}\n\n"
+        f"⚠️ BORDERLINE ({len(borderline)}):\n"
+        f"{brd_body}\n\n"
+        f"❌ NO VALE LA PENA ({len(no_value)}):\n"
+        f"{nov_body}\n"
+        f"{parlay_block}"
+        f"{total_block}"
+    )
+    return card
+
+
+def send_daily_card(sport_key: str):
+    """Build and send the daily card for a sport via ntfy."""
+    global last_mlb_card, last_soccer_card
+    today   = datetime.now(ET).date()
+    is_mlb  = "mlb" in sport_key
+    tracker = last_mlb_card if is_mlb else last_soccer_card
+
+    if tracker >= today:
+        return
+
+    sport_label = "MLB ⚾" if is_mlb else "MUNDIAL 🏆"
+    print(f"\n📋 Enviando Tarjeta del Día — {sport_label}...")
+    try:
+        body = build_daily_card(sport_key)
+        ntfy_post(f"📋 TARJETA DEL DÍA — {sport_label}", body, priority="high")
+        if is_mlb:
+            last_mlb_card = today
+        else:
+            last_soccer_card = today
+        print(f"  ✅ Tarjeta del Día enviada — {sport_label}")
+    except Exception as exc:
+        print(f"  ⚠️  Daily Card error ({sport_label}): {exc}")
+
+
 def send_night_summary():
     """11 PM ET: daily recap of today's picks with resolved W/L/P or 'pendiente'."""
     try:
@@ -8036,6 +8413,20 @@ if __name__ == "__main__":
                     last_weekly_report = now_et.date()
                 except Exception as e:
                     print(f"  ⚠️  Weekly summary error: {e}")
+
+            # MLB Daily Card at 2:00 PM ET (once per day)
+            if now_et.hour == 14 and now_et.minute < 10 and last_mlb_card < now_et.date():
+                try:
+                    send_daily_card("baseball_mlb")
+                except Exception as e:
+                    print(f"  ⚠️  MLB Daily Card error: {e}")
+
+            # Soccer Daily Card at 10:00 AM ET (once per day)
+            if now_et.hour == 10 and now_et.minute < 10 and last_soccer_card < now_et.date():
+                try:
+                    send_daily_card("soccer_fifa_world_cup")
+                except Exception as e:
+                    print(f"  ⚠️  Soccer Daily Card error: {e}")
 
             # Night summary at 11 PM ET — Module P
             if now_et.hour == 23 and last_night_summary < now_et.date():
