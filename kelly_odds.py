@@ -587,6 +587,87 @@ def fetch_mlb_games_today():
             games.append(g)
     return games
 
+# ── MLB real start-time cache (keyed by date) ─────────────────────────────────
+_mlb_real_times_cache: dict = {}   # date_str → {home_team_lower: "...Z"}
+
+def _fetch_mlb_real_times(date_str: str) -> dict:
+    """
+    Return {home_team_name_lower → gameDate_utc_string} for all MLB games
+    on date_str ('YYYY-MM-DD').  Fetches from MLB Stats API /schedule.
+    Cached per date so it is called at most once per calendar day.
+    """
+    if date_str in _mlb_real_times_cache:
+        return _mlb_real_times_cache[date_str]
+    result = {}
+    try:
+        data = _mlb_rest("/schedule", {
+            "sportId": 1,
+            "date":    date_str,
+            "hydrate": "team",
+        })
+        for date_entry in (data.get("dates") or []):
+            for g in date_entry.get("games", []):
+                gdate = g.get("gameDate", "")          # "2026-06-05T23:10:00Z"
+                if not gdate:
+                    continue
+                home_name = (
+                    g.get("teams", {}).get("home", {})
+                     .get("team", {}).get("name", "")
+                    or g.get("teams", {}).get("home", {})
+                        .get("team", {}).get("teamName", "")
+                )
+                away_name = (
+                    g.get("teams", {}).get("away", {})
+                     .get("team", {}).get("name", "")
+                    or g.get("teams", {}).get("away", {})
+                        .get("team", {}).get("teamName", "")
+                )
+                if home_name:
+                    result[home_name.lower()] = gdate
+                if away_name:
+                    result[away_name.lower()] = gdate
+        print(f"  🕐 MLB real times fetched: {len(result)//2} games")
+    except Exception as e:
+        print(f"  ⚠️  _fetch_mlb_real_times error: {e}")
+    _mlb_real_times_cache[date_str] = result
+    return result
+
+
+def _patch_mlb_commence_times(games: list) -> None:
+    """
+    For a list of Odds-API MLB game dicts, replace each game's 'commence_time'
+    with the authoritative time from the MLB Stats API when a match is found.
+    Matches on home_team name (case-insensitive, partial word overlap).
+    Mutates games in-place.
+    """
+    if not games:
+        return
+    # Determine date from first game's commence_time (all games same date)
+    first_ct = games[0].get("commence_time", "")
+    date_str  = first_ct[:10] if first_ct else datetime.now(CDT).strftime("%Y-%m-%d")
+    real_times = _fetch_mlb_real_times(date_str)
+    if not real_times:
+        return
+
+    patched = 0
+    for g in games:
+        home = g.get("home_team", "").lower()
+        # Try exact match first, then word-overlap
+        real_t = real_times.get(home)
+        if not real_t:
+            for key, val in real_times.items():
+                if any(w in key for w in home.split() if len(w) > 3):
+                    real_t = val
+                    break
+        if real_t and real_t != g.get("commence_time", ""):
+            old = g.get("commence_time", "")
+            g["commence_time"] = real_t
+            patched += 1
+            print(f"  🕐 Tiempo corregido [{g.get('home_team','')}]: "
+                  f"{old} → {real_t}")
+    if patched:
+        print(f"  🕐 {patched} tiempo(s) MLB corregido(s) desde MLB Stats API")
+
 def fetch_pitcher_stats(name):
     """Return dict with ERA, WHIP, K9 for a pitcher name."""
     empty = {"era": "N/A", "whip": "N/A", "k9": "N/A"}
@@ -2648,7 +2729,7 @@ def notify_totals(total_bets):
         unit    = "carreras" if is_mlb else "goles"
         side    = b["team"]        # "OVER" / "UNDER"
         line    = b["side"]        # the book line number
-        gt      = _fmt_et(b.get("time", ""))
+        gt      = _fmt_smart_gt(b.get("time", ""))
 
         # Module 3: book safety warning
         bk_warn_tot = _book_warning(b.get("bookmaker", ""))
@@ -6373,7 +6454,7 @@ def notify_bets(new_bets):
             continue
         sport   = b.get("sport", "")
         emoji   = _sport_emoji(sport)
-        gt      = _fmt_et(b.get("time", ""))
+        gt      = _fmt_smart_gt(b.get("time", ""))
         elo_p   = b.get("elo_prob", 0)
         is_mlb  = b.get("sport", "") == "MLB"
 
@@ -7236,6 +7317,10 @@ def run_scan():
             if not games:
                 print(f"  ⚠️  {sport_key} — no data")
                 continue
+
+            # Override Odds-API times with authoritative MLB Stats API times
+            if "mlb" in sport_key.lower():
+                _patch_mlb_commence_times(games)
 
             # ── Soccer "today first" filter ────────────────────────────────
             # For soccer: prioritize today's games; only fall back to
