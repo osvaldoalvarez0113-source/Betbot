@@ -268,24 +268,20 @@ def _timing_check(commence_str: str, is_mlb: bool) -> dict:
     Returns timing decision for a game:
       skip          → True if game should be ignored entirely
       warn          → warning string to prepend to alert (or "")
-      ev_min        → minimum EV% required (raised for far-out soccer)
+      ev_min        → minimum EV% required
       cap_conf      → if True, cap confidence display to MEDIA
     """
     days = _days_until(commence_str)
     if is_mlb:
-        # MLB: only today and tomorrow
-        if days > 2:
+        # MLB: TODAY only — tomorrow and beyond skipped
+        if days > 1:
             return {"skip": True, "warn": "", "ev_min": 0, "cap_conf": False}
         return {"skip": False, "warn": "", "ev_min": 0, "cap_conf": False}
     else:
-        # Soccer / World Cup
-        if days > 7:
-            return {"skip": True, "warn": "", "ev_min": 0, "cap_conf": False}
+        # Soccer / World Cup: strictly less than 3 days away
+        # "today first" fallback handled in run_scan before games are filtered
         if days >= 3:
-            day_int = int(days)
-            warn = (f"⚠️ Partido en {day_int} días — "
-                    f"verificar lineup antes de apostar")
-            return {"skip": False, "warn": warn, "ev_min": 8.0, "cap_conf": True}
+            return {"skip": True, "warn": "", "ev_min": 0, "cap_conf": False}
         return {"skip": False, "warn": "", "ev_min": 0, "cap_conf": False}
 
 def remove_vig(odds_list):
@@ -1183,19 +1179,16 @@ def notify_arbitrage(arbs):
 
         # ── Timing filter ───────────────────────────────────────────────────
         if is_mlb_arb:
-            # MLB: today and tomorrow only (same rule as analysis)
-            if arb_days > 2:
-                print(f"  ⛔ ARB MLB omitido — muy lejano ({arb_days:.1f} días): {arb['match']}")
+            # MLB: TODAY only
+            if arb_days > 1:
+                print(f"  ⛔ ARB MLB omitido — no es hoy ({arb_days:.1f} días): {arb['match']}")
                 continue
         else:
-            # Soccer / World Cup
-            if arb_days > 7:
-                print(f"  ⛔ ARB soccer omitido — >7 días ({arb_days:.1f}): {arb['match']}")
+            # Soccer / World Cup: strictly less than 3 days
+            if arb_days >= 3:
+                print(f"  ⛔ ARB soccer omitido — {arb_days:.1f} días (necesita <3): {arb['match']}")
                 continue
-            if arb_days >= 3 and arb["profit_pct"] < 4.0:
-                print(f"  ⛔ ARB soccer omitido — 3-7 días con profit {arb['profit_pct']}% < 4%: {arb['match']}")
-                continue
-            # < 3 days: normal threshold (>= ARB_MIN_PROFIT = 2%) already enforced upstream
+            # profit >= 2% already enforced by ARB_MIN_PROFIT upstream
         # ───────────────────────────────────────────────────────────────────
 
         if i > 0:
@@ -4194,6 +4187,26 @@ def run_scan():
             if not games:
                 print(f"  ⚠️  {sport_key} — no data")
                 continue
+
+            # ── Soccer "today first" filter ────────────────────────────────
+            # For soccer: prioritize today's games; only fall back to
+            # 1-3 day games when there is nothing today.
+            if "mlb" not in sport_key:
+                today_games = [
+                    g for g in games
+                    if _days_until(g.get("commence_time", "")) < 1
+                ]
+                near_games = [
+                    g for g in games
+                    if 1 <= _days_until(g.get("commence_time", "")) < 3
+                ]
+                games = today_games if today_games else near_games
+                if not games:
+                    print(f"  ⏭  {sport_key} — sin partidos hoy ni en <3 días")
+                    continue
+                print(f"  📅 {sport_key} — {len(games)} partido(s) "
+                      f"({'hoy' if today_games else '<3 días'})")
+            # ──────────────────────────────────────────────────────────────
 
             current_games_by_sport[sport_key] = games   # for CLV check
 
