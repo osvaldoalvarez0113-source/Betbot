@@ -1,0 +1,111 @@
+Add intelligent analysis logic for 
+BOTH MLB and Soccer. The bot must 
+REASON before recommending picks,
+not just display statistics.
+
+━━━━━━━━━━━━━━━━━━━━
+MLB — PITCHER INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━
+
+RULE 1 — DOMINANT PITCHER:
+If ANY pitcher ERA < 2.75 (dominante):
+- Reduce projected total by 1.2 runs
+- OVER requires edge > 1.5 to alert
+- If edge < 1.5 with dominant pitcher
+  → SKIP the OVER alert completely
+- Add: "⚠️ Pitcher dominante — el Over
+  necesita edge mayor para tener valor"
+
+RULE 2 — BOTH PITCHERS WEAK:
+If BOTH pitchers ERA > 4.25:
+- Increase projected total by 0.8 runs
+- OVER gets priority
+- Add: "✅ Ambos pitchers débiles —
+  condiciones favorables para Over"
+
+RULE 3 — CONTRADICTORY PICK:
+If dominant pitcher BUT model says OVER:
+- Add: "⚠️ Contradicción: pitcher
+  dominante pero el modelo dice Over.
+  Considera apostar UNDER."
+- Cap confidence at MEDIA maximum
+
+RULE 4 — PITCHER MISMATCH:
+Show clear reasoning summary:
+"📊 Rangers con Rocker (promedio):
+  Guardians anotarán moderado
+
+  Guardians con Messick (dominante 🔥):
+  Rangers anotarán POCO
+
+  → Total proyectado bajo →
+  Favorece UNDER"
+
+━━━━━━━━━━━━━━━━━━━━
+SOCCER — TEAM INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━
+
+RULE 1 — STRONG DEFENSE:
+If ANY team concedes < 0.8 goles
+por partido (últimos 3):
+- Reduce projected total by 0.4 goles
+- OVER requires edge > 0.6 to alert
+- If edge < 0.6 → SKIP OVER alert
+- Add: "⚠️ Defensa sólida — el Over
+  necesita más edge para tener valor"
+
+RULE 2 — BOTH TEAMS ATTACK WELL:
+If BOTH teams score > 1.8 goles
+por partido (últimos 3):
+- Increase projected total by 0.3 goles
+- OVER gets priority
+- Add: "✅ Ambos equipos atacan bien —
+  condiciones favorables para Over"
+
+RULE 3 — CONTRADICTORY PICK:
+If team concedes < 0.8 BUT model
+says OVER:
+- Add: "⚠️ Contradicción: defensa
+  sólida pero el modelo dice Over.
+  Considera apostar UNDER."
+- Cap confidence at MEDIA maximum
+
+RULE 4 — TEAM MISMATCH:
+Show clear reasoning summary:
+"📊 España (concede 0.5/partido):
+  Rival anotará POCO
+
+  Marruecos (anota 0.8/partido):
+  España anotará con dificultad
+
+  → Total proyectado bajo →
+  Favorece UNDER"
+
+RULE 5 — WORLD CUP TACTICAL:
+If team NEEDS to win (urgencia crítica):
+- Increase projected total by 0.3
+- Add: "⚽ Partido abierto esperado →
+  Favorece Over y ML rival"
+
+If BOTH teams already qualified:
+- Reduce projected total by 0.2
+- Add: "🛡️ Ambos clasificados →
+  Partido conservador → Favorece Under"
+
+━━━━━━━━━━━━━━━━━━━━
+GENERAL RULES (BOTH SPORTS):
+━━━━━━━━━━━━━━━━━━━━
+
+- Apply ALL rules BEFORE generating
+  the final pick recommendation
+- Rules must CHANGE the pick if needed,
+  not just add text
+- When rules contradict the model →
+  always add explanation why
+- Never show ALTA confidence when
+  any contradiction rule fires
+- Show reasoning summary in every
+  totals alert so user understands
+  the logic behind the pick
+
+Commit when done.
