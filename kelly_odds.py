@@ -994,15 +994,17 @@ def _should_alert(key, odds=None, edge=None):
     return send
 
 def _era_label(era):
-    """Plain-language ERA quality descriptor."""
+    """Plain-language ERA quality descriptor with accurate MLB tiers."""
     try:
         e = float(era)
     except (ValueError, TypeError):
         return str(era)
-    if e < 3.00:   return "dominante"
-    elif e <= 4.50: return "sólido"
-    elif e <= 5.00: return "regular"
-    else:           return "vulnerable"
+    if e < 2.00:    return "élite 🌟"
+    elif e < 2.75:  return "dominante 🔥"
+    elif e < 3.50:  return "sólido ✅"
+    elif e < 4.25:  return "promedio ⚪"
+    elif e < 5.00:  return "débil ⚠️"
+    else:           return "vulnerable 🔴"
 
 def _parse_pitcher(s):
     """Parse '{name} (ERA X.XX)' → (name, era_float). Falls back to (s, 4.50)."""
