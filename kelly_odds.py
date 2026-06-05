@@ -1277,6 +1277,21 @@ MLB_PARK_FACTORS = {
     "Miami Marlins":        0.97,
 }
 
+# ── Park tendency: additive run adjustments (+ = OVER, - = UNDER) ─────────────
+# Based on multi-year historical O/U data per ballpark.
+MLB_PARK_TEND: "dict[str, tuple]" = {
+    "Colorado Rockies":     ("Coors Field",               +1.5, True),
+    "Cincinnati Reds":      ("Great American Ball Park",   +0.8, True),
+    "Texas Rangers":        ("Globe Life Field",           +0.6, True),
+    "Boston Red Sox":       ("Fenway Park",                +0.5, True),
+    "New York Yankees":     ("Yankee Stadium",             +0.4, True),
+    "San Francisco Giants": ("Oracle Park",                -0.8, False),
+    "San Diego Padres":     ("Petco Park",                 -0.7, False),
+    "Los Angeles Dodgers":  ("Dodger Stadium",             -0.5, False),
+    "Tampa Bay Rays":       ("Tropicana Field",            -0.5, False),
+    "Seattle Mariners":     ("T-Mobile Park",              -0.4, False),
+}
+
 _team_run_cache: dict = {}   # team_name -> {"rs_pg": float, "ra_pg": float}
 
 def fetch_team_run_stats(team_name):
@@ -1835,6 +1850,175 @@ def get_book_total(game):
                     fallback = entry
     return preferred or fallback
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODULES A9–A11: PARK TENDENCIES · BULLPEN ERA · PITCHER REST DAYS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def park_tendency_adj(home_team: str) -> "tuple[float, str]":
+    """
+    Return (adj_runs, note) for the home team's ballpark.
+    adj_runs is additive (+ favors OVER, - favors UNDER).
+    """
+    tend = MLB_PARK_TEND.get(home_team)
+    if not tend:
+        return 0.0, ""
+    park_name, adj, is_over = tend
+    favor = "Over" if is_over else "Under"
+    carrera_note = "más carreras en MLB" if is_over else "pocas carreras"
+    sign = f"+{adj}" if adj >= 0 else str(adj)
+    note = (
+        f"🏟️ {park_name}: estadio de {carrera_note} — favorece {favor}\n"
+        f"   Ajuste: {sign} carreras al total"
+    )
+    return adj, note
+
+
+_bullpen_era_cache: dict = {}
+
+def fetch_bullpen_era(team_name: str, starter_era: float) -> "tuple[float, str]":
+    """
+    Estimate team bullpen ERA from aggregate team pitching stats.
+
+    Formula:
+      bullpen_ERA = (team_ERA × total_IP − starter_ERA × starter_IP) / bullpen_IP
+    Assumes starters pitch ~5.5 inn/game, bullpen ~3.5 inn/game (of 9 total).
+
+    Returns (bullpen_era: float, display_note: str).
+    """
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck = f"{team_name}_{today}"
+    if ck in _bullpen_era_cache:
+        return _bullpen_era_cache[ck]
+
+    try:
+        if HAS_STATSAPI:
+            teams = statsapi.lookup_team(team_name)
+            if not teams:
+                raise ValueError("team not found")
+            tid = teams[0]["id"]
+        else:
+            data = _mlb_rest("/teams", {"sportId": 1, "season": MLB_YEAR})
+            match = next(
+                (t for t in data.get("teams", [])
+                 if team_name.lower() in t.get("name", "").lower()),
+                None,
+            )
+            if not match:
+                raise ValueError("team not found")
+            tid = match["id"]
+
+        pit = _mlb_rest(f"/teams/{tid}/stats",
+                        {"stats": "season", "group": "pitching", "season": MLB_YEAR})
+        p_stat = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
+
+        team_era = float(p_stat.get("era") or 4.20)
+        ip_str   = p_stat.get("inningsPitched") or "0"
+        total_ip = _parse_ip(ip_str)
+        gp       = max(int(p_stat.get("gamesPlayed") or 1), 1)
+
+        if total_ip < 10:
+            raise ValueError("insufficient innings")
+
+        starter_ip  = 5.5 * gp
+        bullpen_ip  = max(total_ip - starter_ip, 3.5 * gp)
+        bullpen_era = (team_era * total_ip - starter_era * starter_ip) / bullpen_ip
+        bullpen_era = round(max(0.0, min(bullpen_era, 9.99)), 2)
+
+        if bullpen_era < 3.50:
+            quality = "sólido ✅"
+        elif bullpen_era < 4.50:
+            quality = "promedio"
+        elif bullpen_era < 5.50:
+            quality = "débil ⚠️"
+        else:
+            quality = "vulnerable 🔴"
+
+        note = f"⚾ Bullpen {_es(team_name)}: ERA {bullpen_era:.2f} {quality}"
+        if bullpen_era > 5.0:
+            note += (
+                "\n   ⚠️ Bullpen vulnerable — carreras tardías esperadas"
+                "\n   → Considera Over en juegos cerrados"
+            )
+
+        result = (bullpen_era, note)
+        _bullpen_era_cache[ck] = result
+        return result
+    except Exception:
+        return 4.20, ""
+
+
+_pitcher_rest_cache: dict = {}
+
+def fetch_pitcher_rest_days(pitcher_id) -> "tuple[int, float, str]":
+    """
+    Fetch pitcher's last start date from MLB gameLog; compute days of rest.
+
+    Rest adjustments (additive runs to total):
+      ≤4 days (short rest)   → +0.5 runs  ⚠️
+       5 days (optimal)      →  0.0 runs  ✅
+      6–7 days (extra rest)  → −0.3 runs  💪
+      8+ days (rusty)        → +0.3 runs  ⚠️
+
+    Returns (days: int, adj: float, note: str).  days=-1 = unknown.
+    """
+    if not pitcher_id:
+        return -1, 0.0, ""
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck    = f"{pitcher_id}_{today}"
+    if ck in _pitcher_rest_cache:
+        return _pitcher_rest_cache[ck]
+
+    try:
+        data = _mlb_rest(f"/people/{pitcher_id}/stats", {
+            "stats":  "gameLog",
+            "group":  "pitching",
+            "season": MLB_YEAR,
+            "limit":  10,
+        })
+        splits = (data.get("stats", [{}])[0].get("splits", [])
+                  if data and data.get("stats") else [])
+
+        last_date = None
+        for sp in reversed(splits):
+            ip_raw = sp.get("stat", {}).get("inningsPitched", "0") or "0"
+            if float(ip_raw) >= 3.0:
+                last_date = (sp.get("date")
+                             or sp.get("game", {}).get("officialDate"))
+                break
+
+        if not last_date:
+            result = (-1, 0.0, "")
+            _pitcher_rest_cache[ck] = result
+            return result
+
+        last_dt = datetime.strptime(last_date[:10], "%Y-%m-%d").date()
+        days    = (datetime.now(CDT).date() - last_dt).days
+
+        if days <= 2:
+            adj, note = 0.0, ""
+        elif days <= 4:
+            adj  = +0.5
+            note = (f"⚠️ Solo {days} días de descanso → rendimiento puede bajar"
+                    f"\n   → Añade 0.5 carreras al total")
+        elif days == 5:
+            adj  = 0.0
+            note = f"✅ Descanso óptimo ({days} días) → rendimiento normal"
+        elif days <= 7:
+            adj  = -0.3
+            note = (f"💪 {days} días de descanso → suele rendir mejor"
+                    f"\n   → Reduce 0.3 carreras al total")
+        else:
+            adj  = +0.3
+            note = (f"⚠️ {days}+ días sin lanzar → puede estar oxidado"
+                    f"\n   → Añade 0.3 carreras al total")
+
+        result = (days, adj, note)
+        _pitcher_rest_cache[ck] = result
+        return result
+    except Exception:
+        return -1, 0.0, ""
+
+
 def analyze_totals(games, sport_key):
     """Compare projected totals vs bookmaker lines; return alert dicts."""
     is_mlb    = "mlb" in sport_key
@@ -1886,16 +2070,61 @@ def analyze_totals(games, sport_key):
             wind           = fetch_wind(park_city[1], park_city[2]) if park_city else None
             w_adj, w_label = wind_run_adj(wind)
 
-            our_line = round(base_line + pitch_adj + w_adj, 1)
+            our_line  = round(base_line + pitch_adj + w_adj, 1)
+            base_proj = our_line   # capture before A9–A11 adjustments
+
+            # ── Module A9: Park tendency ──────────────────────────────────
+            _pt_adj, _pt_note = park_tendency_adj(home)
+            our_line = round(our_line + _pt_adj, 1)
+
+            # ── Module A11: Pitcher rest days (done before bullpen so
+            #    both adjustments fold into our_line cleanly) ─────────────
+            _h_pid = p_data.get("home_id")
+            _a_pid = p_data.get("away_id")
+            _rest_adj   = 0.0
+            _rest_parts = []
+            for _pid, _pn in [(_h_pid, h_pname), (_a_pid, a_pname)]:
+                try:
+                    _, _radj, _rnote = fetch_pitcher_rest_days(_pid)
+                    if _rnote:
+                        _rest_parts.append(f"{_rnote} ({_pn})")
+                    _rest_adj += _radj
+                except Exception:
+                    pass
+            our_line  = round(our_line + _rest_adj, 1)
+            _rest_note = "\n".join(_rest_parts)
+
+            # ── Module A10: Bullpen ERA ───────────────────────────────────
+            _bull_adj   = 0.0
+            _bull_parts = []
+            for _t, _sera in [(home, h_era), (away, a_era)]:
+                try:
+                    _bera, _bnote = fetch_bullpen_era(_t, _sera)
+                    if _bnote:
+                        _bull_parts.append(_bnote)
+                    if _bera > 5.0:
+                        _bull_adj += 0.4
+                except Exception:
+                    pass
+            our_line   = round(our_line + _bull_adj, 1)
+            _bull_note = "\n".join(_bull_parts)
+
             extra = {
-                "pitcher_home": f"{h_pname} (ERA {h_era:.2f})",
-                "pitcher_away": f"{a_pname} (ERA {a_era:.2f})",
-                "era_home":     h_era,
-                "era_away":     a_era,
-                "pitch_adj":    pitch_adj,
-                "wind_info":    w_label or "Wind: N/A",
-                "form_home":    "",
-                "form_away":    "",
+                "pitcher_home":   f"{h_pname} (ERA {h_era:.2f})",
+                "pitcher_away":   f"{a_pname} (ERA {a_era:.2f})",
+                "era_home":       h_era,
+                "era_away":       a_era,
+                "pitch_adj":      pitch_adj,
+                "wind_info":      w_label or "Wind: N/A",
+                "form_home":      "",
+                "form_away":      "",
+                "base_proj":      base_proj,        # Module A9-A11
+                "park_tend_note": _pt_note,
+                "park_tend_adj":  _pt_adj,
+                "rest_note":      _rest_note,
+                "rest_adj":       round(_rest_adj, 2),
+                "bull_note":      _bull_note,
+                "bull_adj":       round(_bull_adj, 2),
             }
 
         else:
@@ -2009,6 +2238,22 @@ def notify_totals(total_bets):
             half_stake = round(b["stake"] / 2, 2)
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            # Build adjustment breakdown lines (Modules A9–A11)
+            base_p  = b.get("base_proj", b["our_line"])
+            park_n  = (b.get("park_tend_note") or "").strip()
+            rest_n  = (b.get("rest_note")      or "").strip()
+            bull_n  = (b.get("bull_note")      or "").strip()
+
+            adj_block = ""
+            if park_n:
+                adj_block += f"{park_n}\n"
+            if rest_n:
+                adj_block += f"{rest_n}\n"
+            if bull_n:
+                adj_block += f"{bull_n}\n"
+            if adj_block:
+                adj_block += f"{_DIV2}\n"
+
             body = (
                 f"{emoji} {b['match']}\n"
                 f"⏰ Hoy {gt}\n"
@@ -2017,9 +2262,11 @@ def notify_totals(total_bets):
                 f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn_tot}\n"
                 f"{_DIV}\n"
                 f"📊 POR QUÉ:\n"
-                f"Modelo proyecta: {b['our_line']} carreras\n"
-                f"El libro pone:   {line} carreras\n"
-                f"Diferencia:      {b['edge']} carreras de edge\n\n"
+                f"Modelo base:      {base_p} carreras\n"
+                f"{adj_block}"
+                f"Total proyectado: {b['our_line']} carreras\n"
+                f"El libro pone:    {line} carreras\n"
+                f"Edge:             {b['edge']} carreras ✅\n\n"
                 f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} (ERA {ph_era:.2f})\n"
                 f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} (ERA {pa_era:.2f})\n"
                 f"{wind_line}"
