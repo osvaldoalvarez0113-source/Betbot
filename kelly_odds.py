@@ -232,6 +232,13 @@ _wc_form_cache: dict = {}       # (team_name, date_str) → {goals_for, goals_ag
 _espn_matches_cache: dict = {}  # team_name_date → [{gf, ga, date, opp}]
 _weather_cache: dict = {}   # "lat,lon" → {speed, deg, label, fetched_at}
 
+# ── ERROR TRACKING / HEALTH CHECK STATE ──────────────────────────────────────
+last_health_check:    date = date(2000, 1, 1)
+_module_failures:     dict = {}   # module_name → consecutive failure count
+_module_last_alerted: dict = {}   # module_name → date of last alert
+_module_status:       dict = {}   # module_name → "ok" | "failing" | "warning"
+ERROR_LOG_FILE = "error_log.csv"
+
 # ── CORE HELPERS ──────────────────────────────────────────────────────────────
 
 def is_in_season(sport_key):
@@ -916,6 +923,149 @@ def morning_report_world_cup():
 
         except Exception as e:
             print(f"  ⚠️  WC report error: {e}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DAILY HEALTH CHECK — 7:50 AM ET (Feature 1)
+# ══════════════════════════════════════════════════════════════════════════════
+def run_health_check():
+    """Test every data module and send ntfy status report."""
+    global last_health_check
+    now   = datetime.now(ET)
+    today = now.date()
+    if last_health_check >= today:
+        return
+    last_health_check = today
+    print("\n🏥 Iniciando health check diario...")
+    results: list = []   # [(module_name, status_line)]
+
+    # 1 ── MLB Stats API
+    try:
+        games = fetch_mlb_games_today()
+        if isinstance(games, list):
+            results.append(("MLB Stats API",  "✅ funcionando"))
+            _track_module("MLB Stats API", True)
+        else:
+            raise ValueError("respuesta inesperada")
+    except Exception as e:
+        results.append(("MLB Stats API",  "❌ fallando"))
+        _track_module("MLB Stats API", False, str(e))
+
+    # 2 ── OpenWeatherMap
+    try:
+        if OPENWEATHER_KEY:
+            w = fetch_wind(40.7128, -74.0060)   # NYC probe
+            if w and w.get("speed") is not None:
+                results.append(("OpenWeatherMap", "✅ funcionando"))
+                _track_module("OpenWeatherMap", True)
+            else:
+                raise ValueError("respuesta vacía")
+        else:
+            results.append(("OpenWeatherMap", "⚠️ sin API key configurada"))
+    except Exception as e:
+        results.append(("OpenWeatherMap", "❌ fallando"))
+        _track_module("OpenWeatherMap", False, str(e))
+
+    # 3 ── Umpire data
+    try:
+        today_s = now.strftime("%Y-%m-%d")
+        u = fetch_home_plate_umpire("New York Yankees", today_s)
+        if u is not None:
+            results.append(("Umpire data",    "✅ funcionando"))
+        else:
+            results.append(("Umpire data",    "⚠️ sin datos para hoy"))
+    except Exception as e:
+        results.append(("Umpire data",    "❌ fallando"))
+        _log_error("Umpire data", "health_check", "", str(e))
+
+    # 4 ── Bullpen ERA
+    try:
+        era, _note = fetch_bullpen_era("New York Yankees")
+        if era and era > 0:
+            results.append(("Bullpen ERA",    "✅ funcionando"))
+            _track_module("Bullpen ERA", True)
+        else:
+            raise ValueError(f"era={era}")
+    except Exception as e:
+        results.append(("Bullpen ERA",    "❌ fallando"))
+        _track_module("Bullpen ERA", False, str(e))
+
+    # 5 ── Home/Away splits
+    try:
+        sp = fetch_mlb_home_away_splits("New York Yankees")
+        if sp:
+            ops_h = sp.get("home_ops") or sp.get("ops_home") or 0
+            ops_a = sp.get("away_ops") or sp.get("ops_away") or 0
+            if not ops_h and not ops_a:
+                results.append(("Splits",         "⚠️ datos genéricos detectados"))
+            else:
+                results.append(("Splits",         "✅ funcionando"))
+                _track_module("Splits", True)
+        else:
+            results.append(("Splits",         "⚠️ sin datos"))
+    except Exception as e:
+        results.append(("Splits",         "❌ fallando"))
+        _log_error("Splits", "health_check", "", str(e))
+
+    # 6 ── The Odds API
+    try:
+        if API_KEY:
+            r = requests.get(
+                "https://api.the-odds-api.com/v4/sports",
+                params={"apiKey": API_KEY},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                results.append(("The Odds API",   "✅ funcionando"))
+                _track_module("The Odds API", True)
+            else:
+                raise ValueError(f"HTTP {r.status_code}")
+        else:
+            results.append(("The Odds API",   "⚠️ sin API key configurada"))
+    except Exception as e:
+        results.append(("The Odds API",   "❌ fallando"))
+        _track_module("The Odds API", False, str(e))
+
+    # 7 ── Claude API
+    try:
+        probe = analyze_with_claude(
+            {
+                "match": "Test A vs Test B", "sport": "baseball_mlb",
+                "top_pick": "Test A",        "ev_pct": 5.0,
+                "true_prob": 55.0,           "odds": -110,
+                "stake": 10,
+                "pitcher_home": "Test Pitcher (ERA 3.50)",
+                "pitcher_away": "Test Pitcher (ERA 4.00)",
+            },
+            "MLB",
+        )
+        if probe is not None:
+            results.append(("Claude API",     "✅ funcionando"))
+            _track_module("Claude API", True)
+        else:
+            raise ValueError("retornó None")
+    except Exception as e:
+        results.append(("Claude API",     "❌ fallando"))
+        _track_module("Claude API", False, str(e))
+
+    failing = sum(1 for _, s in results if "❌" in s)
+    warning = sum(1 for _, s in results if "⚠️" in s)
+    lines   = "\n".join(f"{s}: {lbl}" for s, lbl in results)
+    if failing:
+        summary = f"⚠️ {failing} módulo{'s' if failing > 1 else ''} con problemas"
+    elif warning:
+        summary = f"⚠️ {warning} módulo{'s' if warning > 1 else ''} con advertencias"
+    else:
+        summary = "✅ Todos los módulos funcionando correctamente"
+
+    body = (
+        f"🏥 ESTADO DEL BOT — {now.strftime('%I:%M %p ET')}\n"
+        f"{_DIV}\n"
+        f"{lines}\n"
+        f"{_DIV}\n"
+        f"{summary}"
+    )
+    ntfy_post("🏥 ESTADO DEL BOT", body, "default")
+    print(f"  🏥 Health check completado: {summary}")
 
 def morning_report():
     global last_morning_report
@@ -2911,6 +3061,162 @@ def poisson_runline_prob(home_exp, away_exp, home_spread, max_runs=15):
                 p += poisson_prob(home_exp, i) * poisson_prob(away_exp, j)
     return max(0.01, min(0.99, p))
 
+# ══════════════════════════════════════════════════════════════════════════════
+# STAT RANGE VALIDATION (Feature 3)
+# ══════════════════════════════════════════════════════════════════════════════
+_STAT_RANGES: dict = {
+    "era":         (1.50, 8.00),
+    "fip":         (1.50, 8.00),
+    "ops":         (0.500, 1.100),
+    "bullpen_era": (2.00, 7.00),
+    "win_pct":     (0.20, 0.80),
+    "rs_pg":       (2.0,  8.0),
+    "ra_pg":       (2.0,  8.0),
+    "goals_pg":    (0.3,  3.5),
+    "elo":         (1200, 2200),
+}
+
+def _val_stat(key: str, value) -> "float | None":
+    """Return float value if within the declared valid range, else None."""
+    if value is None:
+        return None
+    rng = _STAT_RANGES.get(key)
+    if rng is None:
+        return value
+    try:
+        fv = float(value)
+    except (TypeError, ValueError):
+        return None
+    return fv if rng[0] <= fv <= rng[1] else None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ERROR LOGGING + MODULE HEALTH TRACKING (Features 2 & 6)
+# ══════════════════════════════════════════════════════════════════════════════
+_CRITICAL_MODULES = {"The Odds API", "Claude API", "MLB pitcher data"}
+
+def _log_error(module: str, error_type: str, game: str = "", description: str = "") -> None:
+    """Append one row to error_log.csv (Feature 6)."""
+    try:
+        import csv as _csv, os as _os
+        ts         = datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S ET")
+        need_hdr   = not _os.path.exists(ERROR_LOG_FILE)
+        with open(ERROR_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            if need_hdr:
+                w.writerow(["timestamp", "module", "error_type", "game", "description", "resolved"])
+            w.writerow([ts, module, error_type, game, description[:200], ""])
+    except Exception as ex:
+        print(f"  ⚠️  _log_error write failed: {ex}")
+
+
+def _track_module(module: str, ok: bool, error_desc: str = "", game: str = "") -> None:
+    """
+    Track module health.  3 consecutive failures of a critical module
+    trigger a single ntfy alert (once per day per module). (Feature 2)
+    """
+    global _module_failures, _module_last_alerted, _module_status
+    if ok:
+        _module_failures[module] = 0
+        _module_status[module]   = "ok"
+        return
+    _module_failures[module] = _module_failures.get(module, 0) + 1
+    _module_status[module]   = "failing"
+    _log_error(module, "consecutive_failure", game, error_desc)
+    count = _module_failures[module]
+    print(f"  ⚠️  [{module}] fallo #{count}: {error_desc}")
+    if count >= 3 and module in _CRITICAL_MODULES:
+        today = datetime.now(ET).date()
+        if _module_last_alerted.get(module) != today:
+            _module_last_alerted[module] = today
+            impact = {
+                "The Odds API":     "picks de todos los deportes pueden detenerse",
+                "Claude API":       "verificación AI desactivada",
+                "MLB pitcher data": "picks MLB pueden usar datos genéricos",
+            }.get(module, "datos incompletos")
+            body = (
+                f"🚨 ERROR EN EL BOT\n"
+                f"{_DIV}\n"
+                f"❌ Módulo fallando: {module}\n"
+                f"Error: {error_desc[:120]}\n"
+                f"Intentos: {count}/3\n\n"
+                f"Impacto: {impact}.\n\n"
+                f"Bot sigue funcionando con datos\n"
+                f"disponibles."
+            )
+            ntfy_post("🚨 ERROR EN EL BOT", body, "max")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA COMPLETENESS SCORE (Feature 7)
+# ══════════════════════════════════════════════════════════════════════════════
+def _data_completeness_score(context: dict, sport: str,
+                              home: str = "", away: str = "") -> int:
+    """
+    0–100 score measuring how complete the game data is.
+    Callers should add to context as 'data_quality_score'.
+    MLB:  Pitcher+ERA +20, FIP +10, Bullpen verified +15, Splits +15,
+          Umpire +10, Wind +10, Lineup +10, H2H +10
+    Soccer: Form +20, ELO +20, Referee +15, Rest days +10,
+            Lineup +15, Venue/temp +10, WC standings +10
+    """
+    score = 0
+    today_s = datetime.now(CDT).strftime("%Y-%m-%d")
+    if "mlb" in sport.lower():
+        ph = str(context.get("pitcher_home", "") or "")
+        pa = str(context.get("pitcher_away", "") or "")
+        if (ph and "TBD" not in ph and pa and "TBD" not in pa
+                and _val_stat("era", context.get("era_home"))
+                and _val_stat("era", context.get("era_away"))):
+            score += 20
+        if (_val_stat("fip", context.get("fip_home")) is not None
+                and _val_stat("fip", context.get("fip_away")) is not None):
+            score += 10
+        dq_h = _data_quality.get(f"{home}_{today_s}", {})
+        dq_a = _data_quality.get(f"{away}_{today_s}", {})
+        if dq_h.get("verified") and dq_a.get("verified"):
+            score += 15
+        elif dq_h.get("verified") or dq_a.get("verified"):
+            score += 7
+        h_sp = context.get("h_splits") or {}
+        a_sp = context.get("a_splits") or {}
+        if h_sp and a_sp:
+            score += 15
+        if context.get("umpire"):
+            score += 10
+        wind = str(context.get("wind_info", "") or "")
+        if "mph" in wind.lower():
+            score += 10
+        elif context.get("temp_label"):
+            score += 5
+        lu = context.get("lineup_data") or {}
+        if lu and (lu.get("home", {}).get("confirmed") or lu.get("away", {}).get("confirmed")):
+            score += 10
+        if context.get("h2h_data"):
+            score += 10
+    else:
+        form_h = str(context.get("form_home", "") or "")
+        form_a = str(context.get("form_away", "") or "")
+        if form_h and form_a:
+            score += 20
+        if (_val_stat("elo", context.get("elo_home")) is not None
+                and _val_stat("elo", context.get("elo_away")) is not None):
+            score += 20
+        if context.get("referee"):
+            score += 15
+        if context.get("rest_h_s") or context.get("rest_a_s"):
+            score += 10
+        ln_h = context.get("lineup_h_s") or {}
+        ln_a = context.get("lineup_a_s") or {}
+        if ln_h.get("confirmed") or ln_a.get("confirmed"):
+            score += 15
+        if context.get("venue_note_s") or context.get("temp_label_s"):
+            score += 10
+        if context.get("wc_standings"):
+            score += 10
+    return min(score, 100)
+
+
 EV_MIN_PCT   = 3.0   # minimum EV% to include a bet in Full Game Analysis
 PROB_MIN     = 0.50  # minimum true probability to include a bet in Full Game Analysis
 _RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
@@ -3380,6 +3686,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 "contradiction": _contradiction,
             },
         }
+        context["data_quality_score"] = _data_completeness_score(
+            context, sport_key, home, away)
 
     # ── SOCCER ────────────────────────────────────────────────────────────────
     else:
@@ -3688,6 +3996,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 "contradiction": _contradiction_s,
             },
         }
+        context["data_quality_score"] = _data_completeness_score(
+            context, sport_key, home, away)
 
     # Drop any pick whose true probability is below the minimum threshold
     candidates = [c for c in candidates if c["true_prob"] >= PROB_MIN]
@@ -3700,6 +4010,14 @@ def analyze_game_full(game, sport_key, prev_map=None):
     top3 = candidates[:3]
     for c in top3:
         c["safest"] = c["true_prob"] >= 0.60
+
+    # ── Feature 7: data completeness guard ───────────────────────────────
+    _dqs = context.get("data_quality_score", 100)
+    if _dqs < 50:
+        print(f"  ⏭️  Juego omitido — datos insuficientes ({_dqs}/100): {home} vs {away}")
+        _log_error("data_completeness", "skip", f"{home} vs {away}",
+                   f"score {_dqs}/100 < 50")
+        return None
 
     # ── Claude AI: expert validation of top pick ──────────────────────────
     _claude_data_g = {
@@ -3725,6 +4043,13 @@ def analyze_game_full(game, sport_key, prev_map=None):
         top3 = top3[1:]
         if not top3:
             return None
+
+    # Feature 7: cap confidence at MEDIA when data is partial (score 50–79)
+    if 50 <= _dqs < 80 and _claude_result_g:
+        if _claude_result_g.get("confianza") == "ALTA":
+            _claude_result_g["confianza"] = "MEDIA"
+        _claude_result_g["datos_incompletos"] = True
+        print(f"  ⚠️  Confianza capada a MEDIA — datos parciales ({_dqs}/100)")
 
     return {
         "game_id":     game_id,
@@ -5670,18 +5995,24 @@ def _claude_block(claude: "dict | None") -> str:
     if isinstance(issues, str):
         issues = [issues]
 
-    conf_icon   = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
-    has_issues  = bool(issues)
-    data_ok     = apostar and not has_issues
+    conf_icon      = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
+    has_issues     = bool(issues)
+    partial_data   = bool(claude.get("datos_incompletos"))
+    data_ok        = apostar and not has_issues
 
     if data_ok:
         # ── Verified path ─────────────────────────────────────────────────
         pos_lines = "".join(f"   ✅ {p}\n" for p in pos[:3])
         neg_lines = "".join(f"   ⚠️ {p}\n" for p in neg[:2])
+        partial_note = (
+            f"⚠️ Análisis con datos parciales — verificar antes de apostar\n"
+            if partial_data else ""
+        )
         return (
             f"{_DIV}\n"
             f"🤖 Analizado y verificado por Claude AI\n"
             f"✅ Datos confirmados antes de apostar\n"
+            f"{partial_note}"
             f"{_DIV}\n"
             f"Pick: {pick}  |  Confianza: {conf_icon} {conf}\n"
             f"{reason}\n"
@@ -6226,6 +6557,95 @@ def send_daily_ntfy_report():
             + ("  🛑 PAUSADO" if _bankroll_paused else "  ⚠️ bajo" if _bankroll_mult < 1.0 else "") + "\n"
             + f"🔍 Escaneando desde las 10 AM ET"
         )
+
+        # ── Feature 4: Data quality daily report ─────────────────────────
+        try:
+            today_s   = datetime.now(ET).strftime("%Y-%m-%d")
+            mlb_games = []
+            try:
+                mlb_games = fetch_mlb_games_today()
+            except Exception:
+                pass
+            total_g = len(mlb_games)
+            pit_ok  = 0
+            ump_ok  = 0
+            for _g in mlb_games:
+                home_t = _g.get("teams", {}).get("home", {}).get("team", {}).get("name", "")
+                away_t = _g.get("teams", {}).get("away", {}).get("team", {}).get("name", "")
+                hp = (_g.get("teams", {}).get("home", {}).get("probablePitcher") or
+                      _g.get("home_probable_pitcher"))
+                ap = (_g.get("teams", {}).get("away", {}).get("probablePitcher") or
+                      _g.get("away_probable_pitcher"))
+                if hp and ap:
+                    pit_ok += 1
+                if home_t:
+                    u = None
+                    try:
+                        u = fetch_home_plate_umpire(home_t, today_s)
+                    except Exception:
+                        pass
+                    if u:
+                        ump_ok += 1
+            split_ok    = 0
+            weather_ok  = 0
+            bullpen_ok  = 0
+            unique_teams: set = set()
+            for _g in mlb_games:
+                for _t in [
+                    _g.get("teams", {}).get("home", {}).get("team", {}).get("name", ""),
+                    _g.get("teams", {}).get("away", {}).get("team", {}).get("name", ""),
+                ]:
+                    if _t and _t not in unique_teams:
+                        unique_teams.add(_t)
+                        try:
+                            if fetch_mlb_home_away_splits(_t):
+                                split_ok += 1
+                        except Exception:
+                            pass
+                        dq = _data_quality.get(f"{_t}_{today_s}", {})
+                        if dq.get("verified"):
+                            bullpen_ok += 1
+            # weather: count park coords available
+            weather_ok = sum(1 for _g in mlb_games
+                             if _g.get("venue", {}).get("name")
+                             or _g.get("teams", {}).get("home", {})
+                             .get("team", {}).get("venue"))
+            lu_ok = 0  # confirmed lineups unknown until scan time
+
+            total_teams = len(unique_teams) or 1
+
+            score_parts = []
+            if total_g:
+                score_parts.append(pit_ok / total_g)
+                score_parts.append(ump_ok / total_g)
+                score_parts.append(split_ok / total_teams)
+                score_parts.append(bullpen_ok / total_teams)
+            overall_pct = int(sum(score_parts) / len(score_parts) * 100) if score_parts else 0
+            conf_label  = ("ALTA" if overall_pct >= 80
+                           else "MODERADA" if overall_pct >= 60
+                           else "BAJA")
+
+            def _frac(ok, total):
+                return f"{ok}/{total}" if total else "–"
+
+            dq_block = (
+                f"\n{_DIV}\n"
+                f"📊 CALIDAD DE DATOS HOY:\n"
+                f"{_DIV}\n"
+                f"✅ Pitchers confirmados: {_frac(pit_ok, total_g)} juegos\n"
+                f"⚠️ Umpires disponibles:  {_frac(ump_ok, total_g)} juegos\n"
+                f"✅ Splits home/away:     {_frac(split_ok, total_teams)} equipos\n"
+                f"✅ Bullpen ERA verif.:   {_frac(bullpen_ok, total_teams)} equipos\n"
+                f"✅ Clima/parque:        {_frac(weather_ok, total_g)} juegos\n"
+                f"{_DIV}\n"
+                f"Confianza general de datos: {overall_pct}%\n"
+                f"Picks de hoy: {conf_label} precisión"
+            )
+        except Exception as _dqe:
+            dq_block = ""
+            print(f"  ⚠️  Data quality block error: {_dqe}")
+
+        body += dq_block
         ntfy_post("📊 REPORTE DIARIO", body, "default")
         print("  📊 Reporte diario ntfy enviado")
     except Exception as e:
@@ -6296,6 +6716,40 @@ def send_weekly_summary():
             f"PRÓXIMA SEMANA:\n"
             f"⚾ MLB activo  ⚽ Mundial en curso"
         )
+
+        # ── Feature 6: error log weekly summary ──────────────────────────
+        try:
+            import csv as _csv_w, os as _os_w
+            if _os_w.path.exists(ERROR_LOG_FILE):
+                with open(ERROR_LOG_FILE, newline="", encoding="utf-8") as _f:
+                    _rows = list(_csv_w.DictReader(_f))
+                week_ago_s = (datetime.now(ET) - timedelta(days=7)).strftime("%Y-%m-%d")
+                _week_errs = [r for r in _rows
+                              if r.get("timestamp", "") >= week_ago_s]
+                if _week_errs:
+                    from collections import Counter as _Counter
+                    _mod_counts = _Counter(r.get("module", "?") for r in _week_errs)
+                    _worst_mod  = _mod_counts.most_common(1)[0]
+                    _resolved   = sum(1 for r in _week_errs if r.get("resolved"))
+                    _need_attn  = len(_week_errs) - _resolved
+                    _mod_lines  = "\n".join(
+                        f"  {m}: {c} errores"
+                        for m, c in _mod_counts.most_common(5)
+                    )
+                    body += (
+                        f"\n{_DIV}\n"
+                        f"🔍 ERRORES DE LA SEMANA:\n"
+                        f"{_DIV}\n"
+                        f"Módulo con más errores: {_worst_mod[0]}\n"
+                        f"Total errores: {len(_week_errs)}\n"
+                        f"Resueltos automáticamente: {_resolved}\n"
+                        f"Requirieron atención: {_need_attn}\n"
+                        f"{_DIV}\n"
+                        f"Por módulo:\n{_mod_lines}"
+                    )
+        except Exception as _err_e:
+            print(f"  ⚠️  Error log weekly section failed: {_err_e}")
+
         ntfy_post("📊 RESUMEN SEMANAL", body, "default")
         print("  📊 Resumen semanal ntfy enviado")
     except Exception as e:
@@ -7489,6 +7943,13 @@ if __name__ == "__main__":
             print(f"\n{'='*50}\n🕐 {now_cdt.strftime('%Y-%m-%d %H:%M CDT')}")
 
             check_midnight_reset()
+
+            # Health check at 7:50 AM ET (once per day) — Feature 1
+            if now_et.hour == 7 and now_et.minute >= 50 and last_health_check < now_et.date():
+                try:
+                    run_health_check()
+                except Exception as e:
+                    print(f"  ⚠️  Health check error: {e}")
 
             # Morning report at 8 AM ET (once per day) — Module 2
             if now_et.hour == 8 and last_morning_report < now_et.date():
