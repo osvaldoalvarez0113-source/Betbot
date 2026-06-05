@@ -1269,7 +1269,7 @@ def notify_arbitrage(arbs):
         else:
             all_books = [arb["book_a"], arb["book_b"]]
         if all(_is_risky_book(b) for b in all_books):
-            print(f"  ⛔ ARB omitido — todos los libros riesgosos: {arb['match']}")
+            print(f"  ⛔ ARB omitido — todas las casas de apuestas riesgosas: {arb['match']}")
             continue
         # ───────────────────────────────────────────────────────────────────
 
@@ -1312,7 +1312,7 @@ def notify_arbitrage(arbs):
             tag_c       = _arb_leg_tag(arb["book_c"])
             total_stake = round(arb["stake_a"] + arb["stake_b"] + arb["stake_c"], 2)
             has_risky   = any(_is_risky_book(b) for b in [arb["book_a"], arb["book_b"], arb["book_c"]])
-            risky_note  = "⚠️ Un libro es riesgoso — apuesta sólo en los marcados ✅ si es posible\n" if has_risky else ""
+            risky_note  = "⚠️ Una casa de apuestas es riesgosa — apuesta sólo en las marcadas ✅ si es posible\n" if has_risky else ""
             body = (
                 f"{emoji} {match}\n"
                 f"💰 Ganancia garantizada: ${profit} ({pct}%)\n"
@@ -1331,7 +1331,7 @@ def notify_arbitrage(arbs):
         else:
             total_stake = round(arb["stake_a"] + arb["stake_b"], 2)
             has_risky   = any(_is_risky_book(b) for b in [arb["book_a"], arb["book_b"]])
-            risky_note  = "⚠️ Un libro es riesgoso — apuesta sólo en los marcados ✅ si es posible\n" if has_risky else ""
+            risky_note  = "⚠️ Una casa de apuestas es riesgosa — apuesta sólo en las marcadas ✅ si es posible\n" if has_risky else ""
             body = (
                 f"{emoji} {match}\n"
                 f"💰 Ganancia garantizada: ${profit} ({pct}%)\n"
@@ -2474,7 +2474,7 @@ def notify_totals(total_bets):
                 f"Modelo base:      {base_p} carreras\n"
                 f"{adj_block}"
                 f"Total proyectado: {b['our_line']} carreras\n"
-                f"El libro pone:    {line} carreras\n"
+                f"La casa de apuestas pone: {line} carreras\n"
                 f"Edge:             {b['edge']} carreras ✅\n\n"
                 f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} (ERA {ph_era:.2f})\n"
                 f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} (ERA {pa_era:.2f})\n"
@@ -2543,7 +2543,7 @@ def notify_totals(total_bets):
                 f"{_DIV}\n"
                 f"📊 POR QUÉ:\n"
                 f"Modelo proyecta: {b['our_line']} {unit}\n"
-                f"El libro pone:   {line} {unit}\n"
+                f"La casa de apuestas pone: {line} {unit}\n"
                 f"Diferencia:      {b['edge']} {unit} de edge"
                 f"{soc_adj_block}\n"
                 + (f"\n{form_block}\n" if form_block else "")
@@ -4210,7 +4210,7 @@ def notify_sharp_money(sharp_moves):
             f"📌 Pick: {team} @ {m['odds_now']}\n"
             f"📊 Línea: {m['odds_prev']} → {m['odds_now']} ({arrow}{m['pct']}%)\n"
             f"{context_lines}"
-            f"⭐ ACCIÓN: Apostar {team} en el mejor libro disponible\n"
+            f"⭐ ACCIÓN: Apostar {team} en la mejor casa de apuestas disponible\n"
             f"{_DIV3}\n"
             f"🟢 CONFIANZA: ALTA — apostar\n"
             f"{_DIV2}"
@@ -4238,7 +4238,7 @@ def _book_warning(bookmaker):
     """Return warning line if bookmaker is risky, else empty string."""
     bk = (bookmaker or "").lower()
     if any(r in bk for r in RISKY_BOOKS):
-        return ("\n⚠️ LIBRO RIESGOSO — limitan cuentas ganadoras. "
+        return ("\n⚠️ CASA DE APUESTAS RIESGOSA — limitan cuentas ganadoras. "
                 "Busca línea similar en Bovada o BetOnline")
     return ""
 
@@ -5899,8 +5899,8 @@ def notify_bets(new_bets):
                 f"{_DIV}\n"
                 f"{top3_blk}"
                 f"📊 POR QUÉ:\n"
-                f"Modelo → {elo_p}% de ganar\n"
-                f"Libro  → {impl_pct}% implícito\n"
+                f"Modelo           → {elo_p}% de ganar\n"
+                f"Casa de apuestas → {impl_pct}% implícito\n"
                 f"Edge:     {b['edge']}%\n\n"
                 f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} (ERA {ph_era:.2f})\n"
                 f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} (ERA {pa_era:.2f})\n"
@@ -5926,7 +5926,7 @@ def notify_bets(new_bets):
                 f"{_DIV}\n"
                 f"{top3_blk}"
                 f"📊 POR QUÉ:\n"
-                f"Nuestro modelo: {elo_p}% | Libro: {impl_pct}% → Edge {b['edge']}%\n"
+                f"Nuestro modelo: {elo_p}% | Casa de apuestas: {impl_pct}% → Edge {b['edge']}%\n"
                 f"{_DIV}\n"
                 f"{action}\n"
                 f"{_DIV2}"
@@ -6531,7 +6531,7 @@ def notify_steam_moves(steam_list: list):
             f"{_DIV}\n"
             f"📉 Línea movió: {s['odds_from']:.2f} → {s['odds_to']:.2f} {arrow}\n"
             f"   en {book_names}\n"
-            f"   ({n_books} libros en menos de 10 minutos)\n"
+            f"   ({n_books} casas de apuestas en menos de 10 minutos)\n"
             f"\n"
             f"💎 Dinero serio entrando en {_es(s['team'])}\n"
             f"⭐ ACCIÓN: {_es(s['team'])} ML ahora\n"
@@ -6541,7 +6541,7 @@ def notify_steam_moves(steam_list: list):
             f"{_DIV2}"
         )
         ntfy_post(f"🚂 STEAM | {_es(s['team'])} | {s['match']}", body, "urgent")
-        print(f"  🚂 Steam: {s['team']} en {s['match']} ({n_books} libros)")
+        print(f"  🚂 Steam: {s['team']} en {s['match']} ({n_books} casas de apuestas)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PARLAY DETECTOR
