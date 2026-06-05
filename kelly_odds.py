@@ -515,6 +515,8 @@ def scan_arbitrage(games):
 
         if margin < 1.0:
             profit_pct = (1.0 - margin) / margin * 100
+            if profit_pct < 0.3 or profit_pct > 8.0:
+                continue   # below threshold or likely stale-odds false positive
             stake_a    = BANKROLL / (odds_a * margin)
             stake_b    = BANKROLL / (odds_b * margin)
             profit     = BANKROLL * (1.0 - margin) / margin
@@ -530,7 +532,9 @@ def scan_arbitrage(games):
     return arbs
 
 def notify_arbitrage(arbs):
-    for arb in arbs:
+    for i, arb in enumerate(arbs):
+        if i > 0:
+            time.sleep(2)   # avoid ntfy.sh HTTP 429 rate limiting
         body = (
             f"Bet ${arb['stake_a']} on {arb['team_a']} @ {arb['odds_a']} ({arb['book_a']})\n"
             f"Bet ${arb['stake_b']} on {arb['team_b']} @ {arb['odds_b']} ({arb['book_b']})\n"
