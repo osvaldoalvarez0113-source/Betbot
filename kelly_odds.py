@@ -4473,6 +4473,154 @@ def check_midnight_reset():
         last_reset    = today
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PARLAY DETECTOR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _parlay_bet_type(label: str) -> str:
+    """Classify label as 'UNDER', 'ML', or '' (ineligible for parlay)."""
+    u = label.upper()
+    if "UNDER" in u:
+        return "UNDER"
+    if " ML" in u or u.endswith("ML"):
+        return "ML"
+    return ""
+
+
+def _extract_parlay_candidates(analysis: dict) -> list:
+    """
+    Extract parlay-eligible picks from one full analysis.
+    Requirements: EV ≥ 8%, prob ≥ 60%, safe book, no TBD, no contradiction.
+    """
+    ctx = analysis.get("context", {})
+    if ctx.get("tbd_note"):
+        return []
+    if ctx.get("pitch_intel", {}).get("contradiction", False):
+        return []
+
+    picks = []
+    for c in analysis.get("candidates", []):
+        if c.get("ev_pct",    0) < 8.0:
+            continue
+        if c.get("true_prob", 0) < 0.60:
+            continue
+        if not _is_safe_book(c.get("book", "")):
+            continue
+        bet_type = _parlay_bet_type(c.get("label", ""))
+        if not bet_type:
+            continue
+        picks.append({
+            "game_id":   analysis["game_id"],
+            "match":     analysis["match"],
+            "sport":     analysis.get("sport", ""),
+            "is_mlb":    analysis.get("is_mlb", False),
+            "label":     c["label"],
+            "bet_type":  bet_type,
+            "true_prob": c["true_prob"],
+            "odds":      c["odds"],
+            "book":      c["book"],
+            "ev_pct":    c["ev_pct"],
+            "stake":     c["stake"],
+        })
+    return picks
+
+
+def _send_parlay_alert(p: dict):
+    """Format and fire the ntfy parlay alert."""
+    import re
+    l1, l2 = p["leg1"], p["leg2"]
+
+    def _strip(lbl):
+        return re.sub(r"[^\x00-\x7F\s\.\d\+\-\/]", "", lbl).strip()
+
+    def _pair(match):
+        parts = match.split(" vs ", 1)
+        return f"{_es(parts[0])} vs {_es(parts[1])}" if len(parts) == 2 else match
+
+    body = (
+        f"🔗 Pierna 1:\n"
+        f"   {_strip(l1['label'])} | {_pair(l1['match'])}\n"
+        f"   Prob: {round(l1['true_prob']*100):.0f}%"
+        f" | @ {l1['odds']:.2f} {l1['book'].title()}\n"
+        f"\n"
+        f"🔗 Pierna 2:\n"
+        f"   {_strip(l2['label'])} | {_pair(l2['match'])}\n"
+        f"   Prob: {round(l2['true_prob']*100):.0f}%"
+        f" | @ {l2['odds']:.2f} {l2['book'].title()}\n"
+        f"{'─'*28}\n"
+        f"💰 Apuesta parlay: ${p['parlay_stake']:.0f}\n"
+        f"   Odds combinadas: {p['comb_odds']:.2f}\n"
+        f"   Ganancia si gana: ${p['win_payout']:.2f}\n"
+        f"   Ganancia esperada: +{p['parlay_ev']:.1f}%\n"
+        f"{'─'*28}\n"
+        f"⚠️ Los parlays son más riesgo.\n"
+        f"   Apuesta poco — máximo $15-20.\n"
+        f"🟡 APOSTAR MITAD del monto sugerido"
+    )
+    title = f"🎰 PARLAY | {l1['bet_type']} x2 | +{p['parlay_ev']:.1f}% EV"
+    print(f"\n  🎰 PARLAY detectado — {l1['bet_type']} x2 | "
+          f"EV +{p['parlay_ev']:.1f}% | Stake ${p['parlay_stake']:.0f}")
+    ntfy_post(title, body, priority="high")
+
+
+def detect_and_notify_parlays(all_analyses: list):
+    """
+    After a full scan, find the best qualifying 2-leg parlay and alert once.
+    Thresholds: each leg EV ≥ 8%, prob ≥ 60%, safe book, same bet type,
+    different games, no TBD/contradiction; parlay EV > 15%.
+    """
+    eligible = []
+    for a in all_analyses:
+        eligible.extend(_extract_parlay_candidates(a))
+
+    if len(eligible) < 2:
+        return
+
+    best_parlay = None
+    best_ev     = 15.0   # minimum to suggest
+
+    for i in range(len(eligible)):
+        for j in range(i + 1, len(eligible)):
+            p1, p2 = eligible[i], eligible[j]
+            if p1["game_id"] == p2["game_id"]:
+                continue
+            if p1["bet_type"] != p2["bet_type"]:
+                continue
+
+            comb_odds   = round(p1["odds"] * p2["odds"], 2)
+            parlay_ev   = round(
+                (p1["true_prob"] * p2["true_prob"] * comb_odds - 1) * 100, 1
+            )
+            if parlay_ev <= best_ev:
+                continue
+
+            # Stake: 10% of smaller Kelly, $5 min, $20 max, rounded to $5
+            base         = min(p1["stake"], p2["stake"])
+            parlay_stake = max(5.0, min(20.0, round(base * 0.10 / 5) * 5))
+            if parlay_stake < 5.0:
+                parlay_stake = 5.0
+
+            best_ev     = parlay_ev
+            best_parlay = {
+                "leg1":         p1,
+                "leg2":         p2,
+                "comb_odds":    comb_odds,
+                "parlay_ev":    parlay_ev,
+                "parlay_stake": parlay_stake,
+                "win_payout":   round(parlay_stake * comb_odds, 2),
+            }
+
+    if not best_parlay:
+        return
+
+    pk = (f"parlay_{best_parlay['leg1']['game_id']}_"
+          f"{best_parlay['leg2']['game_id']}")
+    if not _should_alert(pk, edge=best_parlay["parlay_ev"]):
+        return
+
+    _send_parlay_alert(best_parlay)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CORE — MAIN SCAN
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -4480,10 +4628,11 @@ def run_scan():
     global daily_bets, lineup_scan_counter
     prev_map  = load_previous_odds()
     new_map   = {}
-    all_bets   = []
-    all_sharp  = []
-    all_arbs   = []
-    all_totals = []
+    all_bets          = []
+    all_sharp         = []
+    all_arbs          = []
+    all_totals        = []
+    all_full_analyses = []   # parlay detector — collects across all sports
     now_month  = datetime.now(CDT).month
 
     # Improvement 4: bankroll dashboard at top of every scan
@@ -4579,6 +4728,7 @@ def run_scan():
             if full_analyses:
                 print(f"  🔍 {short} — {len(full_analyses)} full analysis(es)")
                 notify_game_analysis(full_analyses, sport_key)
+                all_full_analyses.extend(full_analyses)  # parlay collector
 
         except Exception as e:
             print(f"  ⚠️  {sport_key} error (skipping): {e}")
@@ -4594,6 +4744,12 @@ def run_scan():
         notify_sharp_money(all_sharp)
     if all_arbs:
         notify_arbitrage(all_arbs)
+
+    # Parlay detector — runs once after all sports are processed
+    try:
+        detect_and_notify_parlays(all_full_analyses)
+    except Exception as _pe:
+        print(f"  ⚠️  Parlay detector error: {_pe}")
 
     # Improvement 3: check pending bets for closing lines / CLV
     try:
