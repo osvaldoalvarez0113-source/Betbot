@@ -1064,6 +1064,78 @@ def _era_label(era):
     elif e < 5.00:  return "débil ⚠️"
     else:           return "vulnerable 🔴"
 
+def _elo_tier(elo_num: float) -> str:
+    """Convert raw ELO to FIFA-tier plain-Spanish strength label."""
+    try:
+        e = float(elo_num)
+    except (TypeError, ValueError):
+        return "MEDIA"
+    if e >= 1930:   return "MUY ALTA 🌟"
+    if e >= 1760:   return "ALTA 💪"
+    if e >= 1650:   return "MEDIA ➡️"
+    return "BAJA ⚠️"
+
+def _park_label(pf: float) -> str:
+    """Translate park factor to plain Spanish."""
+    try:
+        pf = float(pf)
+    except (TypeError, ValueError):
+        return "Estadio: neutral"
+    pct = round((pf - 1.0) * 100)
+    if pct > 2:
+        return f"🏟️ Estadio: favorece bateadores (+{pct}% más carreras)"
+    if pct < -2:
+        return f"🏟️ Estadio: favorece pitchers ({pct}% menos carreras)"
+    return "🏟️ Estadio: neutral"
+
+def _result_to_es(r: str) -> str:
+    """'W'→'✅ Ganó'  'D'→'🤝 Empató'  'L'→'❌ Perdió'"""
+    return {"W": "✅ Ganó", "D": "🤝 Empató", "L": "❌ Perdió"}.get(r, r)
+
+_mlb_recent_cache: dict = {}
+
+def fetch_mlb_team_recent(team: str) -> dict | None:
+    """
+    Last 5 completed MLB games for a team via Odds API scores.
+    Returns {results: [(label, score_str),...], wins, losses} or None.
+    """
+    ck = f"{team}_{datetime.now().strftime('%Y-%m-%d')}"
+    if ck in _mlb_recent_cache:
+        return _mlb_recent_cache[ck]
+    try:
+        url = (f"https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/"
+               f"?apiKey={API_KEY}&daysFrom=14&dateFormat=iso")
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        games = [g for g in r.json()
+                 if (g.get("home_team") == team or g.get("away_team") == team)
+                 and g.get("completed") is True]
+        games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
+        last5 = games[:5]
+        if not last5:
+            return None
+        results = []
+        for g in last5:
+            is_home = g["home_team"] == team
+            sc_list = g.get("scores") or []
+            scores  = {s["name"]: int(s["score"]) for s in sc_list
+                       if s.get("score") is not None}
+            opp      = g["away_team"] if is_home else g["home_team"]
+            my_sc    = scores.get(team, 0)
+            opp_sc   = scores.get(opp, 0)
+            if my_sc > opp_sc:   label = "W"
+            elif my_sc == opp_sc: label = "D"
+            else:                 label = "L"
+            results.append((label, f"{my_sc}-{opp_sc}"))
+        wins   = sum(1 for r, _ in results if r == "W")
+        losses = sum(1 for r, _ in results if r == "L")
+        res = {"results": results, "wins": wins, "losses": losses}
+        _mlb_recent_cache[ck] = res
+        return res
+    except Exception:
+        return None
+
 def _parse_pitcher(s):
     """Parse '{name} (ERA X.XX)' → (name, era_float). Falls back to (s, 4.50)."""
     if s and " (ERA " in s:
@@ -1896,6 +1968,10 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "pform_a":       pform_a,   # MLB A1
             "umpire":        umpire,    # MLB A2
             "tbd_note":      tbd_note,  # Fix 5
+            "pname_home":    h_pname,   # raw pitcher name
+            "pname_away":    a_pname,   # raw pitcher name
+            "era_home":      h_era,     # raw ERA float
+            "era_away":      a_era,     # raw ERA float
         }
 
     # ── SOCCER ────────────────────────────────────────────────────────────────
@@ -2082,109 +2158,145 @@ def notify_game_analysis(analyses, sport_key):
         if not a["candidates"]:
             continue
 
-        # Context block
+        # ── Context block ─────────────────────────────────────────────────────
         if is_mlb:
+            # Pitchers
+            pn_h = ctx.get("pname_home", "TBD")
+            pn_a = ctx.get("pname_away", "TBD")
+            er_h = ctx.get("era_home", 4.50)
+            er_a = ctx.get("era_away", 4.50)
             ctx_lines = (
-                f"🔵 Pitcher local:  {ctx['pitcher_home']}\n"
-                f"🔴 Pitcher visita: {ctx['pitcher_away']}\n"
-                f"📊 RS/RA local:    {ctx['rs_home']} / {ctx['ra_home']} por juego\n"
-                f"📊 RS/RA visita:   {ctx['rs_away']} / {ctx['ra_away']} por juego\n"
-                f"🏟️  Factor parque:  x{ctx['park_factor']:.2f}\n"
+                f"🔵 Pitcher local: {pn_h}\n"
+                f"   Promedio de carreras recibidas: {er_h:.2f}\n"
+                f"   Nivel: {_era_label(er_h)}\n"
+                f"🔴 Pitcher visita: {pn_a}\n"
+                f"   Promedio de carreras recibidas: {er_a:.2f}\n"
+                f"   Nivel: {_era_label(er_a)}\n"
             )
-            # MLB A1: pitcher recent form
-            pf_h = ctx.get("pform_h")
-            pf_a = ctx.get("pform_a")
-            if pf_h:
-                eras_str = ", ".join(f"{e:.1f}" for e in pf_h["eras"])
-                ctx_lines += f"📈 {home_es} últ. 3: {eras_str} → {pf_h['trend']}\n"
-            if pf_a:
-                eras_str = ", ".join(f"{e:.1f}" for e in pf_a["eras"])
-                ctx_lines += f"📈 {away_es} últ. 3: {eras_str} → {pf_a['trend']}\n"
-            # MLB A2: umpire
+            # Runs scored / allowed
+            ctx_lines += (
+                f"⚾ {home_es} — Carreras anotadas: {ctx['rs_home']} por juego\n"
+                f"🛡️ {home_es} — Carreras recibidas: {ctx['ra_home']} por juego\n"
+                f"⚾ {away_es} — Carreras anotadas: {ctx['rs_away']} por juego\n"
+                f"🛡️ {away_es} — Carreras recibidas: {ctx['ra_away']} por juego\n"
+            )
+            # Park factor
+            ctx_lines += f"{_park_label(ctx['park_factor'])}\n"
+            # Team last 5 games
+            for tname, tname_es in ((home, home_es), (away, away_es)):
+                recent = fetch_mlb_team_recent(tname)
+                if recent and recent.get("results"):
+                    game_strs = " | ".join(
+                        f"{_result_to_es(r)} {sc}" for r, sc in recent["results"]
+                    )
+                    ctx_lines += (
+                        f"📋 {tname_es} últimos {len(recent['results'])} juegos:\n"
+                        f"   {game_strs}\n"
+                        f"   Balance: {recent['wins']} ganados, {recent['losses']} perdidos\n"
+                    )
+            # Umpire
             ump = ctx.get("umpire")
             if ump and ump.get("name"):
-                tend_icon = "📈 OVER" if ump["tendency"] == "OVER" else ("📉 UNDER" if ump["tendency"] == "UNDER" else "➡️ NEUTRAL")
-                ctx_lines += f"👨‍⚖️ Ump: {ump['name']} — {ump['zone']} → Favorece: {tend_icon}\n"
-            # Fix 5: TBD pitcher note
+                if ump["tendency"] == "OVER":
+                    ump_note = "zona apretada → puede inflar el total"
+                elif ump["tendency"] == "UNDER":
+                    ump_note = "zona expandida → favorece el Under"
+                else:
+                    ump_note = "historial de juegos con score normal"
+                ctx_lines += (
+                    f"👨‍⚖️ Árbitro: {ump['name']}\n"
+                    f"   Historial: {ump_note}\n"
+                )
+            # TBD pitcher
             if ctx.get("tbd_note"):
                 ctx_lines += f"{ctx['tbd_note']}\n"
-            # MLB A3: temperature
+            # Temperature / wind
             if ctx.get("temp_label"):
                 ctx_lines += f"{ctx['temp_label']}\n"
             if ctx.get("wind_info"):
                 ctx_lines += f"💨 {ctx['wind_info']}\n"
-            # Module 4: injury warnings
-            for tname, il_list in ctx.get("il_data", {}).items():
+            # Injuries
+            for tname_il, il_list in ctx.get("il_data", {}).items():
                 if il_list:
-                    ctx_lines += f"⚠️ IL {tname}: {', '.join(il_list[:3])}\n"
-            # Module 6: home/away splits
-            hs = ctx.get("h_splits", {})
+                    ctx_lines += (
+                        f"🤕 Jugadores lesionados ({_es(tname_il)}):\n"
+                        f"   {', '.join(il_list[:4])}\n"
+                    )
+            # Home/away splits
+            hs  = ctx.get("h_splits", {})
             as_ = ctx.get("a_splits", {})
             if hs.get("home_rs"):
                 ctx_lines += (
-                    f"🏠 {home_es} en casa: RS {hs['home_rs']} | RA {hs['home_ra']} | "
-                    f"{hs['home_wpct']*100:.0f}% win\n"
-                    f"🚗 {away_es} de visita: RS {as_['away_rs']} | RA {as_['away_ra']} | "
-                    f"{as_['away_wpct']*100:.0f}% win\n"
+                    f"🏠 {home_es} jugando en casa:\n"
+                    f"   Anota {hs['home_rs']} | Recibe {hs['home_ra']}\n"
+                    f"   Gana el {hs['home_wpct']*100:.0f}% de sus juegos en casa\n"
+                    f"🚗 {away_es} jugando de visita:\n"
+                    f"   Anota {as_['away_rs']} | Recibe {as_['away_ra']}\n"
+                    f"   Gana el {as_['away_wpct']*100:.0f}% jugando fuera\n"
                 )
         else:
+            # Soccer — ELO as tier
             ctx_lines = (
-                f"🔵 ELO local:    {ctx['elo_home']}\n"
-                f"🔴 ELO visita:   {ctx['elo_away']}\n"
-                f"🤝 Prob. empate: {ctx['p_draw']}%\n"
+                f"💪 {home_es} — Fuerza del equipo: {_elo_tier(ctx['elo_home'])}\n"
+                f"💪 {away_es} — Fuerza del equipo: {_elo_tier(ctx['elo_away'])}\n"
+                f"🤝 Probabilidad de empate: {ctx['p_draw']}%\n"
             )
-            # Show legacy form only if real data exists (not ELO-only fallback)
+            # Legacy form (gpg)
             if ctx.get("form_home"):
-                ctx_lines += f"📊 Forma local:  {ctx['form_home']}\n"
+                ctx_lines += f"⚽ {home_es} — Goles anotados por partido: {ctx['form_home'].split()[0]}\n"
                 if ctx.get("conceded_home"):
-                    ctx_lines += f"   Concedidos:   {ctx['conceded_home']} / partido\n"
+                    ctx_lines += f"🛡️ {home_es} — Goles recibidos por partido: {ctx['conceded_home']}\n"
             if ctx.get("form_away"):
-                ctx_lines += f"📊 Forma visita: {ctx['form_away']}\n"
+                ctx_lines += f"⚽ {away_es} — Goles anotados por partido: {ctx['form_away'].split()[0]}\n"
                 if ctx.get("conceded_away"):
-                    ctx_lines += f"   Concedidos:   {ctx['conceded_away']} / partido\n"
-            # Soccer S1: last 3 match detail
+                    ctx_lines += f"🛡️ {away_es} — Goles recibidos por partido: {ctx['conceded_away']}\n"
+            # Soccer S1: last 3 matches
             sf_h = ctx.get("sform_h")
             sf_a = ctx.get("sform_a")
             if sf_h:
-                res_str = " ".join(sf_h["results"])
+                res_parts = " | ".join(_result_to_es(r) for r in sf_h["results"])
                 ctx_lines += (
-                    f"🔵 {home_es} últ. {sf_h['n']}:\n"
-                    f"   ⚽ {sf_h['gf_pg']}/juego | 🛡️ {sf_h['ga_pg']} rec.\n"
-                    f"   Forma: {res_str} {sf_h['emoji']}\n"
+                    f"📋 {home_es} — Últimos {sf_h['n']} partidos:\n"
+                    f"   {res_parts}\n"
+                    f"   ⚽ Anota {sf_h['gf_pg']} goles por partido\n"
+                    f"   🛡️ Recibe {sf_h['ga_pg']} goles por partido\n"
                 )
             if sf_a:
-                res_str = " ".join(sf_a["results"])
+                res_parts = " | ".join(_result_to_es(r) for r in sf_a["results"])
                 ctx_lines += (
-                    f"🔴 {away_es} últ. {sf_a['n']}:\n"
-                    f"   ⚽ {sf_a['gf_pg']}/juego | 🛡️ {sf_a['ga_pg']} rec.\n"
-                    f"   Forma: {res_str} {sf_a['emoji']}\n"
+                    f"📋 {away_es} — Últimos {sf_a['n']} partidos:\n"
+                    f"   {res_parts}\n"
+                    f"   ⚽ Anota {sf_a['gf_pg']} goles por partido\n"
+                    f"   🛡️ Recibe {sf_a['ga_pg']} goles por partido\n"
                 )
             # Soccer S2: referee
             ref = ctx.get("referee")
             if ref and ref.get("name"):
                 ctx_lines += (
                     f"🟨 Árbitro: {ref['name']}\n"
-                    f"   → Promedio: {ref['goals_pg']:.1f} goles/partido\n"
-                    f"   → Favorece: {ref['tendency']}\n"
+                    f"   Promedio histórico: {ref['goals_pg']:.1f} goles por partido\n"
+                    f"   Tendencia: {ref['tendency']}\n"
                 )
             # Soccer S3: temperature
             if ctx.get("temp_label_s"):
                 ctx_lines += f"{ctx['temp_label_s']}\n"
-            # Module 5: WC group urgency (enhanced)
+            # WC group urgency — plain Spanish
             standings = ctx.get("wc_standings", {})
             if standings:
                 for tname, tname_es in ((home, home_es), (away, away_es)):
                     urg = _wc_urgency_line(tname, standings)
                     if urg:
-                        # Enhanced: detect must-win urgency
                         if "necesita" in urg.lower() or "eliminado" in urg.lower():
                             ctx_lines += (
-                                f"🔴 URGENTE {tname_es}: necesitan ganar\n"
-                                f"   → Atacarán desde el inicio\n"
-                                f"   → Favorece OVER y ML rival (contraataque)\n"
+                                f"🔴 SITUACIÓN CRÍTICA:\n"
+                                f"   {tname_es} NECESITA ganar este partido\n"
+                                f"   para seguir en el torneo.\n"
+                                f"   Atacarán desde el primer minuto.\n"
+                                f"   Esto favorece el Over y el ML\n"
+                                f"   del equipo rival por contraataque.\n"
                             )
                         else:
-                            ctx_lines += f"📋 {urg}\n"
+                            ctx_lines += f"📋 {tname_es}: {urg}\n"
 
         if ctx.get("line_moved") and ctx.get("line_note"):
             ctx_lines += f"📉 {ctx['line_note']}\n"
@@ -2213,22 +2325,23 @@ def notify_game_analysis(analyses, sport_key):
                 continue
 
             rank_emoji = _RANK_EMOJIS[idx] if idx < 3 else "🔹"
-            safe_tag   = " ✅ SEGURO" if c["safest"] else ""
+            safe_tag   = "\n   ✅ Pick más seguro del análisis" if c["safest"] else ""
 
-            # Fix 5: flag suspiciously high EV (likely a soft/stale line)
+            # Flag suspiciously high EV (likely a soft/stale line)
             if c["ev_pct"] > 30:
-                high_ev_flag = "⚠️ Edge muy alto — verificar línea antes de apostar\n"
+                high_ev_flag = "⚠️ Ventaja muy alta — verificar línea antes de apostar\n"
 
-            # Fix 2: book warning for risky books (applies to MLB and soccer)
+            # Book warning
             bk_warn_pick = _book_warning(c.get("book", ""))
 
-            # Fix 3: never show Kelly% in any alert
-            odds_line = (f"   💰 ${c['stake']} @ {c['odds']} "
-                         f"— {c['book']}{bk_warn_pick}\n")
+            # EV in plain dollars
+            prob_pct = round(c['true_prob'] * 100)
+            odds_line = (f"   💰 Apuesta ${c['stake']} @ {c['odds']} — {c['book']}{bk_warn_pick}\n")
 
             picks_lines += (
-                f"{rank_emoji} {c['label']} | EV +{c['ev_pct']}% → ${ev_d} por ${c['stake']}"
-                f" | Prob {round(c['true_prob']*100):.0f}%{safe_tag}\n"
+                f"{rank_emoji} {c['label']}\n"
+                f"   Ganancia esperada: ${ev_d} por cada ${c['stake']} apostados\n"
+                f"   Probabilidad real: {prob_pct}%{safe_tag}\n"
                 f"{odds_line}"
             )
 
