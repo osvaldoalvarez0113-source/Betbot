@@ -1969,22 +1969,26 @@ def park_tendency_adj(home_team: str) -> "tuple[float, str]":
 
 _bullpen_era_cache: dict = {}
 
-def fetch_bullpen_era(team_name: str, starter_era: float) -> "tuple[float, str]":
+def fetch_bullpen_era(team_name: str, starter_era: float = 4.20) -> "tuple[float, str]":
     """
-    Estimate team bullpen ERA from aggregate team pitching stats.
+    Fetch true bullpen ERA directly from MLB Stats API.
 
-    Formula:
-      bullpen_ERA = (team_ERA × total_IP − starter_ERA × starter_IP) / bullpen_IP
-    Assumes starters pitch ~5.5 inn/game, bullpen ~3.5 inn/game (of 9 total).
+    Method:
+      1. Get team's active roster (pitchers only).
+      2. Batch-hydrate season pitching stats for all pitchers in one call.
+      3. Keep only relief pitchers: gamesStarted / gamesPlayed < 0.30.
+      4. Compute ERA = sum(earnedRuns) / sum(IP) × 9 — no estimation, real values.
 
+    `starter_era` kept for call-site compatibility; no longer used in the formula.
     Returns (bullpen_era: float, display_note: str).
     """
     today = datetime.now(CDT).strftime("%Y-%m-%d")
-    ck = f"{team_name}_{today}"
+    ck    = f"{team_name}_{today}"
     if ck in _bullpen_era_cache:
         return _bullpen_era_cache[ck]
 
     try:
+        # ── 1. Resolve team ID ────────────────────────────────────────────
         if HAS_STATSAPI:
             teams = statsapi.lookup_team(team_name)
             if not teams:
@@ -2001,21 +2005,53 @@ def fetch_bullpen_era(team_name: str, starter_era: float) -> "tuple[float, str]"
                 raise ValueError("team not found")
             tid = match["id"]
 
-        pit = _mlb_rest(f"/teams/{tid}/stats",
-                        {"stats": "season", "group": "pitching", "season": MLB_YEAR})
-        p_stat = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
+        # ── 2. Active roster — collect pitcher IDs ────────────────────────
+        roster_data = _mlb_rest(f"/teams/{tid}/roster",
+                                 {"rosterType": "active", "season": MLB_YEAR})
+        pitcher_ids = [
+            p["person"]["id"]
+            for p in roster_data.get("roster", [])
+            if p.get("position", {}).get("code") == "P"
+        ]
+        if not pitcher_ids:
+            raise ValueError("no pitchers in roster")
 
-        team_era = float(p_stat.get("era") or 4.20)
-        ip_str   = p_stat.get("inningsPitched") or "0"
-        total_ip = _parse_ip(ip_str)
-        gp       = max(int(p_stat.get("gamesPlayed") or 1), 1)
+        # ── 3. Batch stats — one API call for all pitchers ─────────────────
+        ids_str    = ",".join(str(pid) for pid in pitcher_ids)
+        people_raw = _mlb_rest(
+            "/people",
+            {"personIds": ids_str,
+             "hydrate": f"stats(group=pitching,type=season,season={MLB_YEAR})"},
+        )
+
+        # ── 4. Sum earned runs + IP for relief pitchers only ──────────────
+        total_er = 0
+        total_ip = 0.0
+
+        for person in people_raw.get("people", []):
+            for stat_group in person.get("stats", []):
+                if stat_group.get("group", {}).get("displayName", "") != "pitching":
+                    continue
+                for split in stat_group.get("splits", []):
+                    s  = split.get("stat", {})
+                    gp = int(s.get("gamesPlayed")  or 0)
+                    gs = int(s.get("gamesStarted") or 0)
+                    # Need at least 3 appearances to count
+                    if gp < 3:
+                        continue
+                    # Skip if primarily a starter (>30 % of appearances were starts)
+                    if gp > 0 and (gs / gp) > 0.30:
+                        continue
+                    er = int(s.get("earnedRuns") or 0)
+                    ip = _parse_ip(s.get("inningsPitched") or "0")
+                    if ip > 0:
+                        total_er += er
+                        total_ip += ip
 
         if total_ip < 10:
-            raise ValueError("insufficient innings")
+            raise ValueError(f"insufficient relief IP ({total_ip:.1f})")
 
-        starter_ip  = 5.5 * gp
-        bullpen_ip  = max(total_ip - starter_ip, 3.5 * gp)
-        bullpen_era = (team_era * total_ip - starter_era * starter_ip) / bullpen_ip
+        bullpen_era = round((total_er / total_ip) * 9, 2)
         bullpen_era = round(max(0.0, min(bullpen_era, 9.99)), 2)
 
         if bullpen_era < 3.50:
@@ -2036,9 +2072,23 @@ def fetch_bullpen_era(team_name: str, starter_era: float) -> "tuple[float, str]"
 
         result = (bullpen_era, note)
         _bullpen_era_cache[ck] = result
+        print(f"  ⚾ Bullpen ERA {_es(team_name)}: {bullpen_era} "
+              f"({len(pitcher_ids)} pitchers, {total_ip:.1f} IP)")
         return result
-    except Exception:
-        return 4.20, ""
+
+    except Exception as _be:
+        # Fallback: derive from team aggregate ERA without using starter_era algebra
+        try:
+            pit = _mlb_rest(f"/teams/{tid}/stats",
+                            {"stats": "season", "group": "pitching", "season": MLB_YEAR})
+            p_s = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
+            team_era = float(p_s.get("era") or 4.20)
+            # Team ERA is a reasonable proxy when relief-only data is unavailable
+            result = (round(team_era, 2), "")
+            _bullpen_era_cache[ck] = result
+            return result
+        except Exception:
+            return 4.20, ""
 
 
 _pitcher_rest_cache: dict = {}
