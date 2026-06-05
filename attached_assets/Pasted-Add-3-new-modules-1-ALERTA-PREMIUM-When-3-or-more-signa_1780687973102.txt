@@ -1,0 +1,108 @@
+Add 3 new modules:
+
+━━━━━━━━━━━━━━━━━━━━
+1. ALERTA PREMIUM
+━━━━━━━━━━━━━━━━━━━━
+When 3 or more signals align for 
+the same pick → send PREMIUM alert:
+
+Signals that count:
+- Sharp money detected ✅
+- Steam move confirmed ✅
+- Public % against (>65% other side) ✅
+- Lineup confirmed with key players ✅
+- Pitcher dominante/élite ✅
+- H2H supports the pick ✅
+- Umpire favorable ✅
+- Weather favorable ✅
+
+If 3+ signals → PREMIUM alert:
+
+"💎 PICK PREMIUM | Yankees UNDER 8.5
+━━━━━━━━━━━━
+⚾ Yankees vs Red Sox
+⏰ Hoy 7:05 PM ET
+━━━━━━━━━━━━
+🎯 APUESTA: UNDER 8.5 carreras
+💰 $75 @ 1.91 — Bovada
+(stake aumentado por señales múltiples)
+━━━━━━━━━━━━
+✅ Señales confirmadas (5/8):
+💎 Dinero sharp detectado
+🚂 Steam move confirmado
+👥 Público 72% en Over (en contra)
+⚾ Pitcher élite — Cole ERA 1.89
+📊 H2H: Under ganó 4 de 5
+━━━━━━━━━━━━
+🟢 CONFIANZA MÁXIMA — apostar"
+
+PREMIUM stake = 1.5× normal Kelly
+Maximum PREMIUM stake = $100
+Only on SAFE books.
+
+━━━━━━━━━━━━━━━━━━━━
+2. BANKROLL AUTO-AJUSTE
+━━━━━━━━━━━━━━━━━━━━
+Starting bankroll: $1,000 (Jun 4 2026)
+
+Every day at midnight:
+- Read current bankroll from log
+- Recalculate Kelly base stake
+
+Formula:
+- Bankroll $800-$1,200 → normal stakes
+- Bankroll > $1,200 → increase stakes 
+  proportionally (+20% per $200 gained)
+- Bankroll $600-$800 → reduce stakes 25%
+- Bankroll < $600 → reduce stakes 50%
+  AND add warning to every alert:
+  "⚠️ Bankroll bajo — apuesta 
+   con cuidado"
+- Bankroll < $400 → pause betting:
+  "🛑 Bankroll crítico — pausar 
+   hasta recuperar"
+
+Show current multiplier in 
+daily 8 AM report:
+"📊 Multiplicador actual: 1.0×
+   (Bankroll en rango normal)"
+
+━━━━━━━━━━━━━━━━━━━━
+3. RESUMEN NOCTURNO 11 PM ET
+━━━━━━━━━━━━━━━━━━━━
+Every day at 11:00 PM ET send 
+summary of today's picks:
+
+"🌙 RESUMEN DEL DÍA
+📅 Viernes 5 de junio
+━━━━━━━━━━━━
+📊 PICKS DE HOY:
+
+⚾ Yankees UNDER 8.5 ← pendiente
+⚾ Cubs OVER 7.5 ← pendiente  
+⚾ Rangers OVER 7.5 ← pendiente
+💎 PREMIUM: Dodgers ML ← pendiente
+━━━━━━━━━━━━
+💰 Bankroll actual: $1,000
+📈 Cambio hoy: pendiente resultados
+━━━━━━━━━━━━
+⏰ Resultados finales mañana 
+   en el reporte de las 8 AM"
+
+When results are available:
+Replace 'pendiente' with:
+✅ GANÓ +$43.64
+❌ PERDIÓ -$35.78
+🤝 EMPUJÓ $0
+
+━━━━━━━━━━━━━━━━━━━━
+GENERAL RULES:
+━━━━━━━━━━━━━━━━━━━━
+- PREMIUM alerts override 
+  anti-duplicate rules
+- Bankroll adjustment applies to
+  ALL bet types (value, ARB, parlay)
+- Night summary sends even if 
+  no picks were found today
+  (shows "Sin picks hoy — 
+   el filtro protegió tu bankroll")

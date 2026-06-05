@@ -214,7 +214,8 @@ last_weekly_report:    date = date(2000, 1, 1)   # force first run Sunday 9 AM
 lineup_scan_counter:   int  = 0                  # increments each main scan
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
-_wc_form_cache: dict = {}   # (team_name, date_str) → {goals_for, goals_against, matches}
+_wc_form_cache: dict = {}       # (team_name, date_str) → {goals_for, goals_against, matches}
+_espn_matches_cache: dict = {}  # team_name_date → [{gf, ga, date, opp}]
 _weather_cache: dict = {}   # "lat,lon" → {speed, deg, label, fetched_at}
 
 # ── CORE HELPERS ──────────────────────────────────────────────────────────────
@@ -1656,56 +1657,92 @@ def _batting_insight(team_name: str, ops, k_pct) -> str:
 
 # ── IMPROVEMENT 2: WORLD CUP 2026 LIVE FORM ───────────────────────────────────
 
+# ESPN soccer leagues searched in priority order (WC → qualifiers → friendlies)
+_ESPN_SOCCER_LEAGUES = [
+    "fifa.world",
+    "fifa.world.qualifier.concacaf",
+    "fifa.world.qualifier.conmebol",
+    "fifa.world.qualifier.uefa",
+    "fifa.world.qualifier.afc",
+    "fifa.world.qualifier.caf",
+    "fifa.friendlies.m",
+]
+
+def _fetch_espn_matches(team_name: str) -> list:
+    """
+    Fetch up to 5 completed matches for team_name from ESPN soccer APIs.
+    Tries WC, then qualifier leagues, then friendlies.
+    Uses date-range batch queries (one request per league) for speed.
+    Returns list of {gf, ga, date, opp} dicts sorted newest-first.
+    """
+    ck = f"espn_{team_name.lower()}_{datetime.now(CDT).strftime('%Y-%m-%d')}"
+    if ck in _espn_matches_cache:
+        return _espn_matches_cache[ck]
+
+    start = (datetime.now(CDT) - timedelta(days=365)).strftime('%Y%m%d')
+    end   = datetime.now(CDT).strftime('%Y%m%d')
+    dr    = f"{start}-{end}"
+
+    all_matches: list = []
+    for league in _ESPN_SOCCER_LEAGUES:
+        if len(all_matches) >= 10:
+            break
+        try:
+            url  = (f"https://site.api.espn.com/apis/site/v2/sports/soccer/"
+                    f"{league}/scoreboard?dates={dr}&limit=200")
+            resp = requests.get(url, timeout=8)
+            if resp.status_code != 200:
+                continue
+            for event in resp.json().get("events", []):
+                comp = event.get("competitions", [{}])[0]
+                if not comp.get("status", {}).get("type", {}).get("completed", False):
+                    continue
+                competitors = comp.get("competitors", [])
+                for c in competitors:
+                    cname = c.get("team", {}).get("displayName", "")
+                    if (team_name.lower() not in cname.lower() and
+                            cname.lower() not in team_name.lower()):
+                        continue
+                    opp = next((x for x in competitors if x is not c), {})
+                    all_matches.append({
+                        "gf":  int(c.get("score", 0) or 0),
+                        "ga":  int(opp.get("score", 0) or 0),
+                        "date": event.get("date", ""),
+                        "opp": opp.get("team", {}).get("displayName", ""),
+                    })
+                    break
+        except Exception:
+            continue
+
+    all_matches.sort(key=lambda m: m["date"], reverse=True)
+    result = all_matches[:5]
+    _espn_matches_cache[ck] = result
+    return result
+
+
 def fetch_wc_team_form(team_name):
     """
-    Fetch last ≤5 completed WC matches for a team from ESPN's free API.
+    Fetch last ≤5 completed matches for a team.
+    Sources: ESPN WC, then WC qualifiers, then friendlies (date range, last 365 days).
     Returns {'goals_for': float, 'goals_against': float, 'matches': int} or None.
-    Cached per team per calendar day.
     """
     today_str = datetime.now(CDT).strftime('%Y-%m-%d')
     ck = (team_name.lower(), today_str)
     if ck in _wc_form_cache:
         return _wc_form_cache[ck]
 
-    goals_for:     list = []
-    goals_against: list = []
-
-    try:
-        for days_back in range(1, 20):
-            if len(goals_for) >= 5:
-                break
-            dt = (datetime.now(CDT) - timedelta(days=days_back)).strftime('%Y%m%d')
-            url = (f'https://site.api.espn.com/apis/site/v2/sports/'
-                   f'soccer/fifa.world/scoreboard?dates={dt}')
-            resp = requests.get(url, timeout=8)
-            if resp.status_code != 200:
-                continue
-            for event in resp.json().get('events', []):
-                comp       = event.get('competitions', [{}])[0]
-                completed  = comp.get('status', {}).get('type', {}).get('completed', False)
-                if not completed:
-                    continue
-                competitors = comp.get('competitors', [])
-                for c in competitors:
-                    cname = c.get('team', {}).get('displayName', '')
-                    if (team_name.lower() not in cname.lower() and
-                            cname.lower() not in team_name.lower()):
-                        continue
-                    opp = next((x for x in competitors if x is not c), {})
-                    goals_for.append(int(c.get('score', 0)))
-                    goals_against.append(int(opp.get('score', 0)))
-                    break   # found this team in this match
-    except Exception:
-        pass
-
-    if not goals_for:
+    matches = _fetch_espn_matches(team_name)
+    if not matches:
         _wc_form_cache[ck] = None
         return None
 
+    n   = len(matches)
+    gf  = sum(m["gf"] for m in matches)
+    ga  = sum(m["ga"] for m in matches)
     res = {
-        'goals_for':     round(sum(goals_for) / len(goals_for), 2),
-        'goals_against': round(sum(goals_against) / len(goals_against), 2),
-        'matches':       len(goals_for),
+        "goals_for":     round(gf / n, 2),
+        "goals_against": round(ga / n, 2),
+        "matches":       n,
     }
     _wc_form_cache[ck] = res
     return res
@@ -1996,11 +2033,13 @@ def notify_totals(total_bets):
             form_h = b.get("form_home", "")
             form_a = b.get("form_away", "")
             form_block = ""
-            if form_h or form_a:
-                form_block = (
-                    f"\n📋 Forma local:   {form_h or 'N/A'}\n"
-                    f"📋 Forma visita:  {form_a or 'N/A'}"
-                )
+            form_parts = []
+            if form_h:
+                form_parts.append(f"📋 Forma local:   {form_h}")
+            if form_a:
+                form_parts.append(f"📋 Forma visita:  {form_a}")
+            if form_parts:
+                form_block = "\n" + "\n".join(form_parts)
             match_es_tot = f"{_es(home)} vs {_es(away)}"
             body = (
                 f"{emoji} {match_es_tot}\n"
@@ -3690,8 +3729,9 @@ def check_results():
         if not pending:
             return
 
-        checked = _load_results_checked()
-        scores  = _fetch_mlb_scores_today() + _fetch_soccer_scores()
+        checked  = _load_results_checked()
+        scores   = _fetch_mlb_scores_today() + _fetch_soccer_scores()
+        resolved: dict = {}   # bkey → {result, profit_loss}
 
         for bet in pending:
             match  = bet.get("match", "")
@@ -3751,22 +3791,56 @@ def check_results():
             except Exception as ex:
                 print(f"  ⚠️  bankroll log error: {ex}")
 
-            checked[bkey] = result
-            new_br = load_bankroll_state()["current"]
-            icon  = "✅" if result == "W" else ("🤝" if result == "P" else "❌")
-            verb  = "GANÓ" if result == "W" else ("PUSH" if result == "P" else "perdió")
-            pl_s  = f"+${profit_loss:.2f}" if profit_loss >= 0 else f"-${abs(profit_loss):.2f}"
-            body  = (
-                f"{icon} {team} {verb} | {pl_s}\n"
-                f"Bankroll: ${new_br:,.2f}\n"
-                f"Partido: {match}\n"
-                f"Resultado: {score['home']} {score['home_score']} – "
-                f"{score['away_score']} {score['away']}"
+            checked[bkey]  = result
+            resolved[bkey] = {
+                "result":      result,
+                "profit_loss": str(round(profit_loss, 2)),
+            }
+
+            # ── Rich ntfy notification ─────────────────────────────────────
+            new_br  = load_bankroll_state()["current"]
+            prev_br = new_br - profit_loss
+            pct_chg = (profit_loss / prev_br * 100) if prev_br else 0.0
+            icon    = "✅" if result == "W" else ("🤝" if result == "P" else "❌")
+            verb    = "GANASTE" if result == "W" else ("PUSH" if result == "P" else "PERDISTE")
+            pl_s    = (f"+${profit_loss:.2f}" if profit_loss >= 0
+                       else f"-${abs(profit_loss):.2f}")
+            pct_s   = f"{pct_chg:+.2f}%"
+            score_s = f"{score['home_score']}-{score['away_score']}"
+            if mtype == "totals":
+                label = f"{team.upper()} {side_f}"
+            else:
+                label = f"{team} ML"
+            money_icon = "🏆" if result == "W" else ("🤝" if result == "P" else "💸")
+            body = (
+                f"{icon} {match}\n"
+                f"{_DIV}\n"
+                f"🎯 Tu apuesta: {label}\n"
+                f"📊 Resultado:  {score['home']} {score_s} {score['away']}\n"
+                f"{money_icon} {verb}: {pl_s}\n"
+                f"💰 Bankroll: ${new_br:,.2f} ({pct_s})\n"
+                f"{_DIV2}"
             )
             ntfy_post(f"{icon} RESULTADO | {team} {verb} | {pl_s}", body, "high")
             print(f"  {icon} Resultado: {team} {verb} | {pl_s}")
 
         _save_results_checked(checked)
+
+        # ── Rewrite bets_log.csv with resolved W/L results ─────────────────
+        if resolved and all_bets:
+            for b in all_bets:
+                bk = (f"{b.get('match','')}|{b.get('team','')}"
+                      f"|{b.get('game_time','')}")
+                if bk in resolved:
+                    b["result"]      = resolved[bk]["result"]
+                    b["profit_loss"] = resolved[bk]["profit_loss"]
+            try:
+                with open(BETS_LOG_FILE, "w", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=list(all_bets[0].keys()))
+                    w.writeheader()
+                    w.writerows(all_bets)
+            except Exception as ex:
+                print(f"  ⚠️  bets_log rewrite error: {ex}")
 
     except Exception as e:
         print(f"  ⚠️  check_results error: {e}")
@@ -4083,51 +4157,78 @@ _soccer_recent_cache: dict = {}
 
 def fetch_soccer_team_recent(team: str, sport_key: str) -> dict | None:
     """
-    Last 3 completed matches via Odds API scores endpoint.
+    Last ≤5 completed matches via Odds API (primary) or ESPN multi-league (fallback).
     Returns {gf_pg, ga_pg, results: ['W','D','L',...], emoji, n} or None.
+    Never returns a bare ELO-only entry — returns None if no match data found.
     """
     ck = f"{team}_{sport_key}_{datetime.now().strftime('%Y-%m-%d')}"
     if ck in _soccer_recent_cache:
         return _soccer_recent_cache[ck]
+
+    # ── Primary: The Odds API scores (up to 30 days) ──────────────────────
+    def _build_sform(raw_games: list) -> "dict | None":
+        if not raw_games:
+            return None
+        gf = ga = 0
+        results_list = []
+        for g in raw_games:
+            sc_list   = g.get("scores") or []
+            sc_map    = {s["name"]: int(s["score"]) for s in sc_list
+                         if s.get("score") is not None}
+            my_score  = sc_map.get(team, 0)
+            opp       = g["away_team"] if g["home_team"] == team else g["home_team"]
+            opp_score = sc_map.get(opp, 0)
+            gf += my_score; ga += opp_score
+            if my_score > opp_score:    results_list.append("W")
+            elif my_score == opp_score: results_list.append("D")
+            else:                       results_list.append("L")
+        n    = len(raw_games)
+        wins = results_list.count("W")
+        emoji = ("🔥" if wins == n else "✅" if wins >= 2
+                 else "⚠️" if wins == 0 else "➡️")
+        return {"gf_pg": round(gf / n, 1), "ga_pg": round(ga / n, 1),
+                "results": results_list, "emoji": emoji, "n": n}
+
     try:
         url = (f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/"
                f"?apiKey={API_KEY}&daysFrom=30&dateFormat=iso")
         r = requests.get(url, timeout=10)
-        if r.status_code != 200:
-            return None
-        games = [g for g in r.json()
-                 if (g.get("home_team") == team or g.get("away_team") == team)
-                 and g.get("completed") is True]
-        games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
-        last3 = games[:3]
-        if not last3:
-            return None
-        gf = ga = 0
-        results = []
-        for g in last3:
-            is_home  = g["home_team"] == team
-            sc_list  = g.get("scores") or []
-            scores   = {s["name"]: int(s["score"]) for s in sc_list
-                        if s.get("score") is not None}
-            my_score  = scores.get(team, 0)
-            opp       = g["away_team"] if is_home else g["home_team"]
-            opp_score = scores.get(opp, 0)
-            gf += my_score
-            ga += opp_score
-            if my_score > opp_score:   results.append("W")
-            elif my_score == opp_score: results.append("D")
-            else:                       results.append("L")
-        n    = len(last3)
-        wins = results.count("W")
-        emoji = ("🔥" if wins == 3 else
-                 "✅" if wins >= 2 else
-                 "⚠️" if wins == 0 else "➡️")
-        res = {"gf_pg": round(gf / n, 1), "ga_pg": round(ga / n, 1),
-               "results": results, "emoji": emoji, "n": n}
-        _soccer_recent_cache[ck] = res
-        return res
+        if r.status_code == 200:
+            games = [g for g in r.json()
+                     if (g.get("home_team") == team or g.get("away_team") == team)
+                     and g.get("completed") is True]
+            games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
+            res = _build_sform(games[:5])
+            if res:
+                _soccer_recent_cache[ck] = res
+                return res
     except Exception:
-        return None
+        pass
+
+    # ── Fallback: ESPN multi-league (WC + qualifiers + friendlies, last 365 days) ─
+    try:
+        espn_matches = _fetch_espn_matches(team)
+        if espn_matches:
+            n    = len(espn_matches)
+            gf   = sum(m["gf"] for m in espn_matches)
+            ga   = sum(m["ga"] for m in espn_matches)
+            rl   = []
+            for m in espn_matches:
+                if m["gf"] > m["ga"]:    rl.append("W")
+                elif m["gf"] < m["ga"]:  rl.append("L")
+                else:                    rl.append("D")
+            wins  = rl.count("W")
+            emoji = ("🔥" if wins == n else "✅" if wins >= 2
+                     else "⚠️" if wins == 0 else "➡️")
+            res   = {"gf_pg": round(gf / n, 1), "ga_pg": round(ga / n, 1),
+                     "results": rl, "emoji": emoji, "n": n}
+            _soccer_recent_cache[ck] = res
+            return res
+    except Exception:
+        pass
+
+    _soccer_recent_cache[ck] = None
+    return None
 
 # ── Soccer S2: Match referee + tendency ───────────────────────────────────────
 _referee_cache: dict = {}
