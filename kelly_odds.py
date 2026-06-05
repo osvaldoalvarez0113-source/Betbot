@@ -22,6 +22,40 @@ NOTIFY   = "my-bets"
 LOG_CSV  = True
 
 CDT            = pytz.timezone("America/Chicago")
+ET             = pytz.timezone("America/New_York")
+
+_DIV  = "━━━━━━━━━━━━"
+_DIV2 = "━━━━━━━━━━━━━━━━━━━━"
+
+def _sport_emoji(sport):
+    """Map sport key/short string to emoji. World Cup → 🏆."""
+    s = (sport or "").lower()
+    if any(w in s for w in ("world", "fifa", "mundial", "wc")):
+        return "🏆"
+    if "soccer" in s:
+        return "⚽"
+    if "mlb" in s or "baseball" in s:
+        return "⚾"
+    if "nba" in s or "basketball" in s:
+        return "🏀"
+    if "nfl" in s or "football" in s:
+        return "🏈"
+    return "🎯"
+
+def _fmt_et(iso_str):
+    """UTC ISO string → Eastern time string, e.g. '7:05 PM ET'."""
+    if not iso_str:
+        return "—"
+    try:
+        dt = datetime.strptime(iso_str.rstrip("Z")[:16], "%Y-%m-%dT%H:%M")
+        return pytz.utc.localize(dt).astimezone(ET).strftime("%-I:%M %p ET")
+    except Exception:
+        return iso_str[:16]
+
+def _conf_es(conf):
+    """Confidence label in Spanish."""
+    return "ALTA" if str(conf).upper() == "HIGH" else "MEDIA"
+
 PREV_ODDS_FILE = "previous_odds.json"
 BETS_LOG_FILE  = "bets_log.csv"
 ELO_FILE       = "elo_ratings.json"
@@ -605,13 +639,14 @@ def _check_arb3(home, away,
         "profit_pct": round(profit_pct, 2),
     }
 
-def scan_arbitrage(games):
+def scan_arbitrage(games, sport_key=""):
     arbs = []
     seen = set()
 
     for g in games:
         home, away = g["home_team"], g["away_team"]
         game_key   = f"{home}|{away}"
+        game_time  = g.get("commence_time", "")
         if game_key in seen:
             continue
 
@@ -634,22 +669,19 @@ def scan_arbitrage(games):
 
         # ── 3-WAY (soccer): home + draw + away must ALL be covered ───────────
         if n == 3:
-            # Draw outcome key may be "Draw" (The Odds API standard)
             draw_key = next((k for k in outcomes
                              if k.lower() in ("draw", "the draw")), None)
             if draw_key is None:
-                continue   # can't find draw — skip rather than give false arb
+                continue
 
-            home_key = home   # odds API uses full team names as outcome names
+            home_key = home
             away_key = away
             if home_key not in book_odds or away_key not in book_odds:
-                # Fall back: outcomes that aren't the draw
                 non_draw = [k for k in outcomes if k != draw_key]
                 if len(non_draw) != 2:
                     continue
                 home_key, away_key = non_draw[0], non_draw[1]
 
-            # Best price per leg across all available books
             best_h = max(book_odds[home_key].values(), key=lambda x: x[0])
             best_d = max(book_odds[draw_key].values(), key=lambda x: x[0])
             best_a = max(book_odds[away_key].values(), key=lambda x: x[0])
@@ -659,6 +691,8 @@ def scan_arbitrage(games):
                               draw_key, best_d[0], best_d[1],
                               away_key, best_a[0], best_a[1])
             if arb:
+                arb["sport"]     = sport_key
+                arb["game_time"] = game_time
                 arbs.append(arb)
                 seen.add(game_key)
 
@@ -668,7 +702,6 @@ def scan_arbitrage(games):
             books_a = book_odds[team_a]
             books_b = book_odds[team_b]
 
-            # Priority: Bovada vs BetOnline.ag
             bov_key = next((k for k in books_a if k in PREFERRED_BOOKS), None)
             bol_key = "betonline.ag"
 
@@ -677,6 +710,8 @@ def scan_arbitrage(games):
                                   team_a, books_a[bov_key][0], books_a[bov_key][1],
                                   team_b, books_b[bol_key][0], books_b[bol_key][1])
                 if arb:
+                    arb["sport"]     = sport_key
+                    arb["game_time"] = game_time
                     arbs.append(arb)
                     seen.add(game_key)
 
@@ -688,6 +723,8 @@ def scan_arbitrage(games):
                                       team_a, bol[0], bol[1],
                                       team_b, bov[0], bov[1])
                     if arb:
+                        arb["sport"]     = sport_key
+                        arb["game_time"] = game_time
                         arbs.append(arb)
                         seen.add(game_key)
 
@@ -698,6 +735,8 @@ def scan_arbitrage(games):
                                   team_a, best_a[0], best_a[1],
                                   team_b, best_b[0], best_b[1])
                 if arb:
+                    arb["sport"]     = sport_key
+                    arb["game_time"] = game_time
                     arbs.append(arb)
                     seen.add(game_key)
 
@@ -707,22 +746,43 @@ def notify_arbitrage(arbs):
     for i, arb in enumerate(arbs):
         if i > 0:
             time.sleep(2)
+        sport  = arb.get("sport", "")
+        emoji  = _sport_emoji(sport)
+        match  = arb["match"]
+        profit = arb["profit"]
+        pct    = arb["profit_pct"]
+        gt     = _fmt_et(arb.get("game_time", ""))
+
         if arb.get("legs") == 3:
+            total_stake = round(arb["stake_a"] + arb["stake_b"] + arb["stake_c"], 2)
             body = (
-                f"⚽ 3-WAY ARB — all legs required (draw covered)\n"
-                f"Leg 1: ${arb['stake_a']} on {arb['team_a']} @ {arb['odds_a']} ({arb['book_a']})\n"
-                f"Leg 2: ${arb['stake_b']} on {arb['team_b']} @ {arb['odds_b']} ({arb['book_b']})\n"
-                f"Leg 3: ${arb['stake_c']} on {arb['team_c']} @ {arb['odds_c']} ({arb['book_c']})\n"
-                f"Guaranteed profit: ${arb['profit']} ({arb['profit_pct']}%)"
+                f"{emoji} {match}\n"
+                f"💰 Ganancia garantizada: ${profit} ({pct}%)\n"
+                f"{_DIV}\n"
+                f"🔵 ${arb['stake_a']:>8} → {arb['team_a']} @ {arb['odds_a']} — {arb['book_a']}\n"
+                f"🤝 ${arb['stake_b']:>8} → Empate @ {arb['odds_b']} — {arb['book_b']}\n"
+                f"🔴 ${arb['stake_c']:>8} → {arb['team_c']} @ {arb['odds_c']} — {arb['book_c']}\n"
+                f"{_DIV}\n"
+                f"💵 Total apostado: ${total_stake}\n"
+                f"⏰ {gt}\n"
+                f"{_DIV2}"
             )
         else:
+            total_stake = round(arb["stake_a"] + arb["stake_b"], 2)
             body = (
-                f"Bet ${arb['stake_a']} on {arb['team_a']} @ {arb['odds_a']} ({arb['book_a']})\n"
-                f"Bet ${arb['stake_b']} on {arb['team_b']} @ {arb['odds_b']} ({arb['book_b']})\n"
-                f"Guaranteed profit: ${arb['profit']} ({arb['profit_pct']}%)"
-        )
-        ntfy_post(f"ARB FOUND: {arb['match']}", body, "urgent")
-        print(f"  💰 ARB: {arb['match']} — ${arb['profit']} profit ({arb['profit_pct']}%)")
+                f"{emoji} {match}\n"
+                f"💰 Ganancia garantizada: ${profit} ({pct}%)\n"
+                f"{_DIV}\n"
+                f"🔵 ${arb['stake_a']:>8} → {arb['team_a']} @ {arb['odds_a']} — {arb['book_a']}\n"
+                f"🔴 ${arb['stake_b']:>8} → {arb['team_b']} @ {arb['odds_b']} — {arb['book_b']}\n"
+                f"{_DIV}\n"
+                f"💵 Total apostado: ${total_stake}\n"
+                f"⏰ {gt}\n"
+                f"{_DIV2}"
+            )
+
+        ntfy_post(f"⚡ ARB | {match} | +${profit}", body, "urgent")
+        print(f"  💰 ARB: {match} — ${profit} profit ({pct}%)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE 6 — TOTALS (OVER/UNDER) ANALYSIS
@@ -1157,34 +1217,52 @@ def notify_totals(total_bets):
         if key in alerted_bets:
             continue
 
-        is_mlb = b.get("edge_unit") == "runs"
+        sport   = b.get("sport", "")
+        emoji   = _sport_emoji(sport)
+        is_mlb  = b.get("edge_unit") == "runs"
+        unit    = "carreras" if is_mlb else "goles"
+        side    = b["team"]        # "OVER" / "UNDER"
+        line    = b["side"]        # the book line number
+        conf_es = _conf_es(b["confidence"])
+        gt      = _fmt_et(b.get("time", ""))
+
         if is_mlb:
-            extra_lines = (
-                f"Pitchers:  {b.get('pitcher_home','TBD')} vs {b.get('pitcher_away','TBD')}\n"
-                f"Pitch Adj: {b.get('pitch_adj', 0.0):+.1f} runs\n"
-                f"{b.get('wind_info', '')}"
-            ).rstrip()
+            sport_block = (
+                f"{_DIV}\n"
+                f"🔵 Pitcher local:  {b.get('pitcher_home', 'TBD')}\n"
+                f"🔴 Pitcher visita: {b.get('pitcher_away', 'TBD')}\n"
+            )
+            wind = b.get("wind_info", "")
+            if wind:
+                sport_block += f"💨 {wind}\n"
         else:
-            extra_lines = (
-                f"Home form: {b.get('form_home','ELO only')}\n"
-                f"Away form: {b.get('form_away','ELO only')}"
+            sport_block = (
+                f"{_DIV}\n"
+                f"📋 Forma local:   {b.get('form_home', 'ELO only')}\n"
+                f"📋 Forma visita:  {b.get('form_away', 'ELO only')}\n"
             )
 
         body = (
-            f"{b['team']} {b['side']} | {b['match']}\n"
-            f"Our Line:  {b['our_line']} {b['edge_unit']}\n"
-            f"Book Line: {b['side']} {b['edge_unit']}\n"
-            f"Edge:      {b['edge']} {b['edge_unit']}\n"
-            f"Odds:      {b['odds']} | Stake: ${b['stake']}\n"
-            f"Confidence:{b['confidence']} | Book: {b['bookmaker']}\n"
-            f"{extra_lines}"
+            f"{emoji} {b['match']}\n"
+            f"📊 {side} {line} {unit}\n"
+            f"{_DIV}\n"
+            f"🎯 Nuestra línea: {b['our_line']}\n"
+            f"📚 Línea libro:   {line}\n"
+            f"📈 Edge:          {b['edge']} {unit}\n"
+            f"🌡️ Confianza:     {conf_es}\n"
+            f"{sport_block}"
+            f"{_DIV}\n"
+            f"💰 Apuesta: ${b['stake']} @ {b['odds']}\n"
+            f"📖 Libro: {b['bookmaker']}\n"
+            f"⏰ {gt}\n"
+            f"{_DIV2}"
         )
+        title    = f"🎯 PICK | {side} {line} | {b['match']}"
         priority = "high" if b["confidence"] == "HIGH" else "default"
-        ntfy_post(f"{b['team']} {b['side']} | {b['match']}", body, priority)
+        ntfy_post(title, body, priority)
         alerted_bets.add(key)
-        save_pending_bet(b)   # Improvement 3: CLV tracking
-        print(f"    🎯 {b['team']} {b['side']} {b['match']} | "
-              f"Our:{b['our_line']} | Edge:{b['edge']} {b['edge_unit']}")
+        save_pending_bet(b)
+        print(f"    🎯 {side} {line} {b['match']} | Our:{b['our_line']} | Edge:{b['edge']} {unit}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # IMPROVEMENT 3: CLV (CLOSING LINE VALUE) TRACKING
@@ -1522,16 +1600,25 @@ def analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map):
 
 def notify_sharp_money(sharp_moves):
     for m in sharp_moves:
-        pub_line = (f"Public ~{m['public_pct']}% on opponent but line {m['direction']}."
-                    if m["public_pct"] else f"Line {m['direction']} {m['pct']}%.")
+        sport = m.get("sport", "")
+        emoji = _sport_emoji(sport)
+        if m.get("public_pct"):
+            pub_note = (f"📢 Público ~{m['public_pct']}% en contra, "
+                        f"pero la línea {m['direction']}")
+        else:
+            pub_note = f"📉 Línea {m['direction']} {m['pct']}%"
         body = (
-            f"{m['match']}\n"
-            f"Team: {m['team']}\n"
-            f"Odds: {m['odds_prev']} → {m['odds_now']} ({m['direction']} {m['pct']}%)\n"
-            f"{pub_line}\nSharp money detected."
+            f"{emoji} {m['match']}\n"
+            f"⚡ Dinero profesional detectado\n"
+            f"{_DIV}\n"
+            f"📌 Pick: {m['team']}\n"
+            f"📊 Línea: {m['odds_prev']} → {m['odds_now']} "
+            f"({m['direction']} {m['pct']}%)\n"
+            f"{pub_note}\n"
+            f"{_DIV2}"
         )
-        ntfy_post(f"SHARP ALERT: {m['team']}", body, "high")
-        print(f"  ⚡ Sharp: {m['team']} in {m['match']} ({m['pct']}% move)")
+        ntfy_post(f"⚡ SHARP | {m['team']} | {m['match']}", body, "high")
+        print(f"  ⚡ Sharp: {m['team']} en {m['match']} ({m['pct']}% movimiento)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE — ANALYSIS & NOTIFICATIONS
@@ -1643,24 +1730,40 @@ def notify_bets(new_bets):
         return
 
     for b in fresh:
-        mv   = f" [LINE {b['line_dir']}{b['line_delta']}]" if b["line_moved"] else ""
-        bov  = b.get("bovada_odds")
-        bov_line = (f"Bovada:     {bov}" if bov else "Bovada:     not available")
+        sport   = b.get("sport", "")
+        emoji   = _sport_emoji(sport)
+        conf_es = _conf_es(b["confidence"])
+        gt      = _fmt_et(b.get("time", ""))
+        bov     = b.get("bovada_odds")
+
+        mv_line = ""
+        if b["line_moved"]:
+            mv_line = f"📉 Movimiento de línea: {b['line_dir']}{b['line_delta']}\n"
+
+        bov_line = f"📖 Bovada: {bov}\n" if bov else ""
+
         body = (
-            f"[{b['confidence']}]{mv}\n"
-            f"Match:      {b['match']}\n"
-            f"Bet:        {b['team']} ({b['side']}) @ {b['odds']}\n"
-            f"{bov_line}\n"
-            f"Best Book:  {b['bookmaker']}\n"
-            f"Edge:       {b['edge']}%  (Value: {b['value_pct']}%)\n"
-            f"Kelly Stake: ${b['stake']} ({b['kelly_pct']}%)\n"
-            f"ELO Win Prob: {b['elo_prob']}%\n"
-            f"EV: ${b['ev']}  |  Proj ROI: {b['roi']}%"
+            f"{emoji} {b['match']}\n"
+            f"{mv_line}"
+            f"{_DIV}\n"
+            f"🎯 Pick: {b['team']} ({b['side']})\n"
+            f"📈 Edge: {b['edge']}%  |  Valor: {b['value_pct']}%\n"
+            f"🌡️ Confianza: {conf_es}\n"
+            f"{_DIV}\n"
+            f"💰 Apuesta: ${b['stake']} @ {b['odds']}  ({b['kelly_pct']}% Kelly)\n"
+            f"📖 Mejor libro: {b['bookmaker']}\n"
+            f"{bov_line}"
+            f"{_DIV}\n"
+            f"📊 Prob. ELO: {b['elo_prob']}%  |  EV: ${b['ev']}\n"
+            f"💹 ROI proy.: {b['roi']}%\n"
+            f"⏰ {gt}\n"
+            f"{_DIV2}"
         )
         has_high = b["edge"] >= 5.0
         priority = "urgent" if has_high else ("high" if b["edge"] >= 3 else "default")
-        conf_tag = " — HIGH CONFIDENCE" if has_high else ""
-        ntfy_post(f"BetBot: {b['team']}{conf_tag}", body, priority)
+        conf_tag = " — ALTA" if has_high else ""
+        title    = f"🎯 PICK | {b['team']}{conf_tag} | {b['match']}"
+        ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1797,7 +1900,9 @@ def run_scan():
 
             bets, sharp_moves = analyze(games, prev_map, new_map)
             total_bets = analyze_totals(games, sport_key)
-            arbs = scan_arbitrage(games)
+            arbs = scan_arbitrage(games, sport_key)
+            for m in sharp_moves:
+                m["sport"] = sport_key
             short = sport_key.split("_", 1)[-1].upper()
 
             for b in bets:
