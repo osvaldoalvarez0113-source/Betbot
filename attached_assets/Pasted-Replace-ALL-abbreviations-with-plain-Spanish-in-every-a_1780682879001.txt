@@ -1,0 +1,104 @@
+Replace ALL abbreviations with plain 
+Spanish in every alert. No technical 
+terms or siglas:
+
+MLB CHANGES:
+
+1. RS/RA → plain Spanish:
+"⚾ Carreras anotadas: 4.5 por juego
+ 🛡️ Carreras recibidas: 4.5 por juego"
+
+2. IL → plain Spanish:
+"🤕 Jugadores lesionados: 
+   Bregman, Brown, Thielbar"
+
+3. EV → plain Spanish:
+"💰 Ganancia esperada: $18.45 
+   por cada $50 apostados"
+
+4. ERA → plain Spanish:
+"🔵 Pitcher local: Edward Cabrera
+   Promedio de carreras recibidas: 4.00
+   Nivel: promedio ⚪"
+
+5. Factor parque → plain Spanish:
+"🏟️ Estadio: favorece bateadores 
+   (+2% más carreras)"
+OR
+"🏟️ Estadio: favorece pitchers
+   (-3% menos carreras)"
+OR
+"🏟️ Estadio: neutral"
+(Remove the x1.02 number completely)
+
+6. Últimos 3 pitcher ERA → 
+   Team last 5 game results:
+"📋 Cubs últimos 5 juegos:
+ ✅ Ganó 5-3 | ✅ Ganó 7-2 | 
+ ❌ Perdió 3-6 | ✅ Ganó 4-1 | 
+ ❌ Perdió 2-8
+ Balance: 3 ganados, 2 perdidos"
+
+7. Ump → plain Spanish:
+"👨‍ Árbitro: Alex Tosi
+   Historial: juegos normales de score
+   → No afecta el total"
+
+8. Home/away record → plain Spanish:
+"🏠 Cubs jugando en casa:
+   Anota 4.5 | Recibe 4.5
+   Gana el 50% de sus juegos en casa
+
+🚗 Giants jugando de visita:
+   Anota 4.5 | Recibe 4.5  
+   Gana el 50% jugando fuera"
+
+9. Prob % → plain Spanish:
+"📊 Probabilidad real: 68% de que 
+   el total quede bajo 10.5 carreras"
+
+10. SEGURO label → plain Spanish:
+"✅ Pick más seguro del análisis"
+
+━━━━━━━━━━━━━━━━━━
+SOCCER CHANGES:
+
+1. ELO → plain Spanish:
+"💪 Fuerza del equipo: ALTA"
+(based on ELO tier, not number)
+TOP 10 FIFA → MUY ALTA
+11-30 → ALTA  
+31-60 → MEDIA
+61-100 → BAJA
+
+2. Prob. empate → plain Spanish:
+"🤝 Probabilidad de empate: 25%"
+
+3. gpg → plain Spanish:
+"⚽ Goles anotados por partido: 1.8"
+
+4. EV → plain Spanish:
+"💰 Ganancia esperada: $23.95 
+   por cada $50 apostados"
+
+5. Forma W/D/L → plain Spanish:
+"📋 Últimos 3 partidos:
+ ✅ Ganó | 🤝 Empató | ✅ Ganó"
+
+6. Urgencia táctica → plain Spanish:
+"🔴 SITUACIÓN CRÍTICA:
+ Marruecos NECESITA ganar este partido
+ para seguir en el torneo.
+ Atacarán desde el primer minuto.
+ Esto favorece el Over y el ML 
+ del equipo rival por contraataque."
+
+━━━━━━━━━━━━━━━━━━
+GENERAL RULE:
+If a label needs abbreviation to fit,
+spell it out anyway. Clarity over 
+brevity. The user should understand
+every single line without knowing 
+baseball or soccer statistics.
+
+Commit when done.
