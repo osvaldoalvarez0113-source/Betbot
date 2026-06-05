@@ -1918,9 +1918,9 @@ def analyze_game_full(game, sport_key, prev_map=None):
         except Exception:
             pass
 
-        # Module 6: home/away splits
-        h_splits = {"home_rs": 0, "home_ra": 0, "home_wpct": 0}
-        a_splits = {"away_rs": 0, "away_ra": 0, "away_wpct": 0}
+        # Module 6: home/away splits (None if unavailable — never show fake data)
+        h_splits = None
+        a_splits = None
         try:
             h_splits = fetch_mlb_home_away_splits(home)
             a_splits = fetch_mlb_home_away_splits(away)
@@ -2222,10 +2222,10 @@ def notify_game_analysis(analyses, sport_key):
                         f"🤕 Jugadores lesionados ({_es(tname_il)}):\n"
                         f"   {', '.join(il_list[:4])}\n"
                     )
-            # Home/away splits
-            hs  = ctx.get("h_splits", {})
-            as_ = ctx.get("a_splits", {})
-            if hs.get("home_rs"):
+            # Home/away splits — only show when real data available
+            hs  = ctx.get("h_splits") or {}
+            as_ = ctx.get("a_splits") or {}
+            if hs.get("home_rs") and as_.get("away_rs"):
                 ctx_lines += (
                     f"🏠 {home_es} jugando en casa:\n"
                     f"   Anota {hs['home_rs']} | Recibe {hs['home_ra']}\n"
@@ -2992,48 +2992,129 @@ def fetch_mlb_il(home, away):
 # ── Module 6: home/away splits ────────────────────────────────────────────────
 _splits_cache: dict = {}
 
-def fetch_mlb_home_away_splits(team_name):
-    """Return home/away RS, RA, win% from MLB Stats API homeAndAway group."""
-    if team_name in _splits_cache:
-        return _splits_cache[team_name]
-    empty = {"home_rs": 4.5, "home_ra": 4.5, "home_wpct": 0.500,
-             "away_rs": 4.5, "away_ra": 4.5, "away_wpct": 0.500}
+# Official MLB team IDs (2026 season)
+_MLB_TEAM_IDS: dict = {
+    "Arizona Diamondbacks": 109, "Diamondbacks": 109,
+    "Atlanta Braves": 144,       "Braves": 144,
+    "Baltimore Orioles": 110,    "Orioles": 110,
+    "Boston Red Sox": 111,       "Red Sox": 111,
+    "Chicago Cubs": 112,         "Cubs": 112,
+    "Chicago White Sox": 145,    "White Sox": 145,
+    "Cincinnati Reds": 113,      "Reds": 113,
+    "Cleveland Guardians": 114,  "Guardians": 114,
+    "Colorado Rockies": 115,     "Rockies": 115,
+    "Detroit Tigers": 116,       "Tigers": 116,
+    "Houston Astros": 117,       "Astros": 117,
+    "Kansas City Royals": 118,   "Royals": 118,
+    "Los Angeles Angels": 108,   "Angels": 108,
+    "Los Angeles Dodgers": 119,  "Dodgers": 119,
+    "Miami Marlins": 146,        "Marlins": 146,
+    "Milwaukee Brewers": 158,    "Brewers": 158,
+    "Minnesota Twins": 142,      "Twins": 142,
+    "New York Mets": 121,        "Mets": 121,
+    "New York Yankees": 147,     "Yankees": 147,
+    "Oakland Athletics": 133,    "Athletics": 133,
+    "Philadelphia Phillies": 143,"Phillies": 143,
+    "Pittsburgh Pirates": 134,   "Pirates": 134,
+    "San Diego Padres": 135,     "Padres": 135,
+    "San Francisco Giants": 137, "Giants": 137,
+    "Seattle Mariners": 136,     "Mariners": 136,
+    "St. Louis Cardinals": 138,  "Cardinals": 138,
+    "Tampa Bay Rays": 139,       "Rays": 139,
+    "Texas Rangers": 140,        "Rangers": 140,
+    "Toronto Blue Jays": 141,    "Blue Jays": 141,
+    "Washington Nationals": 120, "Nationals": 120,
+}
+
+def _team_id(team_name: str) -> int | None:
+    """Look up MLB team ID from name, trying exact then partial match."""
+    if team_name in _MLB_TEAM_IDS:
+        return _MLB_TEAM_IDS[team_name]
+    tl = team_name.lower()
+    for k, v in _MLB_TEAM_IDS.items():
+        if k.lower() in tl or tl in k.lower():
+            return v
+    return None
+
+def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
+    """
+    Real home/away splits from MLB Stats API.
+    Returns {home_rs, home_ra, home_wpct, away_rs, away_ra, away_wpct} or None.
+    Returns None (not fake defaults) when data is unavailable.
+    Cached per team per calendar day.
+    """
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    ck    = f"{team_name}|{today}"
+    if ck in _splits_cache:
+        return _splits_cache[ck]
+
     try:
-        if HAS_STATSAPI:
-            teams = statsapi.lookup_team(team_name)
-            tid   = teams[0]["id"] if teams else None
-        else:
-            data  = _mlb_rest("/teams", {"name": team_name, "sportId": 1})
-            teams = data.get("teams", [])
-            tid   = teams[0]["id"] if teams else None
+        tid = _team_id(team_name)
         if tid is None:
-            return empty
-        data   = _mlb_rest(f"/teams/{tid}/stats", {
+            _splits_cache[ck] = None
+            return None
+
+        # ── Hitting stats → runs scored ───────────────────────────────────────
+        hit_data = _mlb_rest(f"/teams/{tid}/stats", {
             "stats": "homeAndAway", "group": "hitting",
             "season": MLB_YEAR, "sportId": 1,
         })
-        splits = (data.get("stats", [{}])[0].get("splits", [])
-                  if data.get("stats") else [])
-        result = dict(empty)
-        for s in splits:
+        hit_splits = (hit_data.get("stats", [{}])[0].get("splits", [])
+                      if hit_data and hit_data.get("stats") else [])
+
+        # ── Pitching stats → runs allowed ─────────────────────────────────────
+        pit_data = _mlb_rest(f"/teams/{tid}/stats", {
+            "stats": "homeAndAway", "group": "pitching",
+            "season": MLB_YEAR, "sportId": 1,
+        })
+        pit_splits = (pit_data.get("stats", [{}])[0].get("splits", [])
+                      if pit_data and pit_data.get("stats") else [])
+
+        if not hit_splits and not pit_splits:
+            _splits_cache[ck] = None
+            return None
+
+        result: dict = {}
+
+        for s in hit_splits:
             loc  = s.get("split", {}).get("code", "")
             stat = s.get("stat", {})
-            gp   = max(float(stat.get("gamesPlayed", 1) or 1), 1)
-            runs = float(stat.get("runs",        0) or 0)
-            ra   = float(stat.get("earnedRuns",  0) or 0)
-            wins = float(stat.get("wins",        0) or 0)
+            gp   = max(float(stat.get("gamesPlayed", 0) or 0), 1)
+            runs = float(stat.get("runs", 0) or 0)
+            wins = float(stat.get("wins", 0) or 0)
+            loss = float(stat.get("losses", 0) or 0)
+            wl   = wins + loss
+            wpct = round(wins / wl, 3) if wl > 0 else 0.500
             if loc == "H":
                 result["home_rs"]   = round(runs / gp, 2)
-                result["home_ra"]   = round(ra   / gp, 2)
-                result["home_wpct"] = round(wins / gp, 3)
+                result["home_wpct"] = wpct
             elif loc == "A":
                 result["away_rs"]   = round(runs / gp, 2)
-                result["away_ra"]   = round(ra   / gp, 2)
-                result["away_wpct"] = round(wins / gp, 3)
-        _splits_cache[team_name] = result
+                result["away_wpct"] = wpct
+
+        for s in pit_splits:
+            loc  = s.get("split", {}).get("code", "")
+            stat = s.get("stat", {})
+            gp   = max(float(stat.get("gamesPlayed", 0) or 0), 1)
+            # Use "runs" (total runs allowed) not earnedRuns for accuracy
+            ra   = float(stat.get("runs", 0) or 0)
+            if loc == "H":
+                result["home_ra"] = round(ra / gp, 2)
+            elif loc == "A":
+                result["away_ra"] = round(ra / gp, 2)
+
+        # Only return if we got at least one real stat
+        required = {"home_rs", "home_ra", "home_wpct", "away_rs", "away_ra", "away_wpct"}
+        if not required.issubset(result.keys()):
+            _splits_cache[ck] = None
+            return None
+
+        _splits_cache[ck] = result
         return result
+
     except Exception:
-        return empty
+        _splits_cache[ck] = None
+        return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANALYSIS IMPROVEMENTS — MLB & SOCCER (7 new data modules)
