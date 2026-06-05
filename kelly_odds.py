@@ -1139,6 +1139,92 @@ def fetch_mlb_team_recent(team: str) -> dict | None:
     except Exception:
         return None
 
+
+# ── Module B2: RACHAS DE EQUIPOS (last-10 streak via Odds API) ────────────────
+_mlb_streak_cache: dict = {}
+
+def fetch_team_streak_mlb(team: str) -> "dict | None":
+    """
+    Last 10 completed MLB games for a team via Odds API scores endpoint.
+    Returns dict:
+      wins_10, losses_10          — last-10 record
+      streak, streak_type         — consecutive W or L from most recent game
+      run_diff                    — cumulative run differential over last 10
+      is_hot (wins_10 >= 7)       — triggers +5% ML, +0.3 total runs
+      is_cold (wins_10 <= 3)      — triggers −5% ML, −0.3 total runs
+      label                       — formatted display string for alerts
+    """
+    ck = f"streak_{team}_{datetime.now().strftime('%Y-%m-%d')}"
+    if ck in _mlb_streak_cache:
+        return _mlb_streak_cache[ck]
+    try:
+        url = (f"https://api.the-odds-api.com/v4/sports/baseball_mlb/scores/"
+               f"?apiKey={API_KEY}&daysFrom=21&dateFormat=iso")
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        all_games = [g for g in r.json()
+                     if (g.get("home_team") == team or g.get("away_team") == team)
+                     and g.get("completed") is True]
+        all_games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
+        last10 = all_games[:10]
+        if not last10:
+            return None
+
+        results  = []
+        run_diff = 0
+        for g in last10:
+            opp    = g["away_team"] if g["home_team"] == team else g["home_team"]
+            sc_map = {s["name"]: int(s["score"])
+                      for s in (g.get("scores") or []) if s.get("score") is not None}
+            my_sc  = sc_map.get(team, 0)
+            op_sc  = sc_map.get(opp,  0)
+            results.append("W" if my_sc > op_sc else "L")
+            run_diff += my_sc - op_sc
+
+        wins_10   = results.count("W")
+        losses_10 = results.count("L")
+
+        # Current streak from most recent game
+        streak_type = results[0] if results else "L"
+        streak = 0
+        for rr in results:
+            if rr == streak_type:
+                streak += 1
+            else:
+                break
+
+        is_hot  = wins_10 >= 7
+        is_cold = wins_10 <= 3
+        emoji   = "🔥" if is_hot else ("❄️" if is_cold else "📊")
+        trend   = "EN RACHA" if is_hot else ("EN CAÍDA" if is_cold else "NEUTRO")
+        streak_word = "ganados" if streak_type == "W" else "perdidos"
+        diff_s  = f"+{run_diff}" if run_diff >= 0 else str(run_diff)
+
+        label = (
+            f"{emoji} {_es(team)} — {trend}:\n"
+            f"   Últimos 10: {wins_10}-{losses_10}\n"
+            f"   Racha actual: {streak} {streak_word} seguidos\n"
+            f"   Diferencial: {diff_s} carreras"
+        )
+
+        result = {
+            "wins_10":     wins_10,
+            "losses_10":   losses_10,
+            "streak":      streak,
+            "streak_type": streak_type,
+            "run_diff":    run_diff,
+            "is_hot":      is_hot,
+            "is_cold":     is_cold,
+            "label":       label,
+            "emoji":       emoji,
+        }
+        _mlb_streak_cache[ck] = result
+        return result
+    except Exception:
+        return None
+
+
 def _parse_pitcher(s):
     """Parse '{name} (ERA X.XX)' → (name, era_float). Falls back to (s, 4.50)."""
     if s and " (ERA " in s:
@@ -2109,6 +2195,31 @@ def analyze_totals(games, sport_key):
             our_line   = round(our_line + _bull_adj, 1)
             _bull_note = "\n".join(_bull_parts)
 
+            # ── Module B2: Streak run adjustment ──────────────────────────
+            _strk_adj   = 0.0
+            _strk_parts = []
+            for _t in [home, away]:
+                try:
+                    _sk = fetch_team_streak_mlb(_t)
+                    if not _sk:
+                        continue
+                    if _sk["is_hot"]:
+                        _strk_adj += 0.3
+                        _strk_parts.append(
+                            f"{_sk['label']}\n   → +0.3 carreras al total"
+                        )
+                    elif _sk["is_cold"]:
+                        _strk_adj -= 0.3
+                        _strk_parts.append(
+                            f"{_sk['label']}\n   → -0.3 carreras al total"
+                        )
+                    else:
+                        _strk_parts.append(_sk["label"])
+                except Exception:
+                    pass
+            our_line   = round(our_line + _strk_adj, 1)
+            _strk_note = "\n".join(_strk_parts)
+
             extra = {
                 "pitcher_home":   f"{h_pname} (ERA {h_era:.2f})",
                 "pitcher_away":   f"{a_pname} (ERA {a_era:.2f})",
@@ -2118,13 +2229,15 @@ def analyze_totals(games, sport_key):
                 "wind_info":      w_label or "Wind: N/A",
                 "form_home":      "",
                 "form_away":      "",
-                "base_proj":      base_proj,        # Module A9-A11
+                "base_proj":      base_proj,
                 "park_tend_note": _pt_note,
                 "park_tend_adj":  _pt_adj,
                 "rest_note":      _rest_note,
                 "rest_adj":       round(_rest_adj, 2),
                 "bull_note":      _bull_note,
                 "bull_adj":       round(_bull_adj, 2),
+                "streak_note":    _strk_note,
+                "streak_adj":     round(_strk_adj, 2),
             }
 
         else:
@@ -2242,7 +2355,8 @@ def notify_totals(total_bets):
             base_p  = b.get("base_proj", b["our_line"])
             park_n  = (b.get("park_tend_note") or "").strip()
             rest_n  = (b.get("rest_note")      or "").strip()
-            bull_n  = (b.get("bull_note")      or "").strip()
+            bull_n   = (b.get("bull_note")    or "").strip()
+            streak_n = (b.get("streak_note")  or "").strip()
 
             adj_block = ""
             if park_n:
@@ -2251,6 +2365,8 @@ def notify_totals(total_bets):
                 adj_block += f"{rest_n}\n"
             if bull_n:
                 adj_block += f"{bull_n}\n"
+            if streak_n:
+                adj_block += f"{streak_n}\n"
             if adj_block:
                 adj_block += f"{_DIV2}\n"
 
@@ -2550,6 +2666,36 @@ def analyze_game_full(game, sport_key, prev_map=None):
         p_home = pythagorean_win_prob(home_exp, away_exp)
         p_away = 1.0 - p_home
 
+        # ── Module B2: Team streak ML adjustment (±5% per hot/cold team) ─
+        _h_streak = _a_streak = None
+        _streak_ml_note = ""
+        if is_mlb:
+            try:
+                _h_streak = fetch_team_streak_mlb(home)
+                _a_streak = fetch_team_streak_mlb(away)
+                _sp_adj   = 0.0
+                _s_parts  = []
+                for _tm, _sk, _sign in [(home, _h_streak, +1), (away, _a_streak, -1)]:
+                    if not _sk:
+                        continue
+                    _s_parts.append(_sk["label"])
+                    if _sk["is_hot"]:
+                        _sp_adj += 0.05 * _sign
+                    elif _sk["is_cold"]:
+                        _sp_adj -= 0.05 * _sign
+                if abs(_sp_adj) > 0.001:
+                    _orig_ph = p_home
+                    p_home   = max(0.05, min(0.95, p_home + _sp_adj))
+                    p_away   = 1.0 - p_home
+                    _dir_s   = "sube" if _sp_adj > 0 else "baja"
+                    _s_parts.append(
+                        f"   → Prob {_es(home)} {_dir_s}: "
+                        f"{_orig_ph*100:.0f}% → {p_home*100:.0f}%"
+                    )
+                _streak_ml_note = "\n".join(_s_parts)
+            except Exception:
+                pass
+
         # ML
         for team, true_p, lbl in [
             (home, p_home, f"🔵 {home} ML"),
@@ -2573,6 +2719,15 @@ def analyze_game_full(game, sport_key, prev_map=None):
         if totals_data:
             book_line, over_odds, under_odds, bk_name = totals_data
             adj_total = home_exp + away_exp
+
+            # ── Module B2: Streak run adjustment (±0.3 per hot/cold team) ─
+            for _sk in (_h_streak, _a_streak):
+                if not _sk:
+                    continue
+                if _sk["is_hot"]:
+                    adj_total += 0.3
+                elif _sk["is_cold"]:
+                    adj_total -= 0.3
 
             # ── H2H blend (30% weight on projection) ──────────────────────
             _model_raw = adj_total
@@ -4657,6 +4812,80 @@ def _wc_urgency_line(team_name, standings):
     return f"{team_name} (Grupo {grp}, {pos}°): {urg}"
 
 # ── Module 2: consolidated daily ntfy report ──────────────────────────────────
+# ── Module B1: ANALÍTICA DE RENDIMIENTO ──────────────────────────────────────
+_MTYPE_LABEL = {
+    "totals":  "⚾ Totals MLB",
+    "h2h":     "🎯 Moneyline",
+    "spreads": "📊 Run Line",
+    "arb":     "⚡ ARBs",
+    "premium": "💎 Picks Premium",
+}
+
+def performance_by_type_block(bets=None) -> str:
+    """
+    Return a formatted ntfy block showing W/L/ROI per market_type.
+    bets: list of dicts with keys market_type, result, profit_loss, stake.
+    If bets=None, reads settled rows from BETS_LOG_FILE.
+    Works with both bets_log.csv and bankroll_log.csv rows.
+    """
+    if bets is None:
+        bets = []
+        if os.path.exists(BETS_LOG_FILE):
+            try:
+                with open(BETS_LOG_FILE, newline="") as f:
+                    bets = list(csv.DictReader(f))
+            except Exception:
+                pass
+
+    settled = [b for b in bets if b.get("result") in ("W", "L", "P")]
+    if not settled:
+        return ""
+
+    by_type: dict = {}
+    for b in settled:
+        mtype = (b.get("market_type") or "h2h").strip()
+        by_type.setdefault(mtype, {"wins": 0, "losses": 0, "pushes": 0,
+                                    "pnl": 0.0, "stake": 0.0})
+        by_type[mtype]["pnl"]   += float(b.get("profit_loss", 0) or 0)
+        by_type[mtype]["stake"] += float(b.get("stake",       0) or 0)
+        if   b.get("result") == "W": by_type[mtype]["wins"]   += 1
+        elif b.get("result") == "L": by_type[mtype]["losses"]  += 1
+        elif b.get("result") == "P": by_type[mtype]["pushes"]  += 1
+
+    lines    = [f"📊 RENDIMIENTO POR TIPO:\n{_DIV2}"]
+    type_roi: dict = {}
+    for mtype, d in sorted(by_type.items(), key=lambda x: x[1]["pnl"], reverse=True):
+        label = _MTYPE_LABEL.get(mtype, f"🎲 {mtype}")
+        picks = d["wins"] + d["losses"] + d["pushes"]
+        roi_v = (d["pnl"] / d["stake"] * 100) if d["stake"] else 0.0
+        type_roi[mtype] = roi_v
+        roi_s = f"+{roi_v:.1f}% ✅" if roi_v >= 0 else f"{roi_v:.1f}% ⚠️"
+        lines.append(
+            f"{label}:\n"
+            f"   Picks: {picks} | G: {d['wins']} | P: {d['losses']}\n"
+            f"   ROI: {roi_s}"
+        )
+
+    # Bot recommendations
+    recs    = []
+    tot_roi = type_roi.get("totals")
+    ml_roi  = type_roi.get("h2h")
+    arb_roi = type_roi.get("arb")
+    if tot_roi is not None and ml_roi is not None and tot_roi - ml_roi >= 10:
+        recs.append("💡 Recomendación: enfócate en Totals — es tu mercado más fuerte")
+    if arb_roi is not None and arb_roi > 0:
+        recs.append("💡 ARBs funcionando bien — considera aumentar frecuencia")
+    for mtype, roi_v in type_roi.items():
+        if roi_v < -10:
+            lbl = _MTYPE_LABEL.get(mtype, mtype)
+            recs.append(f"⚠️ Mercado con pérdidas: {lbl} — considera pausarlo")
+    if recs:
+        lines.append(_DIV2)
+        lines.extend(recs)
+
+    return "\n".join(lines)
+
+
 def send_daily_ntfy_report():
     """Send consolidated 8 AM ntfy: bankroll, ROI, record, yesterday, today count."""
     try:
@@ -4692,7 +4921,9 @@ def send_daily_ntfy_report():
         except Exception:
             pass
 
-        today_s = datetime.now(ET).strftime("%d %b %Y")
+        today_s     = datetime.now(ET).strftime("%d %b %Y")
+        _perf_block = performance_by_type_block(bets)
+        _perf_sec   = f"{_perf_block}\n{_DIV}\n" if _perf_block else ""
         body = (
             f"📊 REPORTE DIARIO — {today_s}\n"
             f"{_DIV}\n"
@@ -4704,6 +4935,7 @@ def send_daily_ntfy_report():
             f"{yday_lines}"
             f"Net: {yday_net_s}\n"
             f"{_DIV}\n"
+            f"{_perf_sec}"
             f"HOY:\n"
             f"⚾ {mlb_cnt} juegos MLB\n"
             f"⚽ Ver scan para fútbol/Mundial\n"
@@ -4763,6 +4995,9 @@ def send_weekly_summary():
         delta   = current - BANKROLL
         delta_s = f"+${delta:.2f}" if delta >= 0 else f"-${abs(delta):.2f}"
 
+        _w_perf = performance_by_type_block(week_bets)
+        _w_perf_sec = f"\n{_DIV}\n{_w_perf}" if _w_perf else ""
+
         body = (
             f"📊 RESUMEN SEMANAL\n"
             f"{_DIV}\n"
@@ -4770,11 +5005,10 @@ def send_weekly_summary():
             f"📈 ROI semana: {week_roi:+.1f}%  |  Total: {roi:+.1f}%\n"
             f"🏆 Semana: {week_wins}-{week_loss}  |  Total: {wins}-{losses}-{pushes}\n"
             f"{_DIV}\n"
-            f"MEJOR BET: {best_s}\n"
-            f"PEOR BET:  {worst_s}\n"
-            f"{_DIV}\n"
-            f"MEJOR DEPORTE: {best_sport}\n"
-            f"MEJOR TIPO:    {best_type}\n"
+            f"MEJOR BET:    {best_s}\n"
+            f"PEOR BET:     {worst_s}\n"
+            f"MEJOR DEPORTE: {best_sport}"
+            f"{_w_perf_sec}\n"
             f"{_DIV}\n"
             f"PRÓXIMA SEMANA:\n"
             f"⚾ MLB activo  ⚽ Mundial en curso"
