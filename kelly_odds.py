@@ -17,7 +17,7 @@ API_KEY  = os.environ.get("ODDS_API_KEY", "")
 BANKROLL = 1000
 FRACTION = 0.25
 MIN_EDGE = 2.0
-INTERVAL = 300        # 5-minute main scan
+INTERVAL = 600        # 10-minute main scan (API limit-friendly)
 NOTIFY   = "my-bets"
 LOG_CSV  = True
 
@@ -169,6 +169,18 @@ def pythagorean_win_prob(rs, ra, exp=1.83):
     """MLB Pythagorean expectation."""
     if rs + ra == 0: return 0.5
     return (rs ** exp) / ((rs ** exp) + (ra ** exp))
+
+def poisson_ou_prob(expected_total, book_line, bet_over):
+    """P(total > book_line) or P(total <= book_line) given Poisson mean = expected_total."""
+    floor = int(book_line)
+    p_under = sum(poisson_prob(expected_total, k) for k in range(floor + 1))
+    p_over  = 1.0 - p_under
+    # .5 lines have no push — p_under + p_over = 1 already; whole-number lines may push
+    if book_line == floor:   # whole number: push possible, split push evenly
+        push = poisson_prob(expected_total, floor)
+        p_under -= push / 2
+        p_over  -= push / 2
+    return max(0.01, p_over if bet_over else p_under)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE 1 — DAILY MORNING REPORT (8 AM CDT)
@@ -597,6 +609,199 @@ def notify_arbitrage(arbs):
         print(f"  💰 ARB: {arb['match']} — ${arb['profit']} profit ({arb['profit_pct']}%)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MODULE 6 — TOTALS (OVER/UNDER) ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Park factors for known MLB parks (home team name → multiplier)
+MLB_PARK_FACTORS = {
+    "Colorado Rockies":     1.15,
+    "Cincinnati Reds":      1.08,
+    "Boston Red Sox":       1.05,
+    "New York Yankees":     1.04,
+    "Chicago Cubs":         1.02,
+    "Texas Rangers":        1.02,
+    "Philadelphia Phillies": 1.01,
+    "Baltimore Orioles":    1.01,
+    "San Francisco Giants": 0.90,
+    "Los Angeles Dodgers":  0.93,
+    "Oakland Athletics":    0.95,
+    "Seattle Mariners":     0.96,
+    "Miami Marlins":        0.97,
+}
+
+_team_run_cache: dict = {}   # team_name -> {"rs_pg": float, "ra_pg": float}
+
+def fetch_team_run_stats(team_name):
+    """RS/RA per game for an MLB team. Cached for session."""
+    if team_name in _team_run_cache:
+        return _team_run_cache[team_name]
+    try:
+        if HAS_STATSAPI:
+            teams = statsapi.lookup_team(team_name)
+            if not teams:
+                return None
+            tid = teams[0]["id"]
+        else:
+            data = _mlb_rest("/teams", {"sportId": 1, "season": MLB_YEAR})
+            match = next(
+                (t for t in data.get("teams", [])
+                 if team_name.lower() in t.get("name", "").lower()),
+                None,
+            )
+            if not match:
+                return None
+            tid = match["id"]
+
+        hit = _mlb_rest(f"/teams/{tid}/stats",
+                        {"stats": "season", "group": "hitting", "season": MLB_YEAR})
+        pit = _mlb_rest(f"/teams/{tid}/stats",
+                        {"stats": "season", "group": "pitching", "season": MLB_YEAR})
+
+        h_stat = (hit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
+        p_stat = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
+
+        rs_pg = float(h_stat.get("runsPerGame", 4.5))
+        games_p = max(float(p_stat.get("gamesPlayed", 162)), 1)
+        ra_pg   = float(p_stat.get("runsAllowed", 4.5 * games_p)) / games_p
+
+        result = {"rs_pg": round(rs_pg, 2), "ra_pg": round(ra_pg, 2)}
+        _team_run_cache[team_name] = result
+        return result
+    except Exception:
+        return None
+
+def get_book_total(game):
+    """
+    Extract totals line + odds from a game's bookmaker list.
+    Prefers Bovada/Bodog; falls back to first available.
+    Returns (line, over_odds, under_odds, bookmaker_name) or None.
+    """
+    preferred, fallback = None, None
+    for bk in game.get("bookmakers", []):
+        is_pref = bk["title"].lower() in PREFERRED_BOOKS
+        for m in bk.get("markets", []):
+            if m["key"] == "totals":
+                by_name = {o["name"]: o for o in m.get("outcomes", [])}
+                if "Over" not in by_name or "Under" not in by_name:
+                    continue
+                entry = (
+                    by_name["Over"]["point"],
+                    by_name["Over"]["price"],
+                    by_name["Under"]["price"],
+                    bk["title"],
+                )
+                if is_pref:
+                    preferred = entry
+                elif fallback is None:
+                    fallback = entry
+    return preferred or fallback
+
+def analyze_totals(games, sport_key):
+    """Compare projected totals vs bookmaker lines; return alert dicts."""
+    is_mlb    = "mlb" in sport_key
+    threshold = 0.8 if is_mlb else 0.4
+    edge_unit = "runs" if is_mlb else "goals"
+    total_bets = []
+
+    for g in games:
+        game_id  = g.get("id", "")
+        home, away = g["home_team"], g["away_team"]
+        commence   = g.get("commence_time", "")
+
+        if game_starts_soon(commence, 60):
+            continue
+
+        book_data = get_book_total(g)
+        if not book_data:
+            continue
+        book_line, over_odds, under_odds, bookmaker = book_data
+
+        # ── Project our total ──────────────────────────────────────────────────
+        if is_mlb:
+            h = fetch_team_run_stats(home)
+            a = fetch_team_run_stats(away)
+            if h is None or a is None:
+                continue
+            LEAGUE_AVG = 4.5
+            home_exp  = h["rs_pg"] * (a["ra_pg"] / LEAGUE_AVG)
+            away_exp  = a["rs_pg"] * (h["ra_pg"] / LEAGUE_AVG)
+            park      = MLB_PARK_FACTORS.get(home, 1.0)
+            our_line  = round((home_exp + away_exp) * park, 1)
+        else:
+            # Soccer: Poisson with ELO-adjusted averages
+            elo_h  = _elo_ratings.get(home, 1500)
+            elo_a  = _elo_ratings.get(away, 1500)
+            adj_h  = 1.35 * (1 + (elo_h - 1500) / 4000)
+            adj_a  = 1.25 * (1 + (elo_a - 1500) / 4000)
+            our_line = round(adj_h + adj_a, 2)
+
+        diff = our_line - book_line
+        if abs(diff) < threshold:
+            continue
+
+        bet_over = diff > 0
+        bet_side = "OVER" if bet_over else "UNDER"
+        bet_odds = over_odds if bet_over else under_odds
+        edge_val = round(abs(diff), 2)
+
+        # True probability via Poisson model
+        true_prob = poisson_ou_prob(our_line, book_line, bet_over)
+        r = kelly_stake(true_prob, bet_odds)
+        if not r["has_value"] or r["stake"] <= 0:
+            continue
+
+        conf = "HIGH" if edge_val >= threshold * 2 else "MEDIUM"
+        total_bets.append({
+            "match":       f"{home} vs {away}",
+            "team":        bet_side,
+            "side":        str(book_line),
+            "odds":        bet_odds,
+            "edge":        edge_val,
+            "stake":       r["stake"],
+            "kelly_pct":   r["kelly_pct"],
+            "confidence":  conf,
+            "time":        commence[:16],
+            "line_moved":  False,
+            "line_dir":    "",
+            "line_delta":  0.0,
+            "game_id":     game_id,
+            "bookmaker":   bookmaker,
+            "market_type": "totals",
+            "closing_edge": "",
+            "ev":          0,
+            "roi":         0,
+            "value_pct":   0,
+            "elo_prob":    0,
+            "bovada_odds": None,
+            "book_line":   book_line,
+            "our_line":    our_line,
+            "edge_unit":   edge_unit,
+            "sport":       sport_key.split("_", 1)[-1].upper(),
+        })
+
+    return total_bets
+
+def notify_totals(total_bets):
+    global alerted_bets
+    for b in total_bets:
+        key = f"{b['game_id']}|totals|{b['team']}"
+        if key in alerted_bets:
+            continue
+        body = (
+            f"{b['team']} {b['side']} | {b['match']}\n"
+            f"Our Line:  {b['our_line']} {b['edge_unit']}\n"
+            f"Book Line: {b['side']} {b['edge_unit']}\n"
+            f"Edge:      {b['edge']} {b['edge_unit']}\n"
+            f"Odds:      {b['odds']} | Stake: ${b['stake']}\n"
+            f"Confidence:{b['confidence']} | Book: {b['bookmaker']}"
+        )
+        priority = "high" if b["confidence"] == "HIGH" else "default"
+        ntfy_post(f"{b['team']} {b['side']} | {b['match']}", body, priority)
+        alerted_bets.add(key)
+        print(f"    🎯 {b['team']} {b['side']} {b['match']} | "
+              f"Our:{b['our_line']} | Edge:{b['edge']} {b['edge_unit']}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CORE — ODDS FETCHING & LINE MOVEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -605,7 +810,7 @@ def get_odds(sport_key):
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
             params={"apiKey": API_KEY, "regions": "us,uk,eu",
-                    "markets": "h2h", "oddsFormat": "decimal"},
+                    "markets": "h2h,totals", "oddsFormat": "decimal"},
             timeout=10,
         )
         return r.json() if r.status_code == 200 else []
@@ -847,6 +1052,7 @@ FIELDNAMES = [
     "odds", "edge", "kelly_pct", "stake", "confidence",
     "bookmaker", "market_type", "closing_edge",
     "value_pct", "ev", "roi", "elo_prob",
+    "book_line", "our_line", "edge_unit",
     "line_moved", "line_dir", "line_delta",
     "game_time", "result", "profit_loss",
 ]
@@ -876,6 +1082,9 @@ def log_bets(bets, sport_key):
                 "ev":           b.get("ev", ""),
                 "roi":          b.get("roi", ""),
                 "elo_prob":     b.get("elo_prob", ""),
+                "book_line":    b.get("book_line", ""),
+                "our_line":     b.get("our_line", ""),
+                "edge_unit":    b.get("edge_unit", ""),
                 "line_moved":   b["line_moved"],
                 "line_dir":     b["line_dir"],
                 "line_delta":   b["line_delta"],
@@ -924,9 +1133,10 @@ def run_scan():
     global daily_bets, lineup_scan_counter
     prev_map  = load_previous_odds()
     new_map   = {}
-    all_bets  = []
-    all_sharp = []
-    all_arbs  = []
+    all_bets   = []
+    all_sharp  = []
+    all_arbs   = []
+    all_totals = []
     now_month = datetime.now(CDT).month
 
     for sport_key in SPORT_KEYS:
@@ -941,6 +1151,7 @@ def run_scan():
                 continue
 
             bets, sharp_moves = analyze(games, prev_map, new_map)
+            total_bets = analyze_totals(games, sport_key)
             arbs = scan_arbitrage(games)
             short = sport_key.split("_", 1)[-1].upper()
 
@@ -959,7 +1170,16 @@ def run_scan():
                 all_bets.extend(bets)
                 daily_bets.extend(bets)
             else:
-                print(f"  ❌ {short} — no value")
+                print(f"  ❌ {short} — no ML value")
+
+            if total_bets:
+                print(f"  🎯 {short} — {len(total_bets)} totals bet(s):")
+                if LOG_CSV:
+                    log_bets(total_bets, short)
+                all_totals.extend(total_bets)
+                daily_bets.extend(total_bets)
+            else:
+                print(f"  ❌ {short} — no totals value")
 
             if sharp_moves:
                 print(f"  ⚡ {short} — {len(sharp_moves)} sharp move(s)")
@@ -977,6 +1197,8 @@ def run_scan():
 
     if all_bets:
         notify_bets(all_bets)
+    if all_totals:
+        notify_totals(all_totals)
     if all_sharp:
         notify_sharp_money(all_sharp)
     if all_arbs:
