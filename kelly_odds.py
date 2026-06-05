@@ -1176,16 +1176,35 @@ def notify_arbitrage(arbs):
             continue
         # ───────────────────────────────────────────────────────────────────
 
+        sport     = arb.get("sport", "")
+        game_time = arb.get("game_time", "")
+        arb_days  = _days_until(game_time)
+        is_mlb_arb = "mlb" in sport.lower()
+
+        # ── Timing filter ───────────────────────────────────────────────────
+        if is_mlb_arb:
+            # MLB: today and tomorrow only (same rule as analysis)
+            if arb_days > 2:
+                print(f"  ⛔ ARB MLB omitido — muy lejano ({arb_days:.1f} días): {arb['match']}")
+                continue
+        else:
+            # Soccer / World Cup
+            if arb_days > 7:
+                print(f"  ⛔ ARB soccer omitido — >7 días ({arb_days:.1f}): {arb['match']}")
+                continue
+            if arb_days >= 3 and arb["profit_pct"] < 4.0:
+                print(f"  ⛔ ARB soccer omitido — 3-7 días con profit {arb['profit_pct']}% < 4%: {arb['match']}")
+                continue
+            # < 3 days: normal threshold (>= ARB_MIN_PROFIT = 2%) already enforced upstream
+        # ───────────────────────────────────────────────────────────────────
+
         if i > 0:
             time.sleep(2)
-        sport     = arb.get("sport", "")
         emoji     = _sport_emoji(sport)
         match     = arb["match"]
         profit    = arb["profit"]
         pct       = arb["profit_pct"]
-        game_time = arb.get("game_time", "")
         gt        = _fmt_smart_gt(game_time)
-        arb_days  = _days_until(game_time)
         arb_timing_note = (f"⚠️ Partido en {int(arb_days)} días — verificar lineup\n"
                            if arb_days >= 3 else "")
 
