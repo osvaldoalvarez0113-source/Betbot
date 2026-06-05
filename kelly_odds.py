@@ -230,6 +230,64 @@ def game_starts_soon(commence_str, minutes=60):
     except Exception:
         return False
 
+def _days_until(commence_str: str) -> float:
+    """Days (float) from now until game. Returns 999 on parse error."""
+    try:
+        ct = datetime.strptime(commence_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
+        return (ct - datetime.now(pytz.utc)).total_seconds() / 86400
+    except Exception:
+        return 999.0
+
+def _fmt_smart_gt(commence_str: str) -> str:
+    """
+    Smart game-time label:
+      same day  → "Hoy 6:00 PM ET"
+      tomorrow  → "Mañana 6:00 PM ET"
+      2+ days   → "En 3 días — Jun 8"
+    Falls back to plain _fmt_et on error.
+    """
+    try:
+        ct    = datetime.strptime(commence_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
+        ct_et = ct.astimezone(ET)
+        now_et = datetime.now(ET)
+        days  = (ct_et.date() - now_et.date()).days
+        t_str = ct_et.strftime("%-I:%M %p ET")
+        if days == 0:
+            return f"Hoy {t_str}"
+        if days == 1:
+            return f"Mañana {t_str}"
+        month_es = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
+                    7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
+        date_lbl = f"{month_es.get(ct_et.month, ct_et.strftime('%b'))} {ct_et.day}"
+        return f"En {days} días — {date_lbl}"
+    except Exception:
+        return _fmt_et(commence_str)
+
+def _timing_check(commence_str: str, is_mlb: bool) -> dict:
+    """
+    Returns timing decision for a game:
+      skip          → True if game should be ignored entirely
+      warn          → warning string to prepend to alert (or "")
+      ev_min        → minimum EV% required (raised for far-out soccer)
+      cap_conf      → if True, cap confidence display to MEDIA
+    """
+    days = _days_until(commence_str)
+    if is_mlb:
+        # MLB: only today and tomorrow
+        if days > 2:
+            return {"skip": True, "warn": "", "ev_min": 0, "cap_conf": False}
+        return {"skip": False, "warn": "", "ev_min": 0, "cap_conf": False}
+    else:
+        # Soccer / World Cup
+        if days > 7:
+            return {"skip": True, "warn": "", "ev_min": 0, "cap_conf": False}
+        if days >= 3:
+            day_int = int(days)
+            warn = (f"⚠️ Partido en {day_int} días — "
+                    f"verificar lineup antes de apostar")
+            return {"skip": False, "warn": warn, "ev_min": 8.0, "cap_conf": True}
+        return {"skip": False, "warn": "", "ev_min": 0, "cap_conf": False}
+
 def remove_vig(odds_list):
     implied = [1.0 / o for o in odds_list]
     total   = sum(implied)
@@ -1037,12 +1095,17 @@ def notify_arbitrage(arbs):
             continue
         if i > 0:
             time.sleep(2)
-        sport  = arb.get("sport", "")
-        emoji  = _sport_emoji(sport)
-        match  = arb["match"]
-        profit = arb["profit"]
-        pct    = arb["profit_pct"]
-        gt     = _fmt_et(arb.get("game_time", ""))
+        sport     = arb.get("sport", "")
+        emoji     = _sport_emoji(sport)
+        match     = arb["match"]
+        profit    = arb["profit"]
+        pct       = arb["profit_pct"]
+        game_time = arb.get("game_time", "")
+        gt        = _fmt_smart_gt(game_time)
+        # ARB exception: always fires, but warn about far-out games
+        arb_days  = _days_until(game_time)
+        arb_timing_note = (f"⚠️ Partido en {int(arb_days)} días — verificar lineup\n"
+                           if arb_days >= 3 else "")
 
         verdict = _verdict_line(pct)
 
@@ -1058,6 +1121,7 @@ def notify_arbitrage(arbs):
                 f"{_DIV}\n"
                 f"💵 Total apostado: ${total_stake}\n"
                 f"⏰ {gt}\n"
+                f"{arb_timing_note}"
                 f"{verdict}\n"
                 f"{_DIV2}"
             )
@@ -1072,6 +1136,7 @@ def notify_arbitrage(arbs):
                 f"{_DIV}\n"
                 f"💵 Total apostado: ${total_stake}\n"
                 f"⏰ {gt}\n"
+                f"{arb_timing_note}"
                 f"{verdict}\n"
                 f"{_DIV2}"
             )
@@ -1389,6 +1454,9 @@ def analyze_totals(games, sport_key):
 
         if game_starts_soon(commence, 60):
             continue
+        tc = _timing_check(commence, is_mlb)
+        if tc["skip"]:
+            continue
 
         book_data = get_book_total(g)
         if not book_data:
@@ -1666,6 +1734,9 @@ def analyze_game_full(game, sport_key, prev_map=None):
     commence   = game.get("commence_time", "")
 
     if game_starts_soon(commence, 60):
+        return None
+    tc = _timing_check(commence, is_mlb)
+    if tc["skip"]:
         return None
 
     candidates = []   # {label, true_prob, odds, book, ev_pct, kelly_pct, stake, safest}
@@ -1989,11 +2060,18 @@ def notify_game_analysis(analyses, sport_key):
         if i > 0:
             time.sleep(2)
 
-        gt  = _fmt_et(a["time"])
-        ctx = a["context"]
+        gt   = _fmt_smart_gt(a["time"])
+        ctx  = a["context"]
+        tc   = _timing_check(a["time"], is_mlb)
 
         # Module 7: filter candidates below MIN_STAKE
         a["candidates"] = [c for c in a["candidates"] if c.get("stake", 0) >= MIN_STAKE]
+        if not a["candidates"]:
+            continue
+
+        # Smart timing: raise EV bar for far-out soccer (3-7 days)
+        if tc["ev_min"] > 0:
+            a["candidates"] = [c for c in a["candidates"] if c["ev_pct"] >= tc["ev_min"]]
         if not a["candidates"]:
             continue
 
@@ -2101,6 +2179,10 @@ def notify_game_analysis(analyses, sport_key):
         if ctx.get("line_moved") and ctx.get("line_note"):
             ctx_lines += f"📉 {ctx['line_note']}\n"
 
+        # Smart timing warning (soccer 3-7 days)
+        if tc.get("warn"):
+            ctx_lines += f"{tc['warn']}\n"
+
         # Best pick for action line
         best = a["candidates"][0]
         best_clean = (best["label"]
@@ -2141,8 +2223,11 @@ def notify_game_analysis(analyses, sport_key):
                 f"{odds_line}"
             )
 
-        # Verdict based on best pick
-        verdict = _verdict_line(best["ev_pct"], best["true_prob"])
+        # Verdict based on best pick — cap to MEDIA for far-out soccer
+        if tc.get("cap_conf"):
+            verdict = f"{_DIV3}\n🟡 CONFIANZA: MEDIA — apostar mitad"
+        else:
+            verdict = _verdict_line(best["ev_pct"], best["true_prob"])
 
         body = (
             f"{emoji} {match_es}\n"
@@ -3330,9 +3415,10 @@ def send_weekly_summary():
 # CORE — ANALYSIS & NOTIFICATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def analyze(games, prev_map, new_map):
+def analyze(games, prev_map, new_map, sport_key=""):
     bets        = []
     sharp_moves = []
+    _is_mlb     = "mlb" in sport_key
 
     for g in games:
         game_id    = g.get("id", "")
@@ -3340,6 +3426,8 @@ def analyze(games, prev_map, new_map):
         commence   = g.get("commence_time", "")
 
         if game_starts_soon(commence, 60):
+            continue
+        if _timing_check(commence, _is_mlb)["skip"]:
             continue
 
         bookmakers = g.get("bookmakers", [])
@@ -3666,7 +3754,7 @@ def run_scan():
 
             current_games_by_sport[sport_key] = games   # for CLV check
 
-            bets, sharp_moves = analyze(games, prev_map, new_map)
+            bets, sharp_moves = analyze(games, prev_map, new_map, sport_key)
             total_bets = analyze_totals(games, sport_key)
             arbs = scan_arbitrage(games, sport_key)
             for m in sharp_moves:
