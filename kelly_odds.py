@@ -1871,13 +1871,74 @@ def analyze_game_full(game, sport_key, prev_map=None):
                                    "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
 
         # Totals
+        _pitch_notes   = []
+        _pitch_reason  = ""
+        _contradiction = False
         if totals_data:
             book_line, over_odds, under_odds, bk_name = totals_data
             adj_total = home_exp + away_exp
-            for side_label, p, odds in [
-                (f"📈 OVER {book_line} carreras",  poisson_ou_prob(adj_total, book_line, True),  over_odds),
-                (f"📉 UNDER {book_line} carreras", poisson_ou_prob(adj_total, book_line, False), under_odds),
+
+            # ── Pitcher Intelligence Rules ─────────────────────────────────
+            _over_min_edge = 0.0
+            dom_h  = h_era < 2.75
+            dom_a  = a_era < 2.75
+            weak_h = h_era > 4.25
+            weak_a = a_era > 4.25
+
+            # Rule 1: any dominant pitcher → reduce total, require bigger edge for OVER
+            if dom_h or dom_a:
+                adj_total -= 1.2
+                _over_min_edge = 1.5
+                dom_name = h_pname if dom_h else a_pname
+                _pitch_notes.append(
+                    f"⚠️ Pitcher dominante ({dom_name}) — "
+                    f"el Over necesita edge mayor para tener valor"
+                )
+
+            # Rule 2: both pitchers weak → raise total, OVER gets priority
+            if weak_h and weak_a:
+                adj_total += 0.8
+                _pitch_notes.append(
+                    "✅ Ambos pitchers débiles — condiciones favorables para Over"
+                )
+
+            adj_total   = max(0.5, adj_total)
+            _over_edge  = adj_total - book_line  # positive = model favors OVER
+
+            # Rule 3: contradiction — dominant pitcher but model still says OVER
+            if (dom_h or dom_a) and _over_edge > 0:
+                _contradiction = True
+                _pitch_notes.append(
+                    "⚠️ Contradicción: pitcher dominante pero el modelo dice Over.\n"
+                    "   Considera apostar UNDER."
+                )
+
+            # Rule 4: always show reasoning summary for totals
+            _h_exp_lbl = "POCO"     if dom_a  else ("MUCHO"    if weak_a else "moderado")
+            _a_exp_lbl = "POCO"     if dom_h  else ("MUCHO"    if weak_h else "moderado")
+            _total_dir = (
+                f"bajo (proyectado {adj_total:.1f} vs línea {book_line}) → Favorece UNDER"
+                if adj_total < book_line else
+                f"alto (proyectado {adj_total:.1f} vs línea {book_line}) → Favorece OVER"
+            )
+            _pitch_reason = (
+                f"📊 {home} con {h_pname} ({_era_label(h_era)}):\n"
+                f"   {away} anotará {_a_exp_lbl}\n"
+                f"   {away} con {a_pname} ({_era_label(a_era)}):\n"
+                f"   {home} anotará {_h_exp_lbl}\n"
+                f"   → Total proyectado {_total_dir}"
+            )
+            # ──────────────────────────────────────────────────────────────
+
+            for side_label, is_over, p, odds in [
+                (f"📈 OVER {book_line} carreras",  True,
+                 poisson_ou_prob(adj_total, book_line, True),  over_odds),
+                (f"📉 UNDER {book_line} carreras", False,
+                 poisson_ou_prob(adj_total, book_line, False), under_odds),
             ]:
+                # Rule 1: skip OVER when projected edge is below the dominant-pitcher threshold
+                if is_over and _over_min_edge > 0 and _over_edge < _over_min_edge:
+                    continue
                 ev = (p * odds - 1) * 100
                 r  = kelly_stake(p, odds)
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
@@ -1972,6 +2033,11 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "pname_away":    a_pname,   # raw pitcher name
             "era_home":      h_era,     # raw ERA float
             "era_away":      a_era,     # raw ERA float
+            "pitch_intel": {            # intelligence rules output
+                "notes":         _pitch_notes,
+                "reasoning":     _pitch_reason,
+                "contradiction": _contradiction,
+            },
         }
 
     # ── SOCCER ────────────────────────────────────────────────────────────────
@@ -2007,14 +2073,117 @@ def analyze_game_full(game, sport_key, prev_map=None):
                                    "book": book, "ev_pct": round(ev, 1),
                                    "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
 
+        # Module 5: WC group standings (fetched early — needed for intel rules)
+        wc_standings = {}
+        try:
+            wc_standings = fetch_wc_standings()
+        except Exception:
+            pass
+
         # Totals
+        _soc_notes    = []
+        _soc_reason   = ""
+        _contradiction_s = False
         if totals_data:
             book_line, over_odds, under_odds, bk_name = totals_data
             exp_total = blend_h + blend_a
-            for side_label, p, odds in [
-                (f"📈 OVER {book_line} goles",  poisson_ou_prob(exp_total, book_line, True),  over_odds),
-                (f"📉 UNDER {book_line} goles", poisson_ou_prob(exp_total, book_line, False), under_odds),
+
+            # ── Soccer Intelligence Rules ──────────────────────────────────
+            _over_min_edge_s = 0.0
+            ga_h = form_h["goals_against"] if form_h else None
+            ga_a = form_a["goals_against"] if form_a else None
+            gf_h = form_h["goals_for"]     if form_h else None
+            gf_a = form_a["goals_for"]     if form_a else None
+
+            # Rule 1: any team with strong defense → reduce total
+            solid_h = ga_h is not None and ga_h < 0.8
+            solid_a = ga_a is not None and ga_a < 0.8
+            if solid_h or solid_a:
+                exp_total -= 0.4
+                _over_min_edge_s = 0.6
+                def_team = home if solid_h else away
+                def_ga   = ga_h  if solid_h else ga_a
+                _soc_notes.append(
+                    f"⚠️ Defensa sólida ({def_team} — {def_ga:.1f} goles recibidos/partido) — "
+                    f"el Over necesita más edge para tener valor"
+                )
+
+            # Rule 2: both teams score well → raise total, OVER gets priority
+            if (gf_h is not None and gf_h > 1.8 and
+                    gf_a is not None and gf_a > 1.8):
+                exp_total += 0.3
+                _soc_notes.append(
+                    "✅ Ambos equipos atacan bien — condiciones favorables para Over"
+                )
+
+            exp_total    = max(0.1, exp_total)
+            _over_edge_s = exp_total - book_line  # positive = model favors OVER
+
+            # Rule 3: contradiction — solid defense but model still says OVER
+            if (solid_h or solid_a) and _over_edge_s > 0:
+                _contradiction_s = True
+                _soc_notes.append(
+                    "⚠️ Contradicción: defensa sólida pero el modelo dice Over.\n"
+                    "   Considera apostar UNDER."
+                )
+
+            # Rule 5: WC tactical urgency
+            if wc_standings:
+                try:
+                    urg_h = _wc_urgency_line(home, wc_standings)
+                    urg_a = _wc_urgency_line(away, wc_standings)
+                    needs_h = urg_h and ("necesita" in urg_h.lower() or "eliminado" in urg_h.lower())
+                    needs_a = urg_a and ("necesita" in urg_a.lower() or "eliminado" in urg_a.lower())
+                    qual_h  = urg_h and "clasificado" in urg_h.lower() and "necesita" not in urg_h.lower()
+                    qual_a  = urg_a and "clasificado" in urg_a.lower() and "necesita" not in urg_a.lower()
+                    if needs_h or needs_a:
+                        exp_total += 0.3
+                        needs_team = home if needs_h else away
+                        _soc_notes.append(
+                            f"⚽ Partido abierto esperado → Favorece Over y ML rival\n"
+                            f"   ({needs_team} NECESITA ganar)"
+                        )
+                    elif qual_h and qual_a:
+                        exp_total -= 0.2
+                        _soc_notes.append(
+                            "🛡️ Ambos clasificados → partido conservador → Favorece Under"
+                        )
+                    exp_total = max(0.1, exp_total)
+                    _over_edge_s = exp_total - book_line
+                except Exception:
+                    pass
+
+            # Rule 4: reasoning summary (always shown for totals picks)
+            _ga_h_s = f"{ga_h:.1f}" if ga_h is not None else "N/D"
+            _ga_a_s = f"{ga_a:.1f}" if ga_a is not None else "N/D"
+            _gf_a_s = f"{gf_a:.1f}" if gf_a is not None else "N/D"
+            _h_score = ("POCO"    if (ga_a is not None and ga_a < 0.8)  else
+                        "bien"    if (gf_h is not None and gf_h > 1.8)  else "moderado")
+            _a_score = ("POCO"    if (ga_h is not None and ga_h < 0.8)  else
+                        "bien"    if (gf_a is not None and gf_a > 1.8)  else "moderado")
+            _dir_s = (
+                f"bajo (proyectado {exp_total:.2f} vs línea {book_line}) → Favorece UNDER"
+                if exp_total < book_line else
+                f"alto (proyectado {exp_total:.2f} vs línea {book_line}) → Favorece OVER"
+            )
+            _soc_reason = (
+                f"📊 {home} (concede {_ga_h_s}/partido):\n"
+                f"   {away} anotará {_a_score}\n"
+                f"   {away} (anota {_gf_a_s}/partido):\n"
+                f"   {home} anotará {'con dificultad' if solid_a else _h_score}\n"
+                f"   → Total proyectado {_dir_s}"
+            )
+            # ──────────────────────────────────────────────────────────────
+
+            for side_label, is_over, p, odds in [
+                (f"📈 OVER {book_line} goles",  True,
+                 poisson_ou_prob(exp_total, book_line, True),  over_odds),
+                (f"📉 UNDER {book_line} goles", False,
+                 poisson_ou_prob(exp_total, book_line, False), under_odds),
             ]:
+                # Rule 1: skip OVER when projected edge is below defense threshold
+                if is_over and _over_min_edge_s > 0 and _over_edge_s < _over_min_edge_s:
+                    continue
                 ev = (p * odds - 1) * 100
                 r  = kelly_stake(p, odds)
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
@@ -2047,13 +2216,6 @@ def analyze_game_full(game, sport_key, prev_map=None):
                        if form_h else "")
         form_note_a = (f"{form_a['goals_for']:.1f} goles/partido ({form_a['matches']} partidos)"
                        if form_a else "")
-
-        # Module 5: WC group standings
-        wc_standings = {}
-        try:
-            wc_standings = fetch_wc_standings()
-        except Exception:
-            pass
 
         # Soccer S1: recent form detail (last 3 matches)
         sform_h = sform_a = None
@@ -2099,6 +2261,11 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "sform_a":   sform_a,          # Soccer S1
             "referee":   referee,          # Soccer S2
             "temp_label_s": t_label_s,     # Soccer S3
+            "soccer_intel": {              # intelligence rules output
+                "notes":         _soc_notes,
+                "reasoning":     _soc_reason,
+                "contradiction": _contradiction_s,
+            },
         }
 
     # Drop any pick whose true probability is below the minimum threshold
@@ -2234,6 +2401,12 @@ def notify_game_analysis(analyses, sport_key):
                     f"   Anota {as_['away_rs']} | Recibe {as_['away_ra']}\n"
                     f"   Gana el {as_['away_wpct']*100:.0f}% jugando fuera\n"
                 )
+            # Pitcher intelligence: notes + reasoning summary
+            p_intel = ctx.get("pitch_intel", {})
+            for note in p_intel.get("notes", []):
+                ctx_lines += f"{note}\n"
+            if p_intel.get("reasoning"):
+                ctx_lines += f"{p_intel['reasoning']}\n"
         else:
             # Soccer — ELO as tier
             ctx_lines = (
@@ -2297,6 +2470,12 @@ def notify_game_analysis(analyses, sport_key):
                             )
                         else:
                             ctx_lines += f"📋 {tname_es}: {urg}\n"
+            # Soccer intelligence: notes + reasoning summary
+            s_intel = ctx.get("soccer_intel", {})
+            for note in s_intel.get("notes", []):
+                ctx_lines += f"{note}\n"
+            if s_intel.get("reasoning"):
+                ctx_lines += f"{s_intel['reasoning']}\n"
 
         if ctx.get("line_moved") and ctx.get("line_note"):
             ctx_lines += f"📉 {ctx['line_note']}\n"
