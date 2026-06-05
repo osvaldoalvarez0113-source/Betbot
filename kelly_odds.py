@@ -2577,6 +2577,7 @@ def analyze_totals(games, sport_key):
         if not book_data:
             continue
         book_line, over_odds, under_odds, bookmaker = book_data
+        print(f"\n🔢 TOTALS: {home} vs {away}")
 
         # ── Project our total ──────────────────────────────────────────────────
         _data_unverified = False   # set True if any key stat fails validation
@@ -2781,7 +2782,10 @@ def analyze_totals(games, sport_key):
             }
 
         diff = our_line - book_line
+        print(f"   📐 Proyección: {our_line:.1f}  Libro: {book_line}  "
+              f"Diff: {diff:+.1f}  Umbral: ±{threshold}")
         if abs(diff) < threshold:
+            print(f"   ❌ Sin edge ({abs(diff):.1f} < {threshold} umbral)")
             continue
 
         bet_over = diff > 0
@@ -2816,11 +2820,18 @@ def analyze_totals(games, sport_key):
                          if isinstance(v, (str, int, float, bool, type(None)))})
         _tc_sport  = "MLB" if is_mlb else "SOCCER"
         _tc_claude = analyze_with_claude(_tc_data, _tc_sport)
+        if _tc_claude:
+            _tcc  = _tc_claude.get("confianza", "N/D")
+            _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
+            _tcr  = (_tc_claude.get("razonamiento", "") or "")[:80]
+            print(f"   🤖 Claude: {_tcc} | apostar:{_tcap} | \"{_tcr}\"")
         if (_tc_claude
                 and not _tc_claude.get("apostar", True)
                 and _tc_claude.get("confianza") == "BAJA"):
-            print(f"  🤖 Claude veta {bet_side} {book_line} {home} vs {away}")
+            print(f"   ❌ RECHAZADO — Claude veta {bet_side} {book_line}")
             continue
+        if _tc_claude and _tc_claude.get("apostar", True):
+            print(f"   ✅ TOTALS PICK: {bet_side} {book_line}  edge={edge_val:.1f}")
 
         total_bets.append({
             "match":        f"{home} vs {away}",
@@ -3234,15 +3245,21 @@ def analyze_game_full(game, sport_key, prev_map=None):
     home, away = game["home_team"], game["away_team"]
     game_id    = game.get("id", f"{home}|{away}")
     commence   = game.get("commence_time", "")
+    _tag       = f"{'MLB' if is_mlb else 'SOC'} | {home} vs {away}"
+
+    print(f"\n🔍 ANÁLISIS: {home} vs {away}  [{sport_key}]")
 
     if game_starts_soon(commence, 60):
+        print(f"   ⏰ OMITIDO — inicia en < 60 min")
         return None
     tc = _timing_check(commence, is_mlb)
     if tc["skip"]:
+        print(f"   ⏰ OMITIDO — fuera de ventana horaria")
         return None
 
-    candidates = []   # {label, true_prob, odds, book, ev_pct, kelly_pct, stake, safest}
-    context    = {}
+    candidates  = []   # {label, true_prob, odds, book, ev_pct, kelly_pct, stake, safest}
+    _all_evs: list = []   # [(label, ev_pct)] for every candidate tried, pass or fail
+    context     = {}
 
     h2h_odds    = _extract_h2h_best(game)
     spread_odds = _extract_spread_best(game)
@@ -3253,6 +3270,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
         h_stats = fetch_team_run_stats(home)
         a_stats = fetch_team_run_stats(away)
         if h_stats is None or a_stats is None:
+            print(f"   ❌ OMITIDO — sin stats de carreras ({home if h_stats is None else away})")
             return None
 
         LEAGUE_AVG = 4.5
@@ -3269,6 +3287,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
 
         # Fix 5: skip full analysis when both pitchers are TBD
         if h_pname == "TBD" and a_pname == "TBD":
+            print(f"   ❌ OMITIDO — ambos pitchers TBD")
             return None
         # Warn when at least one pitcher is unconfirmed
         tbd_note = ("⚠️ Pitcher no confirmado" if "TBD" in (h_pname, a_pname) else "")
@@ -3445,6 +3464,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
             odds, book = h2h_odds[team]
             ev = (true_p * odds - 1) * 100
             r  = kelly_stake(true_p, odds)
+            _all_evs.append((lbl, round(ev, 1)))
             if ev >= EV_MIN_PCT and r["stake"] > 0:
                 candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
@@ -3545,6 +3565,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
                     continue
                 ev = (p * odds - 1) * 100
                 r  = kelly_stake(p, odds)
+                _all_evs.append((side_label, round(ev, 1)))
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
                     candidates.append({"label": side_label, "true_prob": p, "odds": odds,
                                        "book": bk_name, "ev_pct": round(ev, 1),
@@ -3565,6 +3586,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
             lbl  = f"🏃 {team} RL {sign}"
             ev   = (p_cover * odds - 1) * 100
             r    = kelly_stake(p_cover, odds)
+            _all_evs.append((lbl, round(ev, 1)))
             if ev >= EV_MIN_PCT and r["stake"] > 0:
                 candidates.append({"label": lbl, "true_prob": p_cover, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
@@ -3768,6 +3790,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
             odds, book = h2h_odds[team_key]
             ev = (true_p * odds - 1) * 100
             r  = kelly_stake(true_p, odds)
+            _all_evs.append((lbl, round(ev, 1)))
             if ev >= EV_MIN_PCT and r["stake"] > 0:
                 candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
@@ -3886,6 +3909,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
                     continue
                 ev = (p * odds - 1) * 100
                 r  = kelly_stake(p, odds)
+                _all_evs.append((side_label, round(ev, 1)))
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
                     candidates.append({"label": side_label, "true_prob": p, "odds": odds,
                                        "book": bk_name, "ev_pct": round(ev, 1),
@@ -3901,6 +3925,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
             _pt, odds, book = spread_odds[team]
             ev = (true_p * odds - 1) * 100
             r  = kelly_stake(true_p, odds)
+            _all_evs.append((lbl, round(ev, 1)))
             if ev >= EV_MIN_PCT and r["stake"] > 0:
                 candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
@@ -3999,10 +4024,38 @@ def analyze_game_full(game, sport_key, prev_map=None):
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
 
+    # ── Debug summary: data quality + projections ────────────────────────────
+    _dqs_pre = context.get("data_quality_score", 100)
+    if is_mlb:
+        _ph = context.get("pname_home", "?")
+        _pa = context.get("pname_away", "?")
+        _eh = context.get("era_home", "?")
+        _ea = context.get("era_away", "?")
+        print(f"   📊 Calidad: {_dqs_pre}/100 | "
+              f"Pitcher: {_ph} (ERA {_eh}) vs {_pa} (ERA {_ea})")
+    else:
+        _eh = context.get("elo_home", "?")
+        _ea = context.get("elo_away", "?")
+        _ed = context.get("elo_diff", 0)
+        print(f"   📊 Calidad: {_dqs_pre}/100 | "
+              f"ELO: {_eh} vs {_ea} (diff {_ed:+.0f})")
+    if _all_evs:
+        _ev_strs = "  ".join(
+            f"{lbl.split()[-1] if ' ' in lbl else lbl}:{ev:+.1f}%"
+            for lbl, ev in _all_evs
+        )
+        print(f"   📈 EVs calculados: {_ev_strs}")
+
     # Drop any pick whose true probability is below the minimum threshold
     candidates = [c for c in candidates if c["true_prob"] >= PROB_MIN]
 
     if not candidates:
+        _best = max(_all_evs, key=lambda x: x[1]) if _all_evs else None
+        if _best:
+            print(f"   ❌ Sin picks — mejor EV: {_best[0].split()[0]} {_best[1]:+.1f}% "
+                  f"(mínimo {EV_MIN_PCT:.1f}%)")
+        else:
+            print(f"   ❌ Sin picks — sin odds válidas para analizar")
         return None
 
     # Rank by EV%, keep top 3, tag safest (prob ≥ 60%)
@@ -4036,12 +4089,24 @@ def analyze_game_full(game, sport_key, prev_map=None):
     _claude_sport_g  = "MLB" if is_mlb else "SOCCER"
     _claude_result_g = analyze_with_claude(_claude_data_g, _claude_sport_g)
 
+    if _claude_result_g:
+        _cc  = _claude_result_g.get("confianza", "N/D")
+        _cap = "✅" if _claude_result_g.get("apostar", True) else "❌"
+        _cr  = (_claude_result_g.get("razonamiento", "") or "")[:90]
+        _ci  = _claude_result_g.get("datos_inconsistentes") or []
+        print(f"   🤖 Claude: {_cc} | apostar:{_cap} | \"{_cr}\"")
+        if _ci:
+            print(f"      ⚠️ Inconsistencias: {', '.join(str(x) for x in _ci[:2])}")
+    else:
+        print(f"   🤖 Claude: no disponible (sin API key o error)")
+
     # Soft veto: Claude says BAJA confidence + don't bet → drop that candidate
     if (_claude_result_g
             and not _claude_result_g.get("apostar", True)
             and _claude_result_g.get("confianza") == "BAJA"):
         top3 = top3[1:]
         if not top3:
+            print(f"   ❌ RECHAZADO — Claude vetó todos los picks (confianza BAJA)")
             return None
 
     # Feature 7: cap confidence at MEDIA when data is partial (score 50–79)
@@ -4049,7 +4114,11 @@ def analyze_game_full(game, sport_key, prev_map=None):
         if _claude_result_g.get("confianza") == "ALTA":
             _claude_result_g["confianza"] = "MEDIA"
         _claude_result_g["datos_incompletos"] = True
-        print(f"  ⚠️  Confianza capada a MEDIA — datos parciales ({_dqs}/100)")
+        print(f"   ⚠️  Confianza capada a MEDIA — datos parciales ({_dqs}/100)")
+
+    _best_pick = top3[0]
+    print(f"   ✅ PICK: {_best_pick['label']}  EV+{_best_pick['ev_pct']:.1f}%  "
+          f"@ {_best_pick['odds']}  stake=${_best_pick['stake']:.0f}")
 
     return {
         "game_id":     game_id,
@@ -6837,12 +6906,14 @@ def analyze(games, prev_map, new_map, sport_key=""):
         top3_h = _top3_from_book_list(book_list_h)   # Module 9
         top3_a = _top3_from_book_list(book_list_a)
 
+        print(f"\n💰 ML: {home} vs {away}  [{sport_key}]")
         for team, prob, best_odd, side, bookmaker, bov_odds, top3 in [
             (home, fp_h, best_h, "HOME", best_bk_h, bov_odds_h, top3_h),
             (away, fp_a, best_a, "AWAY", best_bk_a, bov_odds_a, top3_a),
         ]:
             r = kelly_stake(prob, best_odd)
             if not r["has_value"] or r["edge"] < MIN_EDGE:
+                print(f"   📉 {team}: sin valor  edge={r['edge']:+.1f}%  odds={best_odd}")
                 continue
 
             moved, direction, delta = detect_line_movement(game_id, team, best_odd, prev_map)
