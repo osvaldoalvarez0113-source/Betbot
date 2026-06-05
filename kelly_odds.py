@@ -1344,32 +1344,36 @@ def notify_totals(total_bets):
             priority = "high" if is_high else "default"
         else:
             # ── Soccer / other sports ─────────────────────────────────────
-            conf_es = _conf_es(b["confidence"])
-            sport_block = (
-                f"{_DIV}\n"
-                f"📋 Forma local:   {b.get('form_home', 'ELO only')}\n"
-                f"📋 Forma visita:  {b.get('form_away', 'ELO only')}\n"
-            )
-            true_prob_approx = b["stake"] / (BANKROLL * 0.05) if b["stake"] > 0 else 0.5
-            verdict = _verdict_line(float(b["edge"]) * 10, true_prob_approx)
+            is_high    = b["confidence"] == "HIGH"
+            half_stake = round(b["stake"] / 2, 2)
+            action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
+                      else f"🟡 APOSTAR MITAD: ${half_stake}")
+            form_h = b.get("form_home", "")
+            form_a = b.get("form_away", "")
+            form_block = ""
+            if form_h or form_a:
+                form_block = (
+                    f"\n📋 Forma local:   {form_h or 'N/A'}\n"
+                    f"📋 Forma visita:  {form_a or 'N/A'}"
+                )
             body = (
                 f"{emoji} {b['match']}\n"
-                f"📊 {side} {line} {unit}\n"
+                f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
-                f"🎯 Nuestra línea: {b['our_line']}\n"
-                f"📚 Línea libro:   {line}\n"
-                f"📈 Edge:          {b['edge']} {unit}\n"
-                f"🌡️ Confianza:     {conf_es}\n"
-                f"{sport_block}"
+                f"🎯 APUESTA: {side} {line} {unit} (Total)\n\n"
+                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}\n"
                 f"{_DIV}\n"
-                f"💰 Apuesta: ${b['stake']} @ {b['odds']}\n"
-                f"📖 Libro: {b['bookmaker']}\n"
-                f"⏰ {gt}\n"
-                f"{verdict}\n"
+                f"📊 POR QUÉ:\n"
+                f"Modelo proyecta: {b['our_line']} {unit}\n"
+                f"El libro pone:   {line} {unit}\n"
+                f"Diferencia:      {b['edge']} {unit} de edge"
+                f"{form_block}\n"
+                f"{_DIV}\n"
+                f"{action}\n"
                 f"{_DIV2}"
             )
-            title    = f"🎯 PICK | {side} {line} | {b['match']}"
-            priority = "high" if b["confidence"] == "HIGH" else "default"
+            title    = f"{emoji} TOTAL | {side} {line} | {b['match']}"
+            priority = "high" if is_high else "default"
 
         ntfy_post(title, body, priority)
         alerted_bets.add(key)
@@ -2277,31 +2281,26 @@ def notify_bets(new_bets):
             title    = f"⚾ ML | {b['team']} | {b['match']}"
         else:
             # ── Soccer / other sports ─────────────────────────────────────
-            ev_d    = _ev_dollars(b["stake"], b["edge"])
-            verdict = _verdict_line(b["edge"], elo_p / 100 if elo_p else None)
+            impl_pct   = round(100 / b["odds"], 1) if b["odds"] else 0
+            is_high    = b["edge"] >= 5.0 and elo_p >= 60
+            half_stake = round(b["stake"] / 2, 2)
+            action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
+                      else f"🟡 APOSTAR MITAD: ${half_stake}")
             body = (
                 f"{emoji} {b['match']}\n"
-                f"{mv_line}"
+                f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
-                f"🎯 Pick: {b['team']} ({b['side']})\n"
-                f"📈 Edge: {b['edge']}%  |  Valor: {b['value_pct']}%\n"
-                f"🌡️ Confianza: {conf_es}\n"
+                f"🎯 APUESTA: {b['team']} GANA (ML)\n\n"
+                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}\n"
                 f"{_DIV}\n"
-                f"💰 Apuesta: ${b['stake']} @ {b['odds']}  ({b['kelly_pct']}% Kelly)\n"
-                f"📖 Mejor libro: {b['bookmaker']}\n"
-                f"{bov_line}"
+                f"📊 POR QUÉ:\n"
+                f"Nuestro modelo: {elo_p}% | Libro: {impl_pct}% → Edge {b['edge']}%\n"
                 f"{_DIV}\n"
-                f"📊 Prob. ELO: {elo_p}%\n"
-                f"💵 EV +{b['edge']}% → ${ev_d} ganancia esperada por cada ${b['stake']}\n"
-                f"💹 ROI proy.: {b['roi']}%\n"
-                f"⏰ {gt}\n"
-                f"{verdict}\n"
+                f"{action}\n"
                 f"{_DIV2}"
             )
-            has_high = b["edge"] >= 5.0
-            priority = "urgent" if has_high else ("high" if b["edge"] >= 3 else "default")
-            conf_tag = " — ALTA" if has_high else ""
-            title    = f"🎯 PICK | {b['team']}{conf_tag} | {b['match']}"
+            priority = "urgent" if b["edge"] >= 5.0 else ("high" if b["edge"] >= 3 else "default")
+            title    = f"{emoji} ML | {b['team']} | {b['match']}"
 
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
