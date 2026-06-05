@@ -34,7 +34,7 @@ _Describe the high-level user-facing capabilities of this app once they exist._
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- **Auto-commit after every task:** After completing any change, always automatically: (1) run syntax check (`python3 -c "import ast; ast.parse(open('kelly_odds.py').read())"`), (2) commit with a descriptive message, (3) push to GitHub via the urllib REST API. Do this without being asked.
 
 ## Gotchas
 
