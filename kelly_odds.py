@@ -3176,37 +3176,36 @@ def _data_completeness_score(context: dict, sport: str,
     score = 0
     today_s = datetime.now(CDT).strftime("%Y-%m-%d")
     if "mlb" in sport.lower():
+        # REQUIRED — pitcher name + ERA (high weight, mandatory for useful analysis)
         ph = str(context.get("pitcher_home", "") or "")
         pa = str(context.get("pitcher_away", "") or "")
         if (ph and "TBD" not in ph and pa and "TBD" not in pa
                 and _val_stat("era", context.get("era_home"))
                 and _val_stat("era", context.get("era_away"))):
-            score += 20
+            score += 45          # was 20 — now high weight since it's the key signal
+        # NICE TO HAVE — FIP (better ERA proxy)
         if (_val_stat("fip", context.get("fip_home")) is not None
                 and _val_stat("fip", context.get("fip_away")) is not None):
-            score += 10
+            score += 15          # was 10
+        # NICE TO HAVE — bullpen dual-source verification
         dq_h = _data_quality.get(f"{home}_{today_s}", {})
         dq_a = _data_quality.get(f"{away}_{today_s}", {})
         if dq_h.get("verified") and dq_a.get("verified"):
-            score += 15
+            score += 20          # was 15
         elif dq_h.get("verified") or dq_a.get("verified"):
-            score += 7
+            score += 10          # was 7
+        # NICE TO HAVE — batter splits
         h_sp = context.get("h_splits") or {}
         a_sp = context.get("a_splits") or {}
         if h_sp and a_sp:
             score += 15
-        if context.get("umpire"):
-            score += 10
+        # NICE TO HAVE — wind / weather
         wind = str(context.get("wind_info", "") or "")
         if "mph" in wind.lower():
-            score += 10
+            score += 5           # was 10
         elif context.get("temp_label"):
-            score += 5
-        lu = context.get("lineup_data") or {}
-        if lu and (lu.get("home", {}).get("confirmed") or lu.get("away", {}).get("confirmed")):
-            score += 10
-        if context.get("h2h_data"):
-            score += 10
+            score += 3           # was 5
+        # NOTE: umpire, lineup_data, h2h_data are OPTIONAL and no longer affect score
     else:
         form_h = str(context.get("form_home", "") or "")
         form_a = str(context.get("form_away", "") or "")
@@ -3426,8 +3425,11 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 away_exp = max(0.1, away_exp - 0.5)
         # ──────────────────────────────────────────────────────────────────
 
-        p_home = pythagorean_win_prob(home_exp, away_exp)
-        p_away = 1.0 - p_home
+        _pyth_p = pythagorean_win_prob(home_exp, away_exp)
+        _elo_p  = elo_win_prob(home, away)
+        # Blend 60% Pythagorean + 40% ELO so league-average fallback never gives 50/50
+        p_home  = round(0.60 * _pyth_p + 0.40 * _elo_p, 4)
+        p_away  = 1.0 - p_home
 
         # ── Module B2: Team streak ML adjustment (±5% per hot/cold team) ─
         _h_streak = _a_streak = None
@@ -4071,10 +4073,10 @@ def analyze_game_full(game, sport_key, prev_map=None):
 
     # ── Feature 7: data completeness guard ───────────────────────────────
     _dqs = context.get("data_quality_score", 100)
-    if _dqs < 30:
+    if _dqs < 40:
         print(f"  ⏭️  Juego omitido — datos muy escasos ({_dqs}/100): {home} vs {away}")
         _log_error("data_completeness", "skip", f"{home} vs {away}",
-                   f"score {_dqs}/100 < 30")
+                   f"score {_dqs}/100 < 40")
         return None
 
     # ── Claude AI: expert validation of top pick ──────────────────────────
