@@ -1,0 +1,157 @@
+Add soccer equivalents for all 
+recent MLB modules:
+
+━━━━━━━━━━━━━━━━━━━━
+1. TENDENCIAS POR ESTADIO/CIUDAD
+━━━━━━━━━━━━━━━━━━━━
+World Cup 2026 venues Over/Under
+historical tendencies:
+
+HIGH SCORING venues:
+- AT&T Stadium Dallas → +0.4 goles
+  "🏟️ Dallas: estadio de goles"
+- Hard Rock Stadium Miami → +0.3 goles
+- NRG Stadium Houston → +0.3 goles
+
+LOW SCORING venues:
+- Levi's Stadium San Francisco → -0.3 goles
+  "🏟️ San Francisco: estadio defensivo"
+- BC Place Vancouver → -0.2 goles
+- BMO Field Toronto → -0.2 goles
+
+TEMPERATURE effect already active.
+Combine both for final adjustment.
+
+━━━━━━━━━━━━━━━━━━━━
+2. DÍAS DE DESCANSO FÚTBOL
+━━━━━━━━━━━━━━━━━━━━
+In World Cup group stage teams 
+play every 4-6 days.
+
+Calculate days since last match:
+
+- 3 days rest (very short):
+  "⚠️ Solo 3 días de descanso
+   → Equipo cansado → puede bajar
+   rendimiento y aumentar errores
+   → +0.2 goles al total"
+  Adjust: +0.2 goals
+
+- 4-5 days (normal WC rest):
+  "✅ Descanso normal (4-5 días)"
+  No adjustment
+
+- 6+ days (extra rest):
+  "💪 6+ días de descanso
+   → Equipo fresco y recuperado
+   → Sin ajuste necesario"
+  No adjustment
+
+━━━━━━━━━━━━━━━━━━━━
+3. RACHAS EN EL MUNDIAL
+━━━━━━━━━━━━━━━━━━━━
+Track team results in WC 2026:
+
+Show current streak:
+"🔥 España — EN RACHA:
+   Últimos 3 WC: 3-0-0
+   Racha actual: 3 victorias seguidas
+   Goles a favor: 7 | En contra: 1"
+
+OR:
+"❄️ Arabia Saudita — EN CAÍDA:
+   Últimos 3 WC: 0-1-2
+   Sin victorias en el torneo"
+
+Adjust win probability:
+- 3 straight WC wins: +5% win prob
+- No wins in tournament: -5% win prob
+
+Adjust total projection:
+- Team scoring 2+ goals per game: +0.3
+- Team conceding 2+ per game: +0.3
+- Team not scoring (0 goals last 2): -0.3
+
+━━━━━━━━━━━━━━━━━━━━
+4. ANALÍTICA FÚTBOL
+━━━━━━━━━━━━━━━━━━━━
+Include soccer in performance 
+analytics report:
+
+"⚽ Fútbol/Mundial:
+   Picks: X | Ganados: X
+   ROI: X%
+   Mejor mercado: ML/Total/Hándicap
+   
+   💡 Recomendación basada en datos"
+
+Track separately:
+- ML soccer ROI
+- Totals soccer ROI  
+- Handicap soccer ROI
+- ARB soccer ROI
+
+━━━━━━━━━━━━━━━━━━━━
+5. LINEUP FÚTBOL (XI TITULAR)
+━━━━━━━━━━━━━━━━━━━━
+For World Cup games, fetch 
+confirmed starting 11 when available
+(usually 1 hour before kickoff):
+
+Key players to monitor per team:
+- Argentina: Messi, Di María
+- France: Mbappé, Griezmann
+- Brasil: Vinicius, Rodrygo
+- España: Pedri, Yamal
+- England: Bellingham, Salah
+- Germany: Musiala, Kane
+(add all WC 2026 teams)
+
+If key player absent:
+"⚠️ Messi FUERA del XI titular
+   → Argentina pierde su mejor
+   jugador → reduce probabilidad
+   de ganar 10% → ajusta ML"
+
+Adjust win probability:
+- Star player absent: -8% win prob
+- Multiple key players absent: -15%
+
+Show in alert:
+"📋 XI Argentina confirmado:
+   Messi ✅ | Di María ✅
+   Jugadores clave presentes"
+
+━━━━━━━━━━━━━━━━━━━━
+6. PRESIÓN PSICOLÓGICA
+━━━━━━━━━━━━━━━━━━━━
+World Cup specific factor:
+
+Teams facing elimination:
+"🧠 FACTOR PSICOLÓGICO:
+   Marruecos ELIMINADO si no gana
+   → Presión extrema
+   → Históricamente equipos bajo
+   presión de eliminación:
+   - Atacan más → más goles OVER
+   - Cometen más errores → 
+     favorece rival ML
+   - Pero también más motivación"
+
+Teams already qualified playing 
+last group game:
+"🧠 España ya clasificada:
+   → Puede rotar jugadores
+   → Menos motivación
+   → Favorece UNDER y rival ML"
+
+Both teams need a draw to advance:
+"🧠 Ambos equipos necesitan empate
+   → Pacto tácito posible
+   → FUERTE señal para empate ML
+   → Favorece UNDER"
+
+Adjust based on situation:
+- Elimination pressure → +0.3 goals
+- Already qualified last game → -0.3 goals
+- Both need draw → +15% draw probability
