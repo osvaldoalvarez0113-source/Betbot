@@ -12,8 +12,16 @@ try:
 except ImportError:
     HAS_STATSAPI = False
 
+try:
+    import anthropic as _anthropic_lib
+    HAS_ANTHROPIC = True
+except ImportError:
+    HAS_ANTHROPIC = False
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-API_KEY  = os.environ.get("ODDS_API_KEY", "")
+API_KEY           = os.environ.get("ODDS_API_KEY",       "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY",  "")
+CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-opus-4-5")
 BANKROLL = 1000
 FRACTION = 0.25
 MIN_EDGE  = 2.0
@@ -2344,6 +2352,28 @@ def analyze_totals(games, sport_key):
             continue
 
         conf = "HIGH" if edge_val >= threshold * 2 else "MEDIUM"
+
+        # ── Claude AI: validate totals pick ───────────────────────────────
+        _tc_data = {
+            "match":      f"{home} vs {away}",
+            "sport":      sport_key,
+            "bet_side":   bet_side,
+            "book_line":  book_line,
+            "our_line":   our_line,
+            "edge":       edge_val,
+            "odds":       bet_odds,
+            "confidence": conf,
+        }
+        _tc_data.update({k: v for k, v in extra.items()
+                         if isinstance(v, (str, int, float, bool, type(None)))})
+        _tc_sport  = "MLB" if is_mlb else "SOCCER"
+        _tc_claude = analyze_with_claude(_tc_data, _tc_sport)
+        if (_tc_claude
+                and not _tc_claude.get("apostar", True)
+                and _tc_claude.get("confianza") == "BAJA"):
+            print(f"  🤖 Claude veta {bet_side} {book_line} {home} vs {away}")
+            continue
+
         total_bets.append({
             "match":        f"{home} vs {away}",
             "team":         bet_side,
@@ -2370,6 +2400,7 @@ def analyze_totals(games, sport_key):
             "our_line":     our_line,
             "edge_unit":    edge_unit,
             "sport":        sport_key.split("_", 1)[-1].upper(),
+            "claude_intel": _tc_claude,
             **extra,
         })
 
@@ -2431,6 +2462,7 @@ def notify_totals(total_bets):
             if adj_block:
                 adj_block += f"{_DIV2}\n"
 
+            _claude_tot_blk = _claude_block(b.get("claude_intel"))
             body = (
                 f"{emoji} {b['match']}\n"
                 f"⏰ Hoy {gt}\n"
@@ -2447,6 +2479,7 @@ def notify_totals(total_bets):
                 f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} (ERA {ph_era:.2f})\n"
                 f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} (ERA {pa_era:.2f})\n"
                 f"{wind_line}"
+                f"{_claude_tot_blk}"
                 f"{_DIV}\n"
                 f"{action}\n"
                 f"{_DIV2}"
@@ -3360,16 +3393,42 @@ def analyze_game_full(game, sport_key, prev_map=None):
     for c in top3:
         c["safest"] = c["true_prob"] >= 0.60
 
+    # ── Claude AI: expert validation of top pick ──────────────────────────
+    _claude_data_g = {
+        "match":     f"{home} vs {away}",
+        "sport":     sport_key,
+        "top_pick":  top3[0]["label"],
+        "ev_pct":    top3[0]["ev_pct"],
+        "true_prob": round(top3[0]["true_prob"] * 100, 1),
+        "odds":      top3[0]["odds"],
+        "stake":     top3[0]["stake"],
+    }
+    _claude_data_g.update({
+        k: v for k, v in context.items()
+        if isinstance(v, (str, int, float, bool, type(None)))
+    })
+    _claude_sport_g  = "MLB" if is_mlb else "SOCCER"
+    _claude_result_g = analyze_with_claude(_claude_data_g, _claude_sport_g)
+
+    # Soft veto: Claude says BAJA confidence + don't bet → drop that candidate
+    if (_claude_result_g
+            and not _claude_result_g.get("apostar", True)
+            and _claude_result_g.get("confianza") == "BAJA"):
+        top3 = top3[1:]
+        if not top3:
+            return None
+
     return {
-        "game_id":    game_id,
-        "match":      f"{home} vs {away}",
-        "time":       commence,
-        "sport":      sport_key,
-        "is_mlb":     is_mlb,
-        "candidates": top3,
-        "context":    context,
-        "best_label": top3[0]["label"],
-        "best_ev":    top3[0]["ev_pct"],
+        "game_id":     game_id,
+        "match":       f"{home} vs {away}",
+        "time":        commence,
+        "sport":       sport_key,
+        "is_mlb":      is_mlb,
+        "candidates":  top3,
+        "context":     context,
+        "best_label":  top3[0]["label"],
+        "best_ev":     top3[0]["ev_pct"],
+        "claude_intel": _claude_result_g,
     }
 
 
@@ -3763,6 +3822,7 @@ def notify_game_analysis(analyses, sport_key):
         else:
             verdict = _verdict_line(best["ev_pct"], best["true_prob"])
 
+        _claude_blk = _claude_block(a.get("claude_intel"))
         body = (
             f"{emoji} {match_es}\n"
             f"{action_line}\n"
@@ -3776,6 +3836,7 @@ def notify_game_analysis(analyses, sport_key):
             f"{_DIV}\n"
             f"{picks_lines}"
             f"{high_ev_flag}"
+            f"{_claude_blk}"
             f"{verdict}\n"
             f"{_DIV2}"
         )
@@ -4927,6 +4988,129 @@ def fetch_venue_temp(venue_city: str) -> float | None:
         return None
     wind_data = fetch_wind(coords[0], coords[1])
     return wind_data.get("temp_f") if wind_data else None
+
+# ── CLAUDE AI ANALYSIS ENGINE ────────────────────────────────────────────────
+_claude_cache: dict = {}
+
+def analyze_with_claude(game_data: dict, sport: str) -> "dict | None":
+    """
+    Send collected game data to Claude and get expert betting analysis.
+    sport: "MLB" or "SOCCER"
+    Returns {pick, line, confianza, razonamiento, factores_positivos,
+             factores_negativos, apostar} or None if API unavailable / error.
+    Results cached per content hash to avoid duplicate calls.
+    If ANTHROPIC_API_KEY is not set, returns None silently.
+    """
+    if not ANTHROPIC_API_KEY or not HAS_ANTHROPIC:
+        return None
+
+    import hashlib
+    _ck = hashlib.md5(
+        f"{sport}{json.dumps(game_data, default=str, sort_keys=True)}".encode()
+    ).hexdigest()[:16]
+    if _ck in _claude_cache:
+        return _claude_cache[_ck]
+
+    if sport == "MLB":
+        prompt = f"""Eres un analista experto en apuestas deportivas de MLB con 20 años de experiencia. Analiza este partido y dame tu recomendación profesional.
+
+DATOS DEL PARTIDO:
+{json.dumps(game_data, indent=2, default=str, ensure_ascii=False)}
+
+Analiza todos los factores y responde en este formato JSON exacto:
+{{
+  "pick": "OVER/UNDER/HOME_ML/AWAY_ML",
+  "line": "número de la línea",
+  "confianza": "ALTA/MEDIA/BAJA",
+  "razonamiento": "explicación en español de 3-4 oraciones como experto",
+  "factores_positivos": ["factor1", "factor2"],
+  "factores_negativos": ["factor1"],
+  "apostar": true
+}}
+
+Solo responde con el JSON, nada más."""
+    else:
+        prompt = f"""Eres un analista experto en apuestas de fútbol internacional con 20 años de experiencia en el Mundial FIFA. Analiza este partido.
+
+DATOS DEL PARTIDO:
+{json.dumps(game_data, indent=2, default=str, ensure_ascii=False)}
+
+Responde en este formato JSON exacto:
+{{
+  "pick": "HOME_ML/AWAY_ML/DRAW/OVER/UNDER/HOME_HANDICAP/AWAY_HANDICAP",
+  "line": "número o descripción",
+  "confianza": "ALTA/MEDIA/BAJA",
+  "razonamiento": "explicación en español de 3-4 oraciones como experto",
+  "factores_positivos": ["factor1", "factor2"],
+  "factores_negativos": ["factor1"],
+  "apostar": true
+}}
+
+Solo responde con el JSON, nada más."""
+
+    try:
+        client  = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg     = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        # Strip markdown code fences if Claude wraps in ```json
+        if raw.startswith("```"):
+            parts = raw.split("```")
+            raw   = parts[1] if len(parts) >= 2 else raw
+            if raw.startswith("json"):
+                raw = raw[4:]
+        raw    = raw.strip()
+        result = json.loads(raw)
+        _claude_cache[_ck] = result
+        conf_icon = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(
+            result.get("confianza", ""), "⚪"
+        )
+        print(
+            f"  🤖 Claude [{sport}]: {result.get('pick')} "
+            f"{conf_icon}{result.get('confianza')} "
+            f"apostar={result.get('apostar')}"
+        )
+        return result
+    except Exception as e:
+        print(f"  ⚠️  Claude API error: {e}")
+        _claude_cache[_ck] = None
+        return None
+
+
+def _claude_block(claude: "dict | None") -> str:
+    """
+    Format Claude's analysis as an ntfy message block.
+    Returns empty string if claude is None.
+    """
+    if not claude:
+        return ""
+    conf   = claude.get("confianza", "N/D")
+    pick   = claude.get("pick", "N/D")
+    apostar = claude.get("apostar", True)
+    reason = claude.get("razonamiento", "")
+    pos    = claude.get("factores_positivos", [])
+    neg    = claude.get("factores_negativos", [])
+
+    conf_icon = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
+    veto_line = "" if apostar else "   ⛔ Claude sugiere NO apostar\n"
+
+    pos_lines = "".join(f"   ✅ {p}\n" for p in pos[:3])
+    neg_lines = "".join(f"   ⚠️ {p}\n" for p in neg[:2])
+
+    return (
+        f"{_DIV}\n"
+        f"🤖 ANÁLISIS CLAUDE AI\n"
+        f"{_DIV}\n"
+        f"Pick: {pick}  |  Confianza: {conf_icon} {conf}\n"
+        f"{veto_line}"
+        f"{reason}\n"
+        + (f"{pos_lines}" if pos_lines else "")
+        + (f"{neg_lines}" if neg_lines else "")
+    )
+
 
 # ── Module S1: WC VENUE TENDENCIES ───────────────────────────────────────────
 WC_VENUE_TEND: dict = {
