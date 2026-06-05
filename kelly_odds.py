@@ -3271,11 +3271,15 @@ def analyze_game_full(game, sport_key, prev_map=None):
     if is_mlb:
         h_stats = fetch_team_run_stats(home)
         a_stats = fetch_team_run_stats(away)
-        if h_stats is None or a_stats is None:
-            print(f"   ❌ OMITIDO — sin stats de carreras ({home if h_stats is None else away})")
-            return None
-
+        # Run stats are OPTIONAL — fall back to league average so the game still runs
         LEAGUE_AVG = 4.5
+        if h_stats is None:
+            print(f"   ⚠️ Sin stats de carreras ({home}) — usando promedio liga ({LEAGUE_AVG})")
+            h_stats = {"rs_pg": LEAGUE_AVG, "ra_pg": LEAGUE_AVG}
+        if a_stats is None:
+            print(f"   ⚠️ Sin stats de carreras ({away}) — usando promedio liga ({LEAGUE_AVG})")
+            a_stats = {"rs_pg": LEAGUE_AVG, "ra_pg": LEAGUE_AVG}
+
         park       = MLB_PARK_FACTORS.get(home, 1.0)
         home_exp   = h_stats["rs_pg"] * (a_stats["ra_pg"] / LEAGUE_AVG) * park
         away_exp   = a_stats["rs_pg"] * (h_stats["ra_pg"] / LEAGUE_AVG) * park
@@ -3287,10 +3291,9 @@ def analyze_game_full(game, sport_key, prev_map=None):
         h_pname   = p_data.get("home_name", "TBD")
         a_pname   = p_data.get("away_name", "TBD")
 
-        # Fix 5: skip full analysis when both pitchers are TBD
+        # Warn when pitchers are TBD but NEVER skip — odds are still valid
         if h_pname == "TBD" and a_pname == "TBD":
-            print(f"   ❌ OMITIDO — ambos pitchers TBD")
-            return None
+            print(f"   ⚠️ Ambos pitchers TBD — continuando con ERA promedio de liga")
         # Warn when at least one pitcher is unconfirmed
         tbd_note = ("⚠️ Pitcher no confirmado" if "TBD" in (h_pname, a_pname) else "")
         pitch_adj = pitcher_run_adjustment(h_era, a_era)
@@ -4068,10 +4071,10 @@ def analyze_game_full(game, sport_key, prev_map=None):
 
     # ── Feature 7: data completeness guard ───────────────────────────────
     _dqs = context.get("data_quality_score", 100)
-    if _dqs < 50:
-        print(f"  ⏭️  Juego omitido — datos insuficientes ({_dqs}/100): {home} vs {away}")
+    if _dqs < 30:
+        print(f"  ⏭️  Juego omitido — datos muy escasos ({_dqs}/100): {home} vs {away}")
         _log_error("data_completeness", "skip", f"{home} vs {away}",
-                   f"score {_dqs}/100 < 50")
+                   f"score {_dqs}/100 < 30")
         return None
 
     # ── Claude AI: expert validation of top pick ──────────────────────────
@@ -8520,8 +8523,15 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("\n🛑 Bot detenido manualmente.")
             break
-        except Exception as _loop_err:
-            print(f"  ⚠️  Error crítico en ciclo principal: {_loop_err}")
+        except SystemExit:
+            # Railway SIGTERM → let the container stop cleanly for redeploys
+            raise
+        except BaseException as _loop_err:
+            # Catch everything else (MemoryError, OSError, etc.) — never stop
+            print(f"  ⚠️  Error crítico ({type(_loop_err).__name__}): {_loop_err}")
             print("  🔄 Reintentando en 60 segundos...")
-            time.sleep(60)
+            try:
+                time.sleep(60)
+            except Exception:
+                pass
             scan += 1
