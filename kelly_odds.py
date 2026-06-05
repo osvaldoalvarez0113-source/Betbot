@@ -600,33 +600,58 @@ def fetch_pitcher_stats(name):
         return empty
 
 def fetch_team_batting(team_id):
-    """Return dict with AVG and OPS for a team."""
-    empty = {"avg": "N/A", "ops": "N/A", "rs_pg": 4.5, "ra_pg": 4.5}
+    """Return dict with AVG, OPS, rs_pg, ra_pg for a team. Returns None values
+    for stats that cannot be fetched — never returns 4.5 placeholder."""
     try:
-        data = _mlb_rest(f"/teams/{team_id}/stats",
-                         {"stats": "season", "group": "hitting", "season": MLB_YEAR})
-        splits = data.get("stats", [{}])
-        if not splits: return empty
-        stat = splits[0].get("splits", [{}])[-1].get("stat", {}) if splits else {}
+        hit_data = _mlb_rest(f"/teams/{team_id}/stats",
+                             {"stats": "season", "group": "hitting", "season": MLB_YEAR})
+        hit_splits = hit_data.get("stats", [{}]) if hit_data else []
+        hit_stat   = (hit_splits[0].get("splits", [{}]) or [{}])[-1].get("stat", {}) if hit_splits else {}
+
+        pit_data = _mlb_rest(f"/teams/{team_id}/stats",
+                             {"stats": "season", "group": "pitching", "season": MLB_YEAR})
+        pit_splits = pit_data.get("stats", [{}]) if pit_data else []
+        pit_stat   = (pit_splits[0].get("splits", [{}]) or [{}])[-1].get("stat", {}) if pit_splits else {}
+
+        # Compute rs_pg: prefer runsPerGame, else runs/gamesPlayed
+        rs_pg = None
+        if "runsPerGame" in hit_stat and float(hit_stat["runsPerGame"] or 0) > 0:
+            rs_pg = round(float(hit_stat["runsPerGame"]), 2)
+        elif hit_stat.get("runs") and hit_stat.get("gamesPlayed"):
+            gp = max(float(hit_stat["gamesPlayed"]), 1)
+            rs_pg = round(float(hit_stat["runs"]) / gp, 2)
+
+        # Compute ra_pg from pitching runsAllowed/gamesPlayed
+        ra_pg = None
+        if pit_stat.get("runsAllowed") and pit_stat.get("gamesPlayed"):
+            gp = max(float(pit_stat["gamesPlayed"]), 1)
+            ra_pg = round(float(pit_stat["runsAllowed"]) / gp, 2)
+
         return {
-            "avg": stat.get("avg",  "N/A"),
-            "ops": stat.get("ops",  "N/A"),
-            "rs_pg": float(stat.get("runsPerGame", 4.5)),
-            "ra_pg": 4.5,  # need pitching stats for this
+            "avg":   hit_stat.get("avg",  "N/A"),
+            "ops":   hit_stat.get("ops",  "N/A"),
+            "rs_pg": rs_pg if rs_pg is not None else 4.5,
+            "ra_pg": ra_pg if ra_pg is not None else 4.5,
+            "_rs_real": rs_pg is not None,
+            "_ra_real": ra_pg is not None,
         }
     except Exception:
-        return empty
+        return {"avg": "N/A", "ops": "N/A", "rs_pg": 4.5, "ra_pg": 4.5,
+                "_rs_real": False, "_ra_real": False}
 
 def fetch_team_pitching_ra(team_id):
-    """Return runs allowed per game from team pitching stats."""
+    """Return runs allowed per game from team pitching stats. Returns None on failure."""
     try:
         data = _mlb_rest(f"/teams/{team_id}/stats",
                          {"stats": "season", "group": "pitching", "season": MLB_YEAR})
-        splits = data.get("stats", [{}])
-        stat   = splits[0].get("splits", [{}])[-1].get("stat", {}) if splits else {}
-        return float(stat.get("runsAllowed", 0)) / max(float(stat.get("gamesPlayed", 1)), 1)
+        splits = data.get("stats", [{}]) if data else []
+        stat   = (splits[0].get("splits", [{}]) or [{}])[-1].get("stat", {}) if splits else {}
+        if stat.get("runsAllowed") and stat.get("gamesPlayed"):
+            gp = max(float(stat["gamesPlayed"]), 1)
+            return round(float(stat["runsAllowed"]) / gp, 2)
+        return None
     except Exception:
-        return 4.5
+        return None
 
 def morning_report_mlb():
     print("\n📋 MLB Morning Report...")
@@ -1417,11 +1442,24 @@ def fetch_team_run_stats(team_name):
         h_stat = (hit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
         p_stat = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
 
-        rs_pg = float(h_stat.get("runsPerGame", 4.5))
-        games_p = max(float(p_stat.get("gamesPlayed", 162)), 1)
-        ra_pg   = float(p_stat.get("runsAllowed", 4.5 * games_p)) / games_p
+        # Prefer runsPerGame; fall back to runs/gamesPlayed
+        gp_h = max(float(h_stat.get("gamesPlayed", 0) or 0), 1)
+        if "runsPerGame" in h_stat and float(h_stat["runsPerGame"] or 0) > 0:
+            rs_pg = round(float(h_stat["runsPerGame"]), 2)
+        elif float(h_stat.get("runs", 0) or 0) > 0:
+            rs_pg = round(float(h_stat["runs"]) / gp_h, 2)
+        else:
+            _team_run_cache[team_name] = None
+            return None
 
-        result = {"rs_pg": round(rs_pg, 2), "ra_pg": round(ra_pg, 2)}
+        games_p = max(float(p_stat.get("gamesPlayed", 0) or 0), 1)
+        ra_raw  = float(p_stat.get("runsAllowed", 0) or 0)
+        if ra_raw == 0:
+            _team_run_cache[team_name] = None
+            return None
+        ra_pg = round(ra_raw / games_p, 2)
+
+        result = {"rs_pg": rs_pg, "ra_pg": ra_pg}
         _team_run_cache[team_name] = result
         return result
     except Exception:
@@ -1907,16 +1945,23 @@ def wind_run_adj(wind):
     """
     Return (signed_adjustment: float, description: str).
     Only acts when speed > 15 mph and direction is OUT or IN.
+    Always returns a human-readable label when wind data is available.
     """
-    if wind is None or wind['speed'] <= 15:
+    if wind is None:
         return 0.0, ''
-    lbl = wind['label']
-    spd = wind['speed']
-    if lbl == 'OUT':
-        return +0.8, f"Wind: {spd}mph OUT → +0.8 runs"
-    if lbl == 'IN':
-        return -0.8, f"Wind: {spd}mph IN  → -0.8 runs"
-    return 0.0, f"Wind: {spd}mph CROSS → no adj"
+    spd = wind.get('speed', 0) or 0
+    lbl = wind.get('label', 'CROSS')
+    if spd <= 1:
+        return 0.0, ''
+    if spd > 15:
+        if lbl == 'OUT':
+            return +0.8, f"💨 {spd:.0f}mph OUT → +0.8 carreras"
+        if lbl == 'IN':
+            return -0.8, f"💨 {spd:.0f}mph IN  → -0.8 carreras"
+    # Low-speed or cross wind — still describe it but no run adjustment
+    dir_es = {"OUT": "OUT (a favor de bateo)", "IN": "IN (a favor de pitcheo)",
+              "CROSS": "cruzado (sin ajuste)"}
+    return 0.0, f"💨 {spd:.0f}mph {dir_es.get(lbl, lbl)}"
 
 def get_book_total(game):
     """
@@ -2377,7 +2422,7 @@ def analyze_totals(games, sport_key):
                 "era_home":       h_era,
                 "era_away":       a_era,
                 "pitch_adj":      pitch_adj,
-                "wind_info":      w_label or "Wind: N/A",
+                "wind_info":      w_label or None,
                 "form_home":      "",
                 "form_away":      "",
                 "base_proj":      base_proj,
@@ -4759,8 +4804,28 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
 
         result: dict = {}
 
+        def _is_home(s: dict) -> "bool | None":
+            """Detect home/away from split dict — handles both API formats."""
+            # Format A: {"split": {"code": "H"}} or {"split": {"code": "A"}}
+            code = s.get("split", {}).get("code", "")
+            if code in ("H", "A"):
+                return code == "H"
+            # Format B: {"isHome": true/false}
+            is_home = s.get("isHome")
+            if is_home is not None:
+                return bool(is_home)
+            # Format C: split description
+            desc = s.get("split", {}).get("description", "").lower()
+            if "home" in desc:
+                return True
+            if "away" in desc or "road" in desc:
+                return False
+            return None
+
         for s in hit_splits:
-            loc  = s.get("split", {}).get("code", "")
+            home = _is_home(s)
+            if home is None:
+                continue
             stat = s.get("stat", {})
             gp   = max(float(stat.get("gamesPlayed", 0) or 0), 1)
             runs = float(stat.get("runs", 0) or 0)
@@ -4768,22 +4833,23 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
             loss = float(stat.get("losses", 0) or 0)
             wl   = wins + loss
             wpct = round(wins / wl, 3) if wl > 0 else 0.500
-            if loc == "H":
+            if home:
                 result["home_rs"]   = round(runs / gp, 2)
                 result["home_wpct"] = wpct
-            elif loc == "A":
+            else:
                 result["away_rs"]   = round(runs / gp, 2)
                 result["away_wpct"] = wpct
 
         for s in pit_splits:
-            loc  = s.get("split", {}).get("code", "")
+            home = _is_home(s)
+            if home is None:
+                continue
             stat = s.get("stat", {})
             gp   = max(float(stat.get("gamesPlayed", 0) or 0), 1)
-            # Use "runs" (total runs allowed) not earnedRuns for accuracy
             ra   = float(stat.get("runs", 0) or 0)
-            if loc == "H":
+            if home:
                 result["home_ra"] = round(ra / gp, 2)
-            elif loc == "A":
+            else:
                 result["away_ra"] = round(ra / gp, 2)
 
         # Only return if we got at least one real stat
@@ -4919,33 +4985,55 @@ def fetch_home_plate_umpire(home_team: str, game_date: str) -> dict | None:
     """
     Fetch home plate umpire via MLB Stats API schedule with officials hydration.
     game_date: 'YYYY-MM-DD'. Returns {name, tendency, zone} or None.
+    No 'fields' filter — some API versions strip nested paths when fields is set.
     """
     ck = f"{home_team}_{game_date}"
     if ck in _umpire_cache:
         return _umpire_cache[ck]
     try:
+        # No 'fields' param — let the API return the full structure
         data = _mlb_rest("/schedule", {
             "sportId": 1, "date": game_date,
             "hydrate": "officials",
-            "fields": "dates,games,gamePk,teams,home,teamName,officials,officialType,official,fullName",
         })
         if not data:
+            _umpire_cache[ck] = None
             return None
         for date_entry in data.get("dates", []):
             for game in date_entry.get("games", []):
-                home_nm = (game.get("teams", {}).get("home", {})
-                           .get("team", {}).get("teamName", ""))
-                if home_nm.lower() not in home_team.lower() and home_team.lower() not in home_nm.lower():
+                teams_block = game.get("teams", {})
+                home_team_name = (
+                    teams_block.get("home", {}).get("team", {}).get("teamName", "")
+                    or teams_block.get("home", {}).get("team", {}).get("name", "")
+                )
+                # Loose match: any word overlap is enough
+                ht_lower = home_team.lower()
+                hn_lower = home_team_name.lower()
+                if not (ht_lower in hn_lower or hn_lower in ht_lower
+                        or any(w in hn_lower for w in ht_lower.split()
+                               if len(w) > 3)):
                     continue
                 for official in game.get("officials", []):
-                    if official.get("officialType") == "Home Plate":
-                        name      = official.get("official", {}).get("fullName", "")
-                        tendency, zone = _UMPIRE_TENDENCIES.get(name, ("NEUTRAL", "zona normal"))
-                        res = {"name": name, "tendency": tendency, "zone": zone}
-                        _umpire_cache[ck] = res
-                        return res
+                    otype = (official.get("officialType") or "").strip()
+                    # Accept "Home Plate", "HP", or starts with "Home"
+                    if otype not in ("Home Plate", "HP") and not otype.startswith("Home"):
+                        continue
+                    name = (official.get("official", {}).get("fullName", "")
+                            or official.get("official", {}).get("name", ""))
+                    if not name:
+                        continue
+                    tendency, zone = _UMPIRE_TENDENCIES.get(
+                        name, ("NEUTRAL", "zona normal")
+                    )
+                    res = {"name": name, "tendency": tendency, "zone": zone}
+                    _umpire_cache[ck] = res
+                    print(f"  ⚾ Umpire [{home_team}]: {name} → {tendency}")
+                    return res
+        _umpire_cache[ck] = None
         return None
-    except Exception:
+    except Exception as e:
+        print(f"  ⚠️  fetch_home_plate_umpire error: {e}")
+        _umpire_cache[ck] = None
         return None
 
 # ── Soccer S1: Team recent form detail (last 3 matches) ───────────────────────
@@ -5213,6 +5301,29 @@ def _pre_validate_for_claude(game_data: dict, sport: str) -> "tuple[dict, list]"
     if warnings:
         for w in warnings:
             print(f"  ⚠️  [pre-validate] {w}")
+
+    # ── 4. Strip null / 4.5 placeholder fields before sending to Claude ──────
+    # Claude should only see real data. Remove any key whose value is:
+    #   - None / empty string
+    #   - exactly the 4.5 league-average placeholder (RS or RA)
+    #   - internal helper flags (_rs_real, _ra_real)
+    PLACEHOLDER_FLOATS = {4.5, 4.50}
+    RS_RA_KEYS = {"rs_home", "ra_home", "rs_away", "ra_away",
+                  "era_home", "era_away", "bullpen_era_home", "bullpen_era_away"}
+    keys_to_remove = []
+    for k, v in list(clean.items()):
+        if k.startswith("_"):                       # internal flag
+            keys_to_remove.append(k)
+        elif v is None or v == "":                  # null / empty
+            keys_to_remove.append(k)
+        elif isinstance(v, float) and v in PLACEHOLDER_FLOATS and k in RS_RA_KEYS:
+            keys_to_remove.append(k)               # 4.5 placeholder
+        elif isinstance(v, str) and v.startswith("4.5") and k in RS_RA_KEYS:
+            keys_to_remove.append(k)               # "4.5" string placeholder
+    for k in keys_to_remove:
+        clean.pop(k, None)
+        if not k.startswith("_"):
+            print(f"  ℹ️  [pre-validate] campo '{k}' omitido (sin datos reales)")
 
     return clean, warnings
 
