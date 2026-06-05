@@ -1,5 +1,5 @@
 import requests, time, csv, os, json
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 
 # ── config (hardcoded — no CLI args) ─────────────────────────────────────────
@@ -17,27 +17,17 @@ BETS_LOG_FILE  = "bets_log.csv"
 
 # ── season-aware leagues: sport_key -> active months ─────────────────────────
 SEASON_MONTHS = {
-    "baseball_mlb":                 [4,5,6,7,8,9,10],
-    "basketball_nba":               [10,11,12,1,2,3,4,5,6],
-    "americanfootball_nfl":         [9,10,11,12,1,2],
-    "soccer_fifa_world_cup":        [6,7,11,12],
     "soccer_epl":                   [8,9,10,11,12,1,2,3,4,5],
-    "soccer_uefa_champions_league": [9,10,11,12,1,2,3,4,5],
-    "soccer_usa_mls":               [3,4,5,6,7,8,9,10,11],
     "soccer_spain_la_liga":         [8,9,10,11,12,1,2,3,4,5],
     "soccer_germany_bundesliga":    [8,9,10,11,12,1,2,3,4,5],
     "soccer_italy_serie_a":         [8,9,10,11,12,1,2,3,4,5],
     "soccer_france_ligue_1":        [8,9,10,11,12,1,2,3,4,5],
-    "icehockey_nhl":                [10,11,12,1,2,3,4,5,6],
+    "baseball_mlb":                 [3,4,5,6,7,8,9,10],
 }
 
 SPORT_KEYS = list(SEASON_MONTHS.keys())
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-
-def in_scan_window():
-    hour = datetime.now(CDT).hour
-    return hour >= 8 or hour < 3
 
 def is_in_season(sport_key):
     return datetime.now(CDT).month in SEASON_MONTHS.get(sport_key, [])
@@ -278,15 +268,6 @@ if __name__ == "__main__":
     while True:
         now_cdt = datetime.now(CDT)
         print(f"\n{'='*50}\n🕐 {now_cdt.strftime('%Y-%m-%d %H:%M CDT')}")
-
-        if not in_scan_window():
-            next_wake = now_cdt.replace(hour=8, minute=0, second=0, microsecond=0)
-            if now_cdt.hour >= 3:
-                next_wake += timedelta(days=1)
-            wait_sec = (next_wake - now_cdt).total_seconds()
-            print("😴 Outside scan window (8AM–3AM CDT). Sleeping until 8AM...")
-            time.sleep(max(wait_sec, 60))
-            continue
 
         print(f"🔍 Scan #{scan}")
         run_scan()
