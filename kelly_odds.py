@@ -5167,27 +5167,37 @@ def _pre_validate_for_claude(game_data: dict, sport: str) -> "tuple[dict, list]"
     clean    = copy.deepcopy(game_data)
     warnings = []
 
-    # ── 1. ERA range validation ───────────────────────────────────────────────
-    for era_key in ("era_home", "era_away", "bullpen_era_home", "bullpen_era_away"):
-        val = clean.get(era_key)
-        if val is None:
-            continue
-        try:
-            fval = float(val)
-        except (TypeError, ValueError):
-            continue
-        if not (_ERA_MIN <= fval <= _ERA_MAX):
-            msg = f"ERA sospechosa en '{era_key}': {fval} (fuera de rango {_ERA_MIN}–{_ERA_MAX})"
-            warnings.append(msg)
-            clean[era_key] = "DATO NO VERIFICADO"
+    # ── 1 & 2: MLB-only checks (soccer has no pitchers/ERA) ──────────────────
+    if sport == "MLB":
+        # ERA range validation
+        for era_key in ("era_home", "era_away", "bullpen_era_home", "bullpen_era_away"):
+            val = clean.get(era_key)
+            if val is None:
+                continue
+            try:
+                fval = float(val)
+            except (TypeError, ValueError):
+                continue
+            if not (_ERA_MIN <= fval <= _ERA_MAX):
+                msg = (f"ERA sospechosa en '{era_key}': {fval} "
+                       f"(fuera de rango {_ERA_MIN}–{_ERA_MAX})")
+                warnings.append(msg)
+                clean[era_key] = "DATO NO VERIFICADO"
 
-    # ── 2. Pitcher name validation ────────────────────────────────────────────
-    for p_key in ("pitcher_home", "pitcher_away", "pname_home", "pname_away"):
-        val = str(clean.get(p_key) or "")
-        if not val or val.strip().upper() in ("TBD", "UNKNOWN", "N/A", ""):
-            msg = f"Nombre de pitcher ausente/TBD en '{p_key}'"
-            warnings.append(msg)
-            clean[p_key] = "SIN CONFIRMAR"
+        # Pitcher name validation
+        # game_data may have 'pname_home' (raw) or only 'pitcher_home' ("Name (ERA X.XX)")
+        for side in ("home", "away"):
+            raw_key  = f"pname_{side}"
+            fmt_key  = f"pitcher_{side}"
+            # Prefer raw name; fall back to extracting from formatted string
+            name = str(clean.get(raw_key) or "").strip()
+            if not name:
+                fmt_val = str(clean.get(fmt_key) or "")
+                name = fmt_val.split(" (ERA")[0].strip()
+            if name.upper() in ("TBD", "UNKNOWN", "N/A", ""):
+                msg = f"Pitcher {side} sin confirmar (TBD/vacío)"
+                warnings.append(msg)
+                clean[raw_key] = "SIN CONFIRMAR"
 
     # ── 3. Bullpen cross-source check (uses _data_quality populated earlier) ──
     today = datetime.now(CDT).strftime("%Y-%m-%d")
