@@ -1764,6 +1764,12 @@ def analyze_game_full(game, sport_key, prev_map=None):
         a_era     = p_data.get("away_era", 4.50)
         h_pname   = p_data.get("home_name", "TBD")
         a_pname   = p_data.get("away_name", "TBD")
+
+        # Fix 5: skip full analysis when both pitchers are TBD
+        if h_pname == "TBD" and a_pname == "TBD":
+            return None
+        # Warn when at least one pitcher is unconfirmed
+        tbd_note = ("⚠️ Pitcher no confirmado" if "TBD" in (h_pname, a_pname) else "")
         pitch_adj = pitcher_run_adjustment(h_era, a_era)
 
         park_city      = MLB_PARK_CITIES.get(home)
@@ -1889,6 +1895,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "pform_h":       pform_h,   # MLB A1
             "pform_a":       pform_a,   # MLB A1
             "umpire":        umpire,    # MLB A2
+            "tbd_note":      tbd_note,  # Fix 5
         }
 
     # ── SOCCER ────────────────────────────────────────────────────────────────
@@ -2098,6 +2105,9 @@ def notify_game_analysis(analyses, sport_key):
             if ump and ump.get("name"):
                 tend_icon = "📈 OVER" if ump["tendency"] == "OVER" else ("📉 UNDER" if ump["tendency"] == "UNDER" else "➡️ NEUTRAL")
                 ctx_lines += f"👨‍⚖️ Ump: {ump['name']} — {ump['zone']} → Favorece: {tend_icon}\n"
+            # Fix 5: TBD pitcher note
+            if ctx.get("tbd_note"):
+                ctx_lines += f"{ctx['tbd_note']}\n"
             # MLB A3: temperature
             if ctx.get("temp_label"):
                 ctx_lines += f"{ctx['temp_label']}\n"
@@ -2118,9 +2128,9 @@ def notify_game_analysis(analyses, sport_key):
                     f"{as_['away_wpct']*100:.0f}% win\n"
                 )
         else:
-            sign = "+" if ctx["elo_diff"] >= 0 else ""
             ctx_lines = (
-                f"🔵 ELO local:    {ctx['elo_home']} ({sign}{ctx['elo_diff']})\n"
+                f"🔵 ELO local:    {ctx['elo_home']}\n"
+                f"🔴 ELO visita:   {ctx['elo_away']}\n"
                 f"🤝 Prob. empate: {ctx['p_draw']}%\n"
             )
             # Show legacy form only if real data exists (not ELO-only fallback)
@@ -2183,6 +2193,9 @@ def notify_game_analysis(analyses, sport_key):
         if tc.get("warn"):
             ctx_lines += f"{tc['warn']}\n"
 
+        # Detect if any warning is present in the context block
+        has_warning = ("⚠️" in ctx_lines)
+
         # Best pick for action line
         best = a["candidates"][0]
         best_clean = (best["label"]
@@ -2209,13 +2222,9 @@ def notify_game_analysis(analyses, sport_key):
             # Fix 2: book warning for risky books (applies to MLB and soccer)
             bk_warn_pick = _book_warning(c.get("book", ""))
 
-            # Fix 3: omit Kelly% for soccer alerts
-            if is_mlb:
-                odds_line = (f"   💰 ${c['stake']} @ {c['odds']} "
-                             f"({c['kelly_pct']}% Kelly) — {c['book']}{bk_warn_pick}\n")
-            else:
-                odds_line = (f"   💰 ${c['stake']} @ {c['odds']} "
-                             f"— {c['book']}{bk_warn_pick}\n")
+            # Fix 3: never show Kelly% in any alert
+            odds_line = (f"   💰 ${c['stake']} @ {c['odds']} "
+                         f"— {c['book']}{bk_warn_pick}\n")
 
             picks_lines += (
                 f"{rank_emoji} {c['label']} | EV +{c['ev_pct']}% → ${ev_d} por ${c['stake']}"
@@ -2223,8 +2232,8 @@ def notify_game_analysis(analyses, sport_key):
                 f"{odds_line}"
             )
 
-        # Verdict based on best pick — cap to MEDIA for far-out soccer
-        if tc.get("cap_conf"):
+        # Verdict — cap to MEDIA whenever any ⚠️ warning is present
+        if tc.get("cap_conf") or has_warning:
             verdict = f"{_DIV3}\n🟡 CONFIANZA: MEDIA — apostar mitad"
         else:
             verdict = _verdict_line(best["ev_pct"], best["true_prob"])
@@ -2842,8 +2851,9 @@ _injury_cache: dict = {}
 def fetch_mlb_il(home, away):
     """Return {team_name: [player_names]} for IL players on both teams today."""
     today_str = datetime.now(ET).strftime("%Y-%m-%d")
-    if today_str in _injury_cache:
-        return _injury_cache[today_str]
+    cache_key = f"{home}|{away}|{today_str}"
+    if cache_key in _injury_cache:
+        return _injury_cache[cache_key]
     result = {}
     for tname in (home, away):
         try:
@@ -2863,7 +2873,7 @@ def fetch_mlb_il(home, away):
                 result[tname] = players
         except Exception:
             pass
-    _injury_cache[today_str] = result
+    _injury_cache[cache_key] = result
     return result
 
 # ── Module 6: home/away splits ────────────────────────────────────────────────
