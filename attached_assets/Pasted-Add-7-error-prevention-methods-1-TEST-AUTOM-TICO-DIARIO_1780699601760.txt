@@ -1,0 +1,199 @@
+Add 7 error prevention methods:
+
+━━━━━━━━━━━━━━━━━━━━
+1. TEST AUTOMÁTICO DIARIO
+━━━━━━━━━━━━━━━━━━━━
+Every day at 7:50 AM (before 8 AM 
+report) run health check:
+
+Test each module:
+- MLB Stats API → fetch one game ✅/❌
+- OpenWeatherMap → fetch one city ✅/❌
+- Umpire data → fetch today's games ✅/❌
+- Bullpen ERA → fetch one team ✅/❌
+- Home/away splits → fetch one team ✅/❌
+- The Odds API → fetch one sport ✅/❌
+- Claude API → send test message ✅/❌
+
+Send health report in ntfy:
+"🏥 ESTADO DEL BOT — 7:50 AM
+━━━━━━━━━━━━
+✅ MLB Stats API: funcionando
+✅ OpenWeatherMap: funcionando
+❌ Umpire data: fallando
+✅ Bullpen ERA: funcionando
+⚠️ Splits: datos genéricos detectados
+✅ The Odds API: funcionando
+✅ Claude API: funcionando
+━━━━━━━━━━━━
+⚠️ 1 módulo con problemas
+Picks de hoy pueden tener datos 
+incompletos en umpire"
+
+━━━━━━━━━━━━━━━━━━━━
+2. ALERTAS DE ERROR EN TIEMPO REAL
+━━━━━━━━━━━━━━━━━━━━
+If any critical module fails 3 times
+in a row during scans:
+
+Send immediate ntfy alert:
+"🚨 ERROR EN EL BOT
+━━━━━━━━━━━━
+❌ Módulo fallando: [nombre]
+Error: [descripción]
+Intentos: 3/3
+
+Impacto: picks de [sport] pueden
+ser menos precisos hasta que 
+se corrija.
+
+Bot sigue funcionando con datos
+disponibles."
+
+Critical modules (alert immediately):
+- The Odds API (no odds = no picks)
+- Claude API (no verification)
+- MLB Stats pitcher data
+
+Non-critical (log only):
+- Umpire data
+- Wind data
+- Lineup data
+
+━━━━━━━━━━━━━━━━━━━━
+3. RANGO DE VALORES VÁLIDOS
+━━━━━━━━━━━━━━━━━━━━
+Before using ANY stat, validate range:
+
+ERA: 1.50 - 8.00
+  (outside range → reject, use null)
+  
+FIP: 1.50 - 8.00
+  (outside range → reject)
+
+OPS: 0.500 - 1.100
+  (outside range → reject)
+
+Bullpen ERA: 2.00 - 7.00
+  (outside range → reject)
+
+Win%: 0.20 - 0.80
+  (outside range → reject)
+
+RS/RA per game: 2.0 - 8.0
+  (outside range → reject)
+  (4.5/4.5 identical → reject as generic)
+
+Goals per game (soccer): 0.3 - 3.5
+  (outside range → reject)
+
+ELO: 1200 - 2200
+  (outside range → reject)
+
+If rejected → remove from game_data
+Never send invalid data to Claude.
+
+━━━━━━━━━━━━━━━━━━━━
+4. REPORTE DE CALIDAD DIARIO
+━━━━━━━━━━━━━━━━━━━━
+Add to 8 AM daily report:
+
+"📊 CALIDAD DE DATOS HOY:
+━━━━━━━━━━━━
+✅ Pitchers confirmados: 18/22 juegos
+⚠️ Umpires disponibles: 12/22 juegos
+❌ Splits L/R: fallando
+✅ Clima activo: 22/22 parques
+✅ Bullpen ERA: 20/22 equipos
+⚠️ Lineups confirmados: 8/22 juegos
+━━━━━━━━━━━━
+Confianza general de datos: 78%
+Picks de hoy: MODERADA precisión"
+
+━━━━━━━━━━━━━━━━━━━━
+5. SEGUNDA FUENTE OBLIGATORIA
+━━━━━━━━━━━━━━━━━━━━
+For these critical stats, always
+fetch from 2 sources:
+
+BULLPEN ERA:
+Primary: MLB Stats API
+Secondary: ESPN API
+http://site.api.espn.com/apis/site/
+v2/sports/baseball/mlb/teams/
+{teamId}/statistics
+
+If difference > 0.75 ERA:
+→ Use lower value (conservative)
+→ Flag: "⚠️ Discrepancia en datos"
+
+PITCHER ERA:
+Primary: MLB Stats API
+Secondary: Baseball Reference 
+(if available)
+
+If values match within 0.30 → 
+mark as "✅ Verificado"
+If they differ → mark as 
+"⚠️ Sin verificar"
+
+━━━━━━━━━━━━━━━━━━━━
+6. LOG DE ERRORES
+━━━━━━━━━━━━━━━━━━━━
+Create error_log.csv with columns:
+timestamp, module, error_type, 
+game, description, resolved
+
+Log every error automatically.
+
+Every Sunday in weekly report add:
+"🔍 ERRORES DE LA SEMANA:
+━━━━━━━━━━━━
+Módulo con más errores: [nombre]
+Total errores: X
+Resueltos automáticamente: X
+Requirieron atención: X
+━━━━━━━━━━━━
+Módulos más confiables:
+1. The Odds API: 99.2% uptime
+2. Claude API: 98.1% uptime
+3. MLB Stats: 94.3% uptime"
+
+━━━━━━━━━━━━━━━━━━━━
+7. MODO CONSERVADOR AUTOMÁTICO
+━━━━━━━━━━━━━━━━━━━━
+Before analyzing each game,
+calculate data completeness score:
+
+Score each available field:
+✅ Pitcher name + ERA: +20 points
+✅ FIP: +10 points
+✅ Bullpen ERA verified: +15 points
+✅ Home/away splits real: +15 points
+✅ Umpire data: +10 points
+✅ Wind/weather: +10 points
+✅ Lineup confirmed: +10 points
+✅ H2H data: +10 points
+
+Total possible: 100 points
+
+Thresholds:
+80-100 points → análisis completo
+   Normal confidence levels allowed
+
+50-79 points → datos incompletos
+   Max confidence: MEDIA
+   Add: "⚠️ Análisis con datos 
+   parciales — verificar antes 
+   de apostar"
+
+Below 50 points → skip game
+   Don't analyze, don't alert
+   Log: "Juego omitido por datos 
+   insuficientes: [game]"
+
+Show score in Claude data:
+"data_quality_score": 73
+
+Claude uses this to calibrate
+confidence in its analysis.
