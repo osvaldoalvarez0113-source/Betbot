@@ -780,6 +780,27 @@ def _should_alert(key, odds=None, edge=None):
         _sent_alerts[key] = {"date": today, "odds": odds, "edge": edge}
     return send
 
+def _era_label(era):
+    """Plain-language ERA quality descriptor."""
+    try:
+        e = float(era)
+    except (ValueError, TypeError):
+        return str(era)
+    if e < 3.00:   return "dominante"
+    elif e <= 4.50: return "sólido"
+    elif e <= 5.00: return "regular"
+    else:           return "vulnerable"
+
+def _parse_pitcher(s):
+    """Parse '{name} (ERA X.XX)' → (name, era_float). Falls back to (s, 4.50)."""
+    if s and " (ERA " in s:
+        try:
+            name, rest = s.split(" (ERA ", 1)
+            return name.strip(), float(rest.rstrip(")").strip())
+        except Exception:
+            pass
+    return (s or "TBD"), 4.50
+
 def _verdict_line(ev_pct, true_prob=None):
     """One-line confidence verdict appended to every alert."""
     if ev_pct > 10 and (true_prob is None or true_prob > 0.60):
@@ -1189,6 +1210,8 @@ def analyze_totals(games, sport_key):
             extra = {
                 "pitcher_home": f"{h_pname} (ERA {h_era:.2f})",
                 "pitcher_away": f"{a_pname} (ERA {a_era:.2f})",
+                "era_home":     h_era,
+                "era_away":     a_era,
                 "pitch_adj":    pitch_adj,
                 "wind_info":    w_label or "Wind: N/A",
                 "form_home":    "",
@@ -1284,46 +1307,70 @@ def notify_totals(total_bets):
         unit    = "carreras" if is_mlb else "goles"
         side    = b["team"]        # "OVER" / "UNDER"
         line    = b["side"]        # the book line number
-        conf_es = _conf_es(b["confidence"])
         gt      = _fmt_et(b.get("time", ""))
 
         if is_mlb:
-            sport_block = (
+            # ── MLB clean format ──────────────────────────────────────────
+            ph_name, ph_era = _parse_pitcher(b.get("pitcher_home", ""))
+            pa_name, pa_era = _parse_pitcher(b.get("pitcher_away", ""))
+            # prefer stored raw ERAs if available
+            ph_era = b.get("era_home", ph_era)
+            pa_era = b.get("era_away", pa_era)
+            wind   = b.get("wind_info", "")
+            wind_line = f"💨 {wind}\n" if wind and wind != "Wind: N/A" else ""
+            is_high = b["confidence"] == "HIGH"
+            half_stake = round(b["stake"] / 2, 2)
+            action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
+                      else f"🟡 APOSTAR MITAD: ${half_stake}")
+            body = (
+                f"{emoji} {b['match']}\n"
+                f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
-                f"🔵 Pitcher local:  {b.get('pitcher_home', 'TBD')}\n"
-                f"🔴 Pitcher visita: {b.get('pitcher_away', 'TBD')}\n"
+                f"🎯 APUESTA: {side} {line} carreras (Total)\n\n"
+                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}\n"
+                f"{_DIV}\n"
+                f"📊 POR QUÉ:\n"
+                f"Modelo proyecta: {b['our_line']} carreras\n"
+                f"El libro pone:   {line} carreras\n"
+                f"Diferencia:      {b['edge']} carreras de edge\n\n"
+                f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} (ERA {ph_era:.2f})\n"
+                f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} (ERA {pa_era:.2f})\n"
+                f"{wind_line}"
+                f"{_DIV}\n"
+                f"{action}\n"
+                f"{_DIV2}"
             )
-            wind = b.get("wind_info", "")
-            if wind:
-                sport_block += f"💨 {wind}\n"
+            title    = f"⚾ TOTAL | {side} {line} | {b['match']}"
+            priority = "high" if is_high else "default"
         else:
+            # ── Soccer / other sports ─────────────────────────────────────
+            conf_es = _conf_es(b["confidence"])
             sport_block = (
                 f"{_DIV}\n"
                 f"📋 Forma local:   {b.get('form_home', 'ELO only')}\n"
                 f"📋 Forma visita:  {b.get('form_away', 'ELO only')}\n"
             )
+            true_prob_approx = b["stake"] / (BANKROLL * 0.05) if b["stake"] > 0 else 0.5
+            verdict = _verdict_line(float(b["edge"]) * 10, true_prob_approx)
+            body = (
+                f"{emoji} {b['match']}\n"
+                f"📊 {side} {line} {unit}\n"
+                f"{_DIV}\n"
+                f"🎯 Nuestra línea: {b['our_line']}\n"
+                f"📚 Línea libro:   {line}\n"
+                f"📈 Edge:          {b['edge']} {unit}\n"
+                f"🌡️ Confianza:     {conf_es}\n"
+                f"{sport_block}"
+                f"{_DIV}\n"
+                f"💰 Apuesta: ${b['stake']} @ {b['odds']}\n"
+                f"📖 Libro: {b['bookmaker']}\n"
+                f"⏰ {gt}\n"
+                f"{verdict}\n"
+                f"{_DIV2}"
+            )
+            title    = f"🎯 PICK | {side} {line} | {b['match']}"
+            priority = "high" if b["confidence"] == "HIGH" else "default"
 
-        true_prob_approx = b["stake"] / (BANKROLL * 0.05) if b["stake"] > 0 else 0.5
-        verdict = _verdict_line(float(b["edge"]) * 10, true_prob_approx)
-
-        body = (
-            f"{emoji} {b['match']}\n"
-            f"📊 {side} {line} {unit}\n"
-            f"{_DIV}\n"
-            f"🎯 Nuestra línea: {b['our_line']}\n"
-            f"📚 Línea libro:   {line}\n"
-            f"📈 Edge:          {b['edge']} {unit}\n"
-            f"🌡️ Confianza:     {conf_es}\n"
-            f"{sport_block}"
-            f"{_DIV}\n"
-            f"💰 Apuesta: ${b['stake']} @ {b['odds']}\n"
-            f"📖 Libro: {b['bookmaker']}\n"
-            f"⏰ {gt}\n"
-            f"{verdict}\n"
-            f"{_DIV2}"
-        )
-        title    = f"🎯 PICK | {side} {line} | {b['match']}"
-        priority = "high" if b["confidence"] == "HIGH" else "default"
         ntfy_post(title, body, priority)
         alerted_bets.add(key)
         save_pending_bet(b)
@@ -2193,33 +2240,69 @@ def notify_bets(new_bets):
 
         bov_line = f"📖 Bovada: {bov}\n" if bov else ""
 
-        ev_d    = _ev_dollars(b["stake"], b["edge"])
         elo_p   = b.get("elo_prob", 0)
-        verdict = _verdict_line(b["edge"], elo_p / 100 if elo_p else None)
+        is_mlb  = b.get("sport", "") == "MLB"
 
-        body = (
-            f"{emoji} {b['match']}\n"
-            f"{mv_line}"
-            f"{_DIV}\n"
-            f"🎯 Pick: {b['team']} ({b['side']})\n"
-            f"📈 Edge: {b['edge']}%  |  Valor: {b['value_pct']}%\n"
-            f"🌡️ Confianza: {conf_es}\n"
-            f"{_DIV}\n"
-            f"💰 Apuesta: ${b['stake']} @ {b['odds']}  ({b['kelly_pct']}% Kelly)\n"
-            f"📖 Mejor libro: {b['bookmaker']}\n"
-            f"{bov_line}"
-            f"{_DIV}\n"
-            f"📊 Prob. ELO: {elo_p}%\n"
-            f"💵 EV +{b['edge']}% → ${ev_d} ganancia esperada por cada ${b['stake']}\n"
-            f"💹 ROI proy.: {b['roi']}%\n"
-            f"⏰ {gt}\n"
-            f"{verdict}\n"
-            f"{_DIV2}"
-        )
-        has_high = b["edge"] >= 5.0
-        priority = "urgent" if has_high else ("high" if b["edge"] >= 3 else "default")
-        conf_tag = " — ALTA" if has_high else ""
-        title    = f"🎯 PICK | {b['team']}{conf_tag} | {b['match']}"
+        if is_mlb:
+            # ── MLB clean format ──────────────────────────────────────────
+            pitchers  = fetch_probable_pitchers_today()
+            p_data    = _lookup_pitcher_data(home, away, pitchers)
+            ph_name   = p_data.get("home_name", "TBD")
+            pa_name   = p_data.get("away_name", "TBD")
+            ph_era    = p_data.get("home_era", 4.50)
+            pa_era    = p_data.get("away_era", 4.50)
+            impl_pct  = round(100 / b["odds"], 1) if b["odds"] else 0
+            is_high   = b["edge"] >= 5.0 and elo_p >= 60
+            half_stake = round(b["stake"] / 2, 2)
+            action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
+                      else f"🟡 APOSTAR MITAD: ${half_stake}")
+            body = (
+                f"⚾ {b['match']}\n"
+                f"⏰ Hoy {gt}\n"
+                f"{_DIV}\n"
+                f"🎯 APUESTA: {b['team']} GANA (ML)\n\n"
+                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}\n"
+                f"{_DIV}\n"
+                f"📊 POR QUÉ:\n"
+                f"Modelo → {elo_p}% de ganar\n"
+                f"Libro  → {impl_pct}% implícito\n"
+                f"Edge:     {b['edge']}%\n\n"
+                f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} (ERA {ph_era:.2f})\n"
+                f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} (ERA {pa_era:.2f})\n"
+                f"{_DIV}\n"
+                f"{action}\n"
+                f"{_DIV2}"
+            )
+            priority = "urgent" if is_high else "high"
+            title    = f"⚾ ML | {b['team']} | {b['match']}"
+        else:
+            # ── Soccer / other sports ─────────────────────────────────────
+            ev_d    = _ev_dollars(b["stake"], b["edge"])
+            verdict = _verdict_line(b["edge"], elo_p / 100 if elo_p else None)
+            body = (
+                f"{emoji} {b['match']}\n"
+                f"{mv_line}"
+                f"{_DIV}\n"
+                f"🎯 Pick: {b['team']} ({b['side']})\n"
+                f"📈 Edge: {b['edge']}%  |  Valor: {b['value_pct']}%\n"
+                f"🌡️ Confianza: {conf_es}\n"
+                f"{_DIV}\n"
+                f"💰 Apuesta: ${b['stake']} @ {b['odds']}  ({b['kelly_pct']}% Kelly)\n"
+                f"📖 Mejor libro: {b['bookmaker']}\n"
+                f"{bov_line}"
+                f"{_DIV}\n"
+                f"📊 Prob. ELO: {elo_p}%\n"
+                f"💵 EV +{b['edge']}% → ${ev_d} ganancia esperada por cada ${b['stake']}\n"
+                f"💹 ROI proy.: {b['roi']}%\n"
+                f"⏰ {gt}\n"
+                f"{verdict}\n"
+                f"{_DIV2}"
+            )
+            has_high = b["edge"] >= 5.0
+            priority = "urgent" if has_high else ("high" if b["edge"] >= 3 else "default")
+            conf_tag = " — ALTA" if has_high else ""
+            title    = f"🎯 PICK | {b['team']}{conf_tag} | {b['match']}"
+
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
 
