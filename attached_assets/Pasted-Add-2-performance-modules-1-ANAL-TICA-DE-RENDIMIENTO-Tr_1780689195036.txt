@@ -1,0 +1,92 @@
+Add 2 performance modules:
+
+━━━━━━━━━━━━━━━━━━━━
+1. ANALÍTICA DE RENDIMIENTO
+━━━━━━━━━━━━━━━━━━━━
+Track performance by bet type in
+bankroll_log.csv and calculate:
+
+Every Sunday report AND daily 8 AM 
+report include:
+
+"📊 RENDIMIENTO POR TIPO:
+━━━━━━━━━━━━
+⚾ Totals MLB:
+   Picks: 12 | Ganados: 8 | Perdidos: 4
+   ROI: +14.2% ✅ Tu mejor mercado
+
+🎯 Moneyline MLB:
+   Picks: 6 | Ganados: 3 | Perdidos: 3
+   ROI: -2.1% ⚠️ Cuidado con ML
+
+⚡ ARBs:
+   Picks: 4 | Ganados: 4 | Perdidos: 0
+   ROI: +8.5% ✅ Consistente
+
+⚽ Fútbol/Mundial:
+   Picks: 0 | Pendiente inicio torneo
+
+💎 Picks Premium:
+   Picks: 2 | Ganados: 2 | Perdidos: 0
+   ROI: +22.4% 🔥 Mejor hit rate"
+
+Bot recommendation based on data:
+If totals ROI > ML ROI by 10%+:
+→ "💡 Recomendación: enfócate en 
+   Totals — es tu mercado más fuerte"
+
+If ARB ROI consistently positive:
+→ "💡 ARBs funcionando bien —
+   considera aumentar frecuencia"
+
+If any market ROI < -10%:
+→ "⚠️ Mercado con pérdidas:
+   [tipo] — considera pausarlo"
+
+━━━━━━━━━━━━━━━━━━━━
+2. RACHAS DE EQUIPOS
+━━━━━━━━━━━━━━━━━━━━
+Fetch team recent record from
+MLB Stats API last 10 games:
+https://statsapi.mlb.com/api/v1/teams/
+{teamId}/stats?stats=season
+&group=hitting&season=2026
+
+Calculate:
+- Current win/loss streak
+- Last 10 games record
+- Run differential last 10 games
+
+Show in alert:
+"🔥 Yankees — EN RACHA:
+   Últimos 10: 8-2
+   Racha actual: 5 ganados seguidos
+   Diferencial: +18 carreras"
+
+OR:
+"❄️ Cubs — EN CAÍDA:
+   Últimos 10: 3-7
+   Racha actual: 4 perdidos seguidos
+   Diferencial: -12 carreras"
+
+Use streak to adjust ML probability:
+- Hot team (7+ wins last 10): +5% win prob
+- Cold team (3- wins last 10): -5% win prob
+
+Show streak impact:
+"🔥 Yankees en racha → probabilidad
+   ajustada: 68% → 73%"
+
+For totals:
+- Hot hitting team last 10: +0.3 runs
+- Cold hitting team last 10: -0.3 runs
+
+SOCCER equivalent:
+Same logic for World Cup when it starts:
+- Team on winning streak in tournament
+  → +5% win probability boost
+- Team on losing streak
+  → -5% win probability reduction
+
+Show: "🔥 España — 3 victorias seguidas
+      en el Mundial → forma élite"
