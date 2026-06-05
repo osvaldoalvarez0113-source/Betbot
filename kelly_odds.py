@@ -172,16 +172,23 @@ def notify(bets):
         )
     has_high = any(b["edge"] >= 5.0 for b in bets)
     priority = "urgent" if has_high else ("high" if any(b["edge"] >= 3 for b in bets) else "default")
-    title    = f"BetBot: {len(bets)} value bets" + (" 🔥 HIGH CONFIDENCE" if has_high else "")
+    title    = f"BetBot: {len(bets)} value bets" + (" HIGH CONFIDENCE" if has_high else "")
+    body     = "\n\n".join(lines)
+
     try:
-        requests.post(
+        resp = requests.post(
             f"https://ntfy.sh/{NOTIFY}",
-            data=f"{title}\n\n" + "\n".join(lines),
-            headers={"Priority": priority, "Title": title},
-            timeout=5,
+            data=body.encode("utf-8"),
+            headers={
+                "Title":        title,
+                "Priority":     priority,
+                "Content-Type": "text/plain",
+            },
+            timeout=10,
         )
-    except Exception:
-        pass
+        print(f"  📲 ntfy.sh → HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"  ⚠️  ntfy.sh error: {e}")
 
 # ── CSV logging ───────────────────────────────────────────────────────────────
 
