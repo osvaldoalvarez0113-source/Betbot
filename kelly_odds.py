@@ -29,6 +29,95 @@ _DIV  = "━━━━━━━━━━━━"
 _DIV2 = "━━━━━━━━━━━━━━━━━━━━"
 _DIV3 = "─────────────"
 
+# Fix 1: Team / country name translation (English API → Spanish display)
+_TEAM_ES: dict = {
+    # Americas
+    "Argentina":           "Argentina",
+    "Brazil":              "Brasil",
+    "Uruguay":             "Uruguay",
+    "Colombia":            "Colombia",
+    "Ecuador":             "Ecuador",
+    "Chile":               "Chile",
+    "Peru":                "Perú",
+    "Paraguay":            "Paraguay",
+    "Venezuela":           "Venezuela",
+    "Bolivia":             "Bolivia",
+    "Canada":              "Canadá",
+    "United States":       "Estados Unidos",
+    "USA":                 "Estados Unidos",
+    "Mexico":              "México",
+    "Costa Rica":          "Costa Rica",
+    "Honduras":            "Honduras",
+    "Panama":              "Panamá",
+    "Guatemala":           "Guatemala",
+    "Jamaica":             "Jamaica",
+    # Europe
+    "France":              "Francia",
+    "England":             "Inglaterra",
+    "Spain":               "España",
+    "Portugal":            "Portugal",
+    "Germany":             "Alemania",
+    "Netherlands":         "Países Bajos",
+    "Belgium":             "Bélgica",
+    "Croatia":             "Croacia",
+    "Italy":               "Italia",
+    "Switzerland":         "Suiza",
+    "Serbia":              "Serbia",
+    "Denmark":             "Dinamarca",
+    "Austria":             "Austria",
+    "Hungary":             "Hungría",
+    "Ukraine":             "Ucrania",
+    "Wales":               "Gales",
+    "Scotland":            "Escocia",
+    "Czech Republic":      "República Checa",
+    "Poland":              "Polonia",
+    "Turkey":              "Turquía",
+    "Greece":              "Grecia",
+    "Romania":             "Rumania",
+    "Slovakia":            "Eslovaquia",
+    "Slovenia":            "Eslovenia",
+    "Albania":             "Albania",
+    "Georgia":             "Georgia",
+    # Africa
+    "Morocco":             "Marruecos",
+    "Senegal":             "Senegal",
+    "Nigeria":             "Nigeria",
+    "Egypt":               "Egipto",
+    "Algeria":             "Argelia",
+    "Ivory Coast":         "Costa de Marfil",
+    "Cote d'Ivoire":       "Costa de Marfil",
+    "Cameroon":            "Camerún",
+    "Mali":                "Mali",
+    "Burkina Faso":        "Burkina Faso",
+    "Cape Verde":          "Cabo Verde",
+    "Tunisia":             "Túnez",
+    "Ghana":               "Ghana",
+    "DR Congo":            "Rep. Dem. del Congo",
+    "South Africa":        "Sudáfrica",
+    "Tanzania":            "Tanzania",
+    "Zambia":              "Zambia",
+    "Ethiopia":            "Etiopía",
+    # Asia / Oceania
+    "Japan":               "Japón",
+    "South Korea":         "Corea del Sur",
+    "Saudi Arabia":        "Arabia Saudita",
+    "Iran":                "Irán",
+    "Australia":           "Australia",
+    "New Zealand":         "Nueva Zelanda",
+    "Indonesia":           "Indonesia",
+    "Qatar":               "Catar",
+    "Iraq":                "Irak",
+    "Uzbekistan":          "Uzbekistán",
+    "Jordan":              "Jordania",
+    "Bahrain":             "Baréin",
+    "Kuwait":              "Kuwait",
+    "Oman":                "Omán",
+}
+
+def _es(name: str) -> str:
+    """Translate team/country name to Spanish. Falls back to original if not found."""
+    return _TEAM_ES.get(name, name)
+
 def _sport_emoji(sport):
     """Map sport key/short string to emoji. World Cup → 🏆."""
     s = (sport or "").lower()
@@ -198,19 +287,134 @@ def save_elo_ratings(ratings):
     with open(ELO_FILE, "w") as f:
         json.dump(ratings, f, indent=2)
 
+# Fix 2: Seed ELO for all WC 2026 teams using FIFA ranking estimates.
+# Prevents fake 50% default creating phantom value bets on big underdogs.
+# Tier mapping: Top-10 FIFA → 2000, 11-30 → 1800, 31-60 → 1650, 61-100 → 1550, 100+ → 1400
+_WC2026_ELO_SEED: dict = {
+    # ── Top-10 FIFA (2000) ────────────────────────────────────────────────────
+    "Argentina":           2058,
+    "France":              2000,
+    "England":             2000,
+    "Spain":               2000,
+    "Brazil":              1990,
+    "Portugal":            1970,
+    "Belgium":             1960,
+    "Netherlands":         1950,
+    "Croatia":             1940,
+    "Italy":               1930,
+    # ── 11-30 FIFA (1800) ─────────────────────────────────────────────────────
+    "Germany":             1820,
+    "Colombia":            1810,
+    "Uruguay":             1808,
+    "Morocco":             1800,
+    "Mexico":              1795,
+    "United States":       1790,
+    "USA":                 1790,
+    "Japan":               1785,
+    "Senegal":             1780,
+    "Denmark":             1775,
+    "Switzerland":         1770,
+    "Ecuador":             1765,
+    "Canada":              1764,
+    "Serbia":              1762,
+    "Australia":           1760,
+    "Austria":             1750,
+    "South Korea":         1745,
+    "Hungary":             1740,
+    "Ukraine":             1735,
+    "Wales":               1730,
+    "Czech Republic":      1720,
+    # ── 31-60 FIFA (1650) ─────────────────────────────────────────────────────
+    "Poland":              1715,
+    "Turkey":              1712,
+    "Algeria":             1708,
+    "Peru":                1705,
+    "Iran":                1700,
+    "Egypt":               1698,
+    "Nigeria":             1695,
+    "Chile":               1690,
+    "Saudi Arabia":        1685,
+    "Paraguay":            1680,
+    "Venezuela":           1675,
+    "Bolivia":             1660,
+    "Ivory Coast":         1658,
+    "Cote d'Ivoire":       1658,
+    "Mali":                1655,
+    "Cameroon":            1650,
+    "Burkina Faso":        1645,
+    "Guatemala":           1640,
+    # ── 61-100 FIFA (1550) ────────────────────────────────────────────────────
+    "Jamaica":             1635,
+    "Honduras":            1630,
+    "Panama":              1625,
+    "Costa Rica":          1622,
+    "Scotland":            1620,
+    "Greece":              1618,
+    "Romania":             1615,
+    "Cape Verde":          1610,
+    "Tunisia":             1608,
+    "Ghana":               1600,
+    "DR Congo":            1592,
+    "New Zealand":         1570,
+    "Indonesia":           1555,
+    "Tanzania":            1550,
+    "Zambia":              1545,
+    "Ethiopia":            1540,
+    "Qatar":               1535,
+    "Slovakia":            1620,
+    "Slovenia":            1615,
+    "Albania":             1590,
+    "Georgia":             1585,
+    "Iraq":                1530,
+    "Uzbekistan":          1525,
+    # ── 100+ FIFA (1400) ─────────────────────────────────────────────────────
+    "Bahrain":             1450,
+    "Kuwait":              1440,
+    "Oman":                1430,
+    "Jordan":              1420,
+    "South Africa":        1510,
+}
+
+def _elo_for(team: str) -> float:
+    """
+    Return ELO for a team. Lookup order:
+    1. Learned runtime ratings (elo_ratings.json)
+    2. WC 2026 seed table (FIFA-ranking based)
+    3. Never returns 1500 blindly — uses 1400 as true unknown floor.
+    """
+    if team in _elo_ratings:
+        return _elo_ratings[team]
+    if team in _WC2026_ELO_SEED:
+        return _WC2026_ELO_SEED[team]
+    return 1400   # true unknown — well below average, not a fake 50%
+
+def load_elo_ratings():
+    ratings = {}
+    if os.path.exists(ELO_FILE):
+        try:
+            with open(ELO_FILE) as f:
+                ratings = json.load(f)
+        except Exception:
+            pass
+    # Seed any missing WC teams without overwriting learned values
+    for team, elo in _WC2026_ELO_SEED.items():
+        if team not in ratings:
+            ratings[team] = elo
+    return ratings
+
 _elo_ratings = load_elo_ratings()
 
 def elo_win_prob(team_a, team_b):
     """Expected win probability for team_a vs team_b using ELO ratings."""
-    ea = _elo_ratings.get(team_a, 1500)
-    eb = _elo_ratings.get(team_b, 1500)
+    ea = _elo_for(team_a)
+    eb = _elo_for(team_b)
     return 1.0 / (1.0 + 10 ** ((eb - ea) / 400.0))
 
 def update_elo(winner, loser, draw=False, k=32):
     """Update ELO ratings after a game result."""
     global _elo_ratings
-    ea = _elo_ratings.get(winner, 1500)
-    eb = _elo_ratings.get(loser,  1500)
+    ea = _elo_for(winner)
+    eb = _elo_for(loser)
     expected_a = 1.0 / (1.0 + 10 ** ((eb - ea) / 400.0))
     actual_a   = 0.5 if draw else 1.0
     _elo_ratings[winner] = round(ea + k * (actual_a - expected_a), 1)
@@ -477,6 +681,8 @@ def morning_report_world_cup():
 
             home_name = home.get("team", {}).get("displayName", "?")
             away_name = away.get("team", {}).get("displayName", "?")
+            home_es   = _es(home_name)
+            away_es   = _es(away_name)
             game_time = event.get("date", "TBD")[:16]
             status    = comp.get("status", {}).get("type", {}).get("description", "")
 
@@ -505,13 +711,13 @@ def morning_report_world_cup():
                 rec = "DRAW possible — consider DNB or no bet"
 
             body = (
-                f"{away_name} vs {home_name}  |  {game_time} UTC\n"
-                f"Poisson model: Home win {p_win:.1%} | Draw {p_draw:.1%} | Away {p_loss:.1%}\n"
-                f"ELO: {home_name} {elo_home:.1%} | {away_name} {elo_away:.1%}\n"
-                f"Blended: {home_name} {win_h:.1%} | {away_name} {win_a:.1%}\n"
+                f"{away_es} vs {home_es}  |  {game_time} UTC\n"
+                f"Poisson model: Local {p_win:.1%} | Empate {p_draw:.1%} | Visitante {p_loss:.1%}\n"
+                f"ELO: {home_es} {elo_home:.1%} | {away_es} {elo_away:.1%}\n"
+                f"Mixto: {home_es} {win_h:.1%} | {away_es} {win_a:.1%}\n"
                 f">>> {rec}"
             )
-            ntfy_post(f"WC Preview: {away_name} vs {home_name}", body, "default")
+            ntfy_post(f"🌍 Vista previa: {away_es} vs {home_es}", body, "default")
             print(f"  ✉️  Sent WC preview: {away_name} vs {home_name}")
 
         except Exception as e:
@@ -1227,8 +1433,8 @@ def analyze_totals(games, sport_key):
 
         else:
             # Improvement 2: World Cup 2026 — 60% live tournament form + 40% ELO
-            elo_h      = _elo_ratings.get(home, 1500)
-            elo_a      = _elo_ratings.get(away, 1500)
+            elo_h      = _elo_for(home)
+            elo_a      = _elo_for(away)
             elo_base_h = 1.35 * (1 + (elo_h - 1500) / 4000)
             elo_base_a = 1.25 * (1 + (elo_a - 1500) / 4000)
 
@@ -1354,7 +1560,8 @@ def notify_totals(total_bets):
                 f"{action}\n"
                 f"{_DIV2}"
             )
-            title    = f"⚾ TOTAL | {side} {line} | {b['match']}"
+            match_es_tot = f"{_es(home)} vs {_es(away)}"
+            title    = f"⚾ TOTAL | {side} {line} | {match_es_tot}"
             priority = "high" if is_high else "default"
         else:
             # ── Soccer / other sports ─────────────────────────────────────
@@ -1370,8 +1577,9 @@ def notify_totals(total_bets):
                     f"\n📋 Forma local:   {form_h or 'N/A'}\n"
                     f"📋 Forma visita:  {form_a or 'N/A'}"
                 )
+            match_es_tot = f"{_es(home)} vs {_es(away)}"
             body = (
-                f"{emoji} {b['match']}\n"
+                f"{emoji} {match_es_tot}\n"
                 f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
                 f"🎯 APUESTA: {side} {line} {unit} (Total)\n\n"
@@ -1386,7 +1594,7 @@ def notify_totals(total_bets):
                 f"{action}\n"
                 f"{_DIV2}"
             )
-            title    = f"{emoji} TOTAL | {side} {line} | {b['match']}"
+            title    = f"{emoji} TOTAL | {side} {line} | {match_es_tot}"
             priority = "high" if is_high else "default"
 
         ntfy_post(title, body, priority)
@@ -1586,8 +1794,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
 
     # ── SOCCER ────────────────────────────────────────────────────────────────
     else:
-        elo_h = _elo_ratings.get(home, 1500)
-        elo_a = _elo_ratings.get(away, 1500)
+        elo_h = _elo_for(home)
+        elo_a = _elo_for(away)
 
         elo_base_h = 1.35 * (1 + (elo_h - 1500) / 4000)
         elo_base_a = 1.25 * (1 + (elo_a - 1500) / 4000)
@@ -1711,6 +1919,9 @@ def notify_game_analysis(analyses, sport_key):
 
     for i, a in enumerate(analyses):
         home, away = a["match"].split(" vs ", 1)
+        home_es = _es(home)
+        away_es = _es(away)
+        match_es = f"{home_es} vs {away_es}"
         analysis_key = f"{home}_{away}_analysis"
         if not _should_alert(analysis_key, edge=a["best_ev"]):
             continue
@@ -1794,7 +2005,7 @@ def notify_game_analysis(analyses, sport_key):
         verdict = _verdict_line(best["ev_pct"], best["true_prob"])
 
         body = (
-            f"{emoji} {a['match']}\n"
+            f"{emoji} {match_es}\n"
             f"{action_line}\n"
             f"⏰ {gt}\n"
             f"{_DIV}\n"
@@ -1811,7 +2022,7 @@ def notify_game_analysis(analyses, sport_key):
 
         # Strip decorative emojis from title
         clean = best_clean
-        title = f"🔍 {a['match']} | Mejor: {clean} +{a['best_ev']}%"
+        title = f"🔍 {match_es} | Mejor: {clean} +{a['best_ev']}%"
         ntfy_post(title, body, "high")
         alerted_game_analysis.add(a["game_id"])
         print(f"  🔍 Análisis: {a['match']} — {len(a['candidates'])} pick(s), "
@@ -2792,6 +3003,12 @@ def notify_bets(new_bets):
         # Module 3: book safety warning
         bk_warn  = _book_warning(b.get("bookmaker", ""))
 
+        # Translate team names for display
+        team_es  = _es(b["team"])
+        home_es  = _es(home)
+        away_es  = _es(away)
+        match_es = f"{home_es} vs {away_es}"
+
         if is_mlb:
             # ── MLB clean format ──────────────────────────────────────────
             pitchers  = fetch_probable_pitchers_today()
@@ -2806,10 +3023,10 @@ def notify_bets(new_bets):
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
             body = (
-                f"⚾ {b['match']}\n"
+                f"⚾ {match_es}\n"
                 f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
-                f"🎯 APUESTA: {b['team']} GANA (ML)\n\n"
+                f"🎯 APUESTA: {team_es} GANA (ML)\n\n"
                 f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn}\n"
                 f"{_DIV}\n"
                 f"{top3_blk}"
@@ -2824,7 +3041,7 @@ def notify_bets(new_bets):
                 f"{_DIV2}"
             )
             priority = "urgent" if is_high else "high"
-            title    = f"⚾ ML | {b['team']} | {b['match']}"
+            title    = f"⚾ ML | {team_es} | {match_es}"
         else:
             # ── Soccer / other sports ─────────────────────────────────────
             impl_pct   = round(100 / b["odds"], 1) if b["odds"] else 0
@@ -2833,10 +3050,10 @@ def notify_bets(new_bets):
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
             body = (
-                f"{emoji} {b['match']}\n"
+                f"{emoji} {match_es}\n"
                 f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
-                f"🎯 APUESTA: {b['team']} GANA (ML)\n\n"
+                f"🎯 APUESTA: {team_es} GANA (ML)\n\n"
                 f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn}\n"
                 f"{_DIV}\n"
                 f"{top3_blk}"
@@ -2847,7 +3064,7 @@ def notify_bets(new_bets):
                 f"{_DIV2}"
             )
             priority = "urgent" if b["edge"] >= 5.0 else ("high" if b["edge"] >= 3 else "default")
-            title    = f"{emoji} ML | {b['team']} | {b['match']}"
+            title    = f"{emoji} ML | {team_es} | {match_es}"
 
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
