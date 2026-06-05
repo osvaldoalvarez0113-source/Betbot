@@ -236,25 +236,28 @@ def run_scan():
             print(f"  ⏭  {sport_key} — off-season (month {now_month})")
             continue
 
-        games = get_odds(sport_key)
-        if not games:
-            print(f"  ⚠️  {sport_key} — no data")
-            continue
+        try:
+            games = get_odds(sport_key)
+            if not games:
+                print(f"  ⚠️  {sport_key} — no data")
+                continue
 
-        bets  = analyze(games, prev_map, new_map)
-        short = sport_key.split("_", 1)[-1].upper()
+            bets  = analyze(games, prev_map, new_map)
+            short = sport_key.split("_", 1)[-1].upper()
 
-        if bets:
-            print(f"\n  ✅ {short} — {len(bets)} value bet(s):")
-            for b in bets:
-                mv = f" [LINE {b['line_dir']}{b['line_delta']}]" if b["line_moved"] else ""
-                print(f"    [{b['confidence']}]{mv} {b['match']} → "
-                      f"{b['team']} @{b['odds']} | Edge:+{b['edge']}% | Stake:${b['stake']}")
-            if LOG_CSV:
-                log_bets(bets, short)
-            all_bets.extend(bets)
-        else:
-            print(f"  ❌ {short} — no value")
+            if bets:
+                print(f"\n  ✅ {short} — {len(bets)} value bet(s):")
+                for b in bets:
+                    mv = f" [LINE {b['line_dir']}{b['line_delta']}]" if b["line_moved"] else ""
+                    print(f"    [{b['confidence']}]{mv} {b['match']} → "
+                          f"{b['team']} @{b['odds']} | Edge:+{b['edge']}% | Stake:${b['stake']}")
+                if LOG_CSV:
+                    log_bets(bets, short)
+                all_bets.extend(bets)
+            else:
+                print(f"  ❌ {short} — no value")
+        except Exception as e:
+            print(f"  ⚠️  {sport_key} error (skipping): {e}")
 
     prev_map.update(new_map)
     save_previous_odds(prev_map)
@@ -273,7 +276,10 @@ if __name__ == "__main__":
         print(f"\n{'='*50}\n🕐 {now_cdt.strftime('%Y-%m-%d %H:%M CDT')}")
 
         print(f"🔍 Scan #{scan}")
-        run_scan()
+        try:
+            run_scan()
+        except Exception as e:
+            print(f"  ⚠️  Scan error (will retry next interval): {e}")
         print(f"\n⏳ Next scan in {INTERVAL // 60} min...")
         time.sleep(INTERVAL)
         scan += 1
