@@ -1,0 +1,126 @@
+Add 3 new intelligence modules:
+
+━━━━━━━━━━━━━━━━━━━━
+1. PORCENTAJE PÚBLICO APOSTANDO
+━━━━━━━━━━━━━━━━━━━━
+Fetch public betting % from 
+The Odds API or actionnetwork.com:
+
+For each game show:
+- % público apostando cada lado
+- Dirección de la línea
+
+Logic:
+If public > 65% on one side BUT 
+line moves AGAINST that side:
+→ Sharp money detected (RLM)
+→ Add to sharp alert:
+"👥 Público: 72% en Yankees
+ 📉 Pero línea bajó a favor Red Sox
+ 💎 Dinero profesional en Red Sox"
+
+If public > 65% AND line moves 
+WITH public:
+→ Square action only
+→ Lower confidence
+→ Add: "⚠️ Solo dinero público —
+  sin señal sharp"
+
+Show in all alerts:
+"👥 Apoyo público:
+   Yankees: 68% | Red Sox: 32%"
+
+━━━━━━━━━━━━━━━━━━━━
+2. STEAM MOVES
+━━━━━━━━━━━━━━━━━━━━
+Steam move = multiple books move 
+line same direction within 5 minutes.
+
+Monitor odds every scan cycle.
+If 3+ books move same direction
+within 10 minutes:
+→ STEAM MOVE detected
+→ Send immediate alert:
+
+"🚂 STEAM MOVE DETECTADO
+━━━━━━━━━━━━
+⚾ Yankees vs Red Sox
+📉 Línea movió: 1.85 → 1.72
+   en Bovada, FanDuel, BetOnline
+   en menos de 10 minutos
+
+💎 Dinero serio entrando en Yankees
+⭐ ACCIÓN: Yankees ML ahora
+💰 $45 @ 1.72 — Bovada
+━━━━━━━━━━━━
+🟢 APOSTAR: $45
+Actúa rápido — línea seguirá moviendo"
+
+Steam moves override normal 
+confidence rules → always ALTA
+if steam confirmed on safe books.
+
+━━━━━━━━━━━━━━━━━━━━
+3. LINEUP TITULAR
+━━━━━━━━━━━━━━━━━━━━
+Fetch confirmed lineup from:
+https://statsapi.mlb.com/api/v1/schedule
+?sportId=1&date=TODAY
+&hydrate=lineups,probablePitcher
+
+Extract:
+- Batting order (1-9)
+- Key players: cleanup hitter (4),
+  3-hole, and 5-hole
+
+Show in alert:
+"📋 Lineup Yankees confirmado:
+   Limpiador (#4): Aaron Judge ✅
+   Bateadores clave presentes ✅"
+
+OR if key player missing:
+"⚠️ Lineup Yankees:
+   Aaron Judge FUERA del lineup
+   → Ofensiva reducida → 
+   Reduce proyección 0.5 carreras"
+
+Adjust projected total:
+- Cleanup hitter absent → -0.5 runs
+- 3 or more key players absent → -0.8 runs
+- Full lineup confirmed → no adjustment
+
+Key players to monitor per team:
+Yankees: Judge, Soto
+Red Sox: Devers, Story  
+Dodgers: Ohtani, Freeman
+Braves: Acuña, Olson
+Astros: Altuve, Bregman
+(add all 30 teams key players)
+
+Only show lineup if confirmed
+(within 3 hours of game time).
+If not confirmed → skip silently.
+
+━━━━━━━━━━━━━━━━━━━━
+COMBINED EXAMPLE:
+━━━━━━━━━━━━━━━━━━━━
+⚾ Yankees vs Red Sox
+⏰ Hoy 7:05 PM ET
+━━━━━━━━━━━━
+🎯 APUESTA: Yankees ML
+💰 $50 @ 1.72 — Bovada
+━━━━━━━━━━━━
+👥 Apoyo público:
+   Yankees: 68% | Red Sox: 32%
+   
+📉 Línea bajó 1.85→1.72
+   → Sharps en Yankees ✅
+
+🚂 Steam move confirmado
+   3 libros movieron en 10 min
+
+📋 Lineup Yankees:
+   Judge ✅ | Soto ✅
+   Bateadores clave presentes
+━━━━━━━━━━━━
+🟢 APOSTAR: $50

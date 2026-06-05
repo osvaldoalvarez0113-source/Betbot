@@ -2234,6 +2234,25 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 away_exp = max(0.1, away_exp - 0.3)
             elif k_a < 18:
                 away_exp = min(away_exp + 0.3, 12.0)
+        # ── MLB A8: confirmed lineup (only within 3h of game) ───────────────
+        _lineup = None
+        try:
+            _lineup = _fetch_confirmed_lineup(home, away, commence)
+        except Exception:
+            pass
+
+        if _lineup and _lineup.get("confirmed"):
+            h_miss = _lineup.get("home_missing", [])
+            a_miss = _lineup.get("away_missing", [])
+            # Cleanup or 3-hole absent → -0.5 runs; 2+ key players absent → -0.8
+            if len(h_miss) >= 2:
+                home_exp = max(0.1, home_exp - 0.8)
+            elif len(h_miss) == 1:
+                home_exp = max(0.1, home_exp - 0.5)
+            if len(a_miss) >= 2:
+                away_exp = max(0.1, away_exp - 0.8)
+            elif len(a_miss) == 1:
+                away_exp = max(0.1, away_exp - 0.5)
         # ──────────────────────────────────────────────────────────────────
 
         p_home = pythagorean_win_prob(home_exp, away_exp)
@@ -2371,6 +2390,37 @@ def analyze_game_full(game, sport_key, prev_map=None):
         moved_h, dir_h, dlt_h = detect_line_movement(game_id, home, h_cur, prev_map)
         moved_a, dir_a, dlt_a = detect_line_movement(game_id, away, a_cur, prev_map)
 
+        # ── Public % / RLM estimate ────────────────────────────────────────
+        rlm_data: dict = {}
+        if h_cur > 0 and a_cur > 0:
+            # Shorter odds = public favorite (more bets typically)
+            if h_cur < a_cur:
+                pub_fav, pub_dog = home, away
+            else:
+                pub_fav, pub_dog = away, home
+            rlm_data = {
+                "pub_fav": pub_fav, "pub_pct": 65,
+                "pub_dog": pub_dog, "dog_pct": 35,
+            }
+            fav_moved = moved_h if pub_fav == home else moved_a
+            fav_dir   = dir_h   if pub_fav == home else dir_a
+            if fav_moved:
+                if fav_dir == "+":
+                    # Favorite line drifting → sharp money on underdog = RLM
+                    rlm_data["rlm"]        = True
+                    rlm_data["sharp_side"] = pub_dog
+                    rlm_data["rlm_note"]   = (
+                        f"📉 Línea bajó a favor de {_es(pub_dog)}\n"
+                        f"💎 Dinero profesional en {_es(pub_dog)}"
+                    )
+                else:
+                    # Favorite shortening → square public action, no sharp signal
+                    rlm_data["rlm"]         = False
+                    rlm_data["square_note"] = (
+                        f"⚠️ Solo dinero público en {_es(pub_fav)} — sin señal sharp"
+                    )
+        # ──────────────────────────────────────────────────────────────────
+
         # Module 4: injury check
         il_data = {}
         try:
@@ -2442,6 +2492,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "h2h_note":      _h2h_note, # MLB A6 contradiction warning
             "bat_home":      bat_h,     # MLB A7
             "bat_away":      bat_a,     # MLB A7
+            "rlm_data":      rlm_data,  # Public % / RLM (Module B)
+            "lineup_data":   _lineup,   # Confirmed lineup (MLB A8)
             "pitch_intel": {            # intelligence rules output
                 "notes":         _pitch_notes,
                 "reasoning":     _pitch_reason,
@@ -2830,6 +2882,33 @@ def notify_game_analysis(analyses, sport_key):
                     ctx_lines += f"{insight}\n"
             # ──────────────────────────────────────────────────────────────
 
+            # ── Confirmed lineup display (MLB A8) ─────────────────────────
+            _ld = ctx.get("lineup_data")
+            if _ld and _ld.get("confirmed"):
+                for t_name, t_es, o_key, m_key in (
+                    (home, home_es, "home_order", "home_missing"),
+                    (away, away_es, "away_order", "away_missing"),
+                ):
+                    order   = _ld.get(o_key, {})
+                    missing = _ld.get(m_key, [])
+                    kp      = MLB_KEY_PLAYERS.get(t_name, [])
+                    if not order:
+                        continue
+                    if missing:
+                        ctx_lines += f"⚠️ Lineup {t_es}:\n"
+                        for mp in missing:
+                            ctx_lines += f"   {mp} FUERA del lineup\n"
+                        adj = "0.8 carreras" if len(missing) >= 2 else "0.5 carreras"
+                        ctx_lines += f"   → Reduce proyección {adj}\n"
+                    elif kp:
+                        stars = " ✅ | ".join(p.split()[-1] for p in kp)
+                        ctx_lines += (
+                            f"📋 Lineup {t_es} confirmado:\n"
+                            f"   {stars} ✅\n"
+                            f"   Bateadores clave presentes ✅\n"
+                        )
+            # ──────────────────────────────────────────────────────────────
+
             # Park factor
             ctx_lines += f"{_park_label(ctx['park_factor'])}\n"
             # Team last 5 games
@@ -2998,6 +3077,22 @@ def notify_game_analysis(analyses, sport_key):
 
         if ctx.get("line_moved") and ctx.get("line_note"):
             ctx_lines += f"📉 {ctx['line_note']}\n"
+
+        # ── Public % / RLM display ────────────────────────────────────────
+        _rlm = ctx.get("rlm_data")
+        if _rlm:
+            pub_es = _es(_rlm["pub_fav"])
+            dog_es = _es(_rlm["pub_dog"])
+            ctx_lines += (
+                f"👥 Apoyo público estimado:\n"
+                f"   {pub_es}: ~{_rlm['pub_pct']}%  |  "
+                f"{dog_es}: ~{_rlm['dog_pct']}%\n"
+            )
+            if _rlm.get("rlm") is True:
+                ctx_lines += f"{_rlm['rlm_note']}\n"
+            elif _rlm.get("rlm") is False:
+                ctx_lines += f"{_rlm['square_note']}\n"
+        # ──────────────────────────────────────────────────────────────────
 
         # Smart timing warning (soccer 3-7 days)
         if tc.get("warn"):
@@ -4340,6 +4435,7 @@ def send_weekly_summary():
 def analyze(games, prev_map, new_map, sport_key=""):
     bets        = []
     sharp_moves = []
+    steam_moves = []
     _is_mlb     = "mlb" in sport_key
 
     for g in games:
@@ -4401,6 +4497,13 @@ def analyze(games, prev_map, new_map, sport_key=""):
             analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map)
         )
 
+        # Steam move detection (per-book tracking written into new_map)
+        steam_moves.extend(
+            detect_steam_moves_for_game(
+                game_id, home, away, bookmakers, prev_map, new_map
+            )
+        )
+
         new_map[f"{game_id}_{home}"] = best_h
         new_map[f"{game_id}_{away}"] = best_a
 
@@ -4445,7 +4548,7 @@ def analyze(games, prev_map, new_map, sport_key=""):
                 "top3_books":   top3,  # Module 9: line shopping
             })
 
-    return bets, sharp_moves
+    return bets, sharp_moves, steam_moves
 
 def notify_bets(new_bets):
     global alerted_bets
@@ -4644,6 +4747,212 @@ def check_midnight_reset():
         last_reset    = today
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MODULE B — PUBLIC % / RLM  ·  STEAM MOVES  ·  CONFIRMED LINEUP
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── B1: Key players per team (all 30 MLB teams) ───────────────────────────────
+MLB_KEY_PLAYERS: "dict[str, list[str]]" = {
+    "New York Yankees":       ["Aaron Judge", "Juan Soto"],
+    "Boston Red Sox":         ["Rafael Devers", "Jarren Duran"],
+    "Los Angeles Dodgers":    ["Shohei Ohtani", "Freddie Freeman"],
+    "Atlanta Braves":         ["Ronald Acuna Jr.", "Matt Olson"],
+    "Houston Astros":         ["Jose Altuve", "Alex Bregman"],
+    "New York Mets":          ["Francisco Lindor", "Pete Alonso"],
+    "Philadelphia Phillies":  ["Bryce Harper", "Trea Turner"],
+    "San Diego Padres":       ["Fernando Tatis Jr.", "Manny Machado"],
+    "Seattle Mariners":       ["Julio Rodriguez", "Cal Raleigh"],
+    "Baltimore Orioles":      ["Gunnar Henderson", "Adley Rutschman"],
+    "Texas Rangers":          ["Corey Seager", "Marcus Semien"],
+    "Toronto Blue Jays":      ["Vladimir Guerrero Jr.", "Bo Bichette"],
+    "Minnesota Twins":        ["Byron Buxton", "Carlos Correa"],
+    "Cleveland Guardians":    ["Jose Ramirez", "Steven Kwan"],
+    "Detroit Tigers":         ["Riley Greene", "Spencer Torkelson"],
+    "Chicago White Sox":      ["Luis Robert Jr.", "Andrew Vaughn"],
+    "Kansas City Royals":     ["Bobby Witt Jr.", "Vinnie Pasquantino"],
+    "Tampa Bay Rays":         ["Randy Arozarena", "Yandy Diaz"],
+    "Los Angeles Angels":     ["Mike Trout", "Anthony Rendon"],
+    "Oakland Athletics":      ["Brent Rooker", "Lawrence Butler"],
+    "Chicago Cubs":           ["Cody Bellinger", "Ian Happ"],
+    "St. Louis Cardinals":    ["Nolan Arenado", "Paul Goldschmidt"],
+    "Milwaukee Brewers":      ["Christian Yelich", "Rhys Hoskins"],
+    "Cincinnati Reds":        ["Elly De La Cruz", "Jonathan India"],
+    "Pittsburgh Pirates":     ["Ke'Bryan Hayes", "Bryan Reynolds"],
+    "Arizona Diamondbacks":   ["Corbin Carroll", "Christian Walker"],
+    "San Francisco Giants":   ["Matt Chapman", "Patrick Bailey"],
+    "Colorado Rockies":       ["Ryan McMahon", "Ezequiel Tovar"],
+    "Miami Marlins":          ["Jazz Chisholm Jr.", "Jorge Soler"],
+    "Washington Nationals":   ["CJ Abrams", "Lane Thomas"],
+}
+
+# ── B2: Confirmed lineup fetch ─────────────────────────────────────────────────
+_lineup_cache: "dict[str, dict]" = {}
+
+def _fetch_confirmed_lineup(home: str, away: str, commence: str) -> "dict | None":
+    """
+    Fetch confirmed batting lineup from MLB Stats API.
+    Only checked within 3 hours of first pitch.
+    Returns None if lineup not yet posted or game is too far away.
+    """
+    try:
+        from datetime import datetime, timezone
+        now_utc  = datetime.now(timezone.utc)
+        game_dt  = datetime.fromisoformat(commence.replace("Z", "+00:00"))
+        mins_to  = (game_dt - now_utc).total_seconds() / 60
+        if mins_to > 180 or mins_to < -60:
+            return None
+
+        cache_key = f"lineup_{home}_{away}_{commence[:10]}"
+        if cache_key in _lineup_cache:
+            return _lineup_cache[cache_key]
+
+        game_date = commence[:10]
+        url  = (
+            f"{MLB_BASE}/schedule"
+            f"?sportId=1&date={game_date}"
+            f"&hydrate=lineups,probablePitcher"
+        )
+        data = _mlb_get(url)
+
+        result = None
+        for date_block in data.get("dates", []):
+            for g in date_block.get("games", []):
+                teams = g.get("teams", {})
+                g_home = teams.get("home", {}).get("team", {}).get("name", "")
+                g_away = teams.get("away", {}).get("team", {}).get("name", "")
+                home_w = home.split()[-1].lower()
+                away_w = away.split()[-1].lower()
+                if home_w not in g_home.lower() and away_w not in g_away.lower():
+                    continue
+
+                lineups      = g.get("lineups", {})
+                home_players = lineups.get("homePlayers", [])
+                away_players = lineups.get("awayPlayers", [])
+                if not home_players and not away_players:
+                    break
+
+                def _order(players):
+                    order = {}
+                    for p in players:
+                        bo = p.get("battingOrder")
+                        if bo is not None:
+                            slot = int(str(bo)) // 100
+                            order[slot] = p.get("fullName", "")
+                    return order
+
+                home_order = _order(home_players)
+                away_order = _order(away_players)
+
+                def _missing_keys(team_name, order):
+                    if not order:
+                        return []
+                    kp = MLB_KEY_PLAYERS.get(team_name, [])
+                    return [
+                        p for p in kp
+                        if not any(
+                            p.split()[-1].lower() in v.lower()
+                            for v in order.values()
+                        )
+                    ]
+
+                result = {
+                    "home_order":   home_order,
+                    "away_order":   away_order,
+                    "home_missing": _missing_keys(home, home_order),
+                    "away_missing": _missing_keys(away, away_order),
+                    "confirmed":    bool(home_order or away_order),
+                }
+                break
+            if result:
+                break
+
+        if result:
+            _lineup_cache[cache_key] = result
+        return result
+    except Exception:
+        return None
+
+# ── B3: Steam move detection ───────────────────────────────────────────────────
+
+def detect_steam_moves_for_game(
+    game_id: str,
+    home: str,
+    away: str,
+    bookmakers: list,
+    prev_map: dict,
+    new_map: dict,
+) -> "list[dict]":
+    """
+    Steam move: 3+ books all move the same direction (≥ 0.05) in one scan.
+    Also writes per-book odds into new_map for the next scan comparison.
+    """
+    results = []
+    for team in (home, away):
+        ups: list   = []
+        downs: list = []
+        for bk in bookmakers:
+            slug    = bk["title"].lower().replace(" ", "_").replace(".", "")
+            bk_key  = f"{game_id}_{team}_{slug}"
+            cur_price = None
+            for m in bk.get("markets", []):
+                if m["key"] == "h2h":
+                    for o in m.get("outcomes", []):
+                        if o["name"] == team:
+                            cur_price = o["price"]
+                            break
+            if cur_price is None:
+                continue
+            new_map[bk_key] = cur_price
+            prev_price = prev_map.get(bk_key)
+            if prev_price is None:
+                continue
+            delta = cur_price - prev_price
+            if delta > 0.05:
+                ups.append(  {"book": bk["title"], "prev": prev_price, "now": cur_price})
+            elif delta < -0.05:
+                downs.append({"book": bk["title"], "prev": prev_price, "now": cur_price})
+
+        if len(ups) >= 3 or len(downs) >= 3:
+            steam_books = ups if len(ups) >= len(downs) else downs
+            direction   = "up" if len(ups) >= len(downs) else "down"
+            results.append({
+                "match":     f"{home} vs {away}",
+                "team":      team,
+                "direction": direction,
+                "books":     steam_books,
+                "odds_from": steam_books[0]["prev"],
+                "odds_to":   steam_books[-1]["now"],
+            })
+    return results
+
+
+def notify_steam_moves(steam_list: list):
+    """Send immediate urgent alert for each confirmed steam move."""
+    for s in steam_list:
+        home, away = s["match"].split(" vs ", 1)
+        key = f"{home}_{away}_{s['team']}_steam"
+        if not _should_alert(key, odds=s["odds_to"]):
+            continue
+        arrow      = "▲" if s["direction"] == "up" else "▼"
+        book_names = ", ".join(b["book"] for b in s["books"][:4])
+        n_books    = len(s["books"])
+        body = (
+            f"⚾ {s['match']}\n"
+            f"{_DIV}\n"
+            f"📉 Línea movió: {s['odds_from']:.2f} → {s['odds_to']:.2f} {arrow}\n"
+            f"   en {book_names}\n"
+            f"   ({n_books} libros en menos de 10 minutos)\n"
+            f"\n"
+            f"💎 Dinero serio entrando en {_es(s['team'])}\n"
+            f"⭐ ACCIÓN: {_es(s['team'])} ML ahora\n"
+            f"💰 {s['odds_to']:.2f} — {s['books'][-1]['book']}\n"
+            f"{_DIV3}\n"
+            f"🟢 APOSTAR AHORA — línea seguirá moviendo\n"
+            f"{_DIV2}"
+        )
+        ntfy_post(f"🚂 STEAM | {_es(s['team'])} | {s['match']}", body, "urgent")
+        print(f"  🚂 Steam: {s['team']} en {s['match']} ({n_books} libros)")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PARLAY DETECTOR
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -4804,6 +5113,7 @@ def run_scan():
     all_arbs          = []
     all_totals        = []
     all_full_analyses = []   # parlay detector — collects across all sports
+    all_steams        = []   # steam moves — collects across all sports
     now_month  = datetime.now(CDT).month
 
     # Improvement 4: bankroll dashboard at top of every scan
@@ -4845,7 +5155,7 @@ def run_scan():
 
             current_games_by_sport[sport_key] = games   # for CLV check
 
-            bets, sharp_moves = analyze(games, prev_map, new_map, sport_key)
+            bets, sharp_moves, steam_moves = analyze(games, prev_map, new_map, sport_key)
             total_bets = analyze_totals(games, sport_key)
             arbs = scan_arbitrage(games, sport_key)
             for m in sharp_moves:
@@ -4892,6 +5202,10 @@ def run_scan():
                 print(f"  ⚡ {short} — {len(sharp_moves)} sharp move(s)")
                 all_sharp.extend(sharp_moves)
 
+            if steam_moves:
+                print(f"  🚂 {short} — {len(steam_moves)} steam move(s)")
+                all_steams.extend(steam_moves)
+
             if arbs:
                 print(f"  💰 {short} — {len(arbs)} arb opportunity(ies)")
                 all_arbs.extend(arbs)
@@ -4913,6 +5227,8 @@ def run_scan():
         notify_totals(all_totals)
     if all_sharp:
         notify_sharp_money(all_sharp)
+    if all_steams:
+        notify_steam_moves(all_steams)
     if all_arbs:
         notify_arbitrage(all_arbs)
 
