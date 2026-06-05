@@ -1,0 +1,109 @@
+Add analysis improvements for BOTH 
+MLB and Soccer/World Cup:
+
+━━━━━━━━━━━━━━━━━━━━
+MLB IMPROVEMENTS:
+━━━━━━━━━━━━━━━━━━━━
+
+1. PITCHER FORMA RECIENTE:
+Fetch last 3 starts per pitcher.
+Show ERA últimas 3 salidas + tendencia:
+"📈 Últimas 3: 1.2, 0.0, 2.1 → DOMINANDO 🔥"
+"📉 Últimas 3: 5.4, 6.2, 4.8 → EN DECLIVE ⚠️"
+
+2. UMPIRE DEL HOME PLATE:
+Fetch from MLB Stats API officials.
+Classify tendency:
+→ Favorece UNDER (zona expandida)
+→ Favorece OVER (zona apretada)
+Show: "👨‍⚖ Umpire: [Nombre] → Favorece: UNDER"
+
+3. TEMPERATURA MLB:
+< 55°F → 🥶 Frío: -0.3 carreras
+> 85°F → 🌡️ Calor: +0.3 carreras
+Show adjustment in alert.
+
+━━━━━━━━━━━━━━━━━━━━
+SOCCER IMPROVEMENTS:
+━━━━━━━━━━━━━━━━━━━━
+
+1. FORMA RECIENTE DEL EQUIPO:
+Last 3 matches per team:
+- Goles anotados promedio
+- Goles recibidos promedio
+- Resultado: W/D/L últimos 3
+
+Show in alert:
+"🔵 España últimas 3:
+   Goles a favor: 2.3/juego
+   Goles en contra: 0.7/juego
+   Forma: W W W 🔥"
+
+"🔴 Marruecos últimas 3:
+   Goles a favor: 1.0/juego
+   Goles en contra: 1.3/juego
+   Forma: W D L ⚠️"
+
+2. ÁRBITRO DEL PARTIDO:
+FIFA referees have different tendencies:
+- Árbitros permisivos → más juego físico
+  → más faltas → más penaltis → más goles
+  → Favorece OVER
+- Árbitros estrictos → más tarjetas
+  → juego más lento → menos goles
+  → Favorece UNDER
+
+Fetch referee from tournament schedule.
+Show: "🟨 Árbitro: [Nombre]
+       → Promedio: X.X goles/partido
+       → Favorece: OVER/UNDER"
+
+3. TEMPERATURA FÚTBOL:
+< 50°F → 🥶 Frío: -0.2 goles proyectados
+> 90°F → 🌡️ Calor extremo: -0.3 goles
+  (equipos se cansan más → menos ritmo)
+Show adjustment in alert.
+
+4. NECESIDAD TÁCTICA MUNDIAL:
+Already implemented but enhance:
+If team MUST WIN to advance:
+→ "🔴 URGENTE: necesitan ganar
+   → Atacarán desde el inicio
+   → Favorece OVER y ML del equipo
+      débil (pueden recibir contraataque)"
+
+━━━━━━━━━━━━━━━━━━━━
+COMBINED SOCCER EXAMPLE:
+━━━━━━━━━━━━━━━━━━━━
+⚽ España vs Marruecos — Mundial
+⏰ Hoy 6:00 PM ET
+━━━━━━━━━━━━
+🎯 APUESTA: España GANA (ML)
+💰 $65 @ 1.45 — Bovada
+━━━━━━━━━━━━
+📊 POR QUÉ:
+Modelo: 74% | Libro: 69% → Edge 5%
+
+🔵 España últimas 3:
+   ⚽ 2.3 goles/juego | 🛡️ 0.7 rec.
+   Forma: W W W 🔥
+
+🔴 Marruecos últimas 3:
+   ⚽ 1.0 goles/juego | 🛡️ 1.3 rec.
+   Forma: W D L ⚠️
+
+🟨 Árbitro: Felix Brych
+   → Promedio: 2.4 goles/partido
+   → Favorece: UNDER ⚠️
+
+🌡️ Temperatura: 88°F Miami
+   → Calor: -0.2 goles ajustado
+   
+📋 España: clasificada — sin presión
+   Marruecos: necesita ganar 🔴
+━━━━━━━━━━━━
+🟢 APOSTAR: $65
+
+Apply try/except to all new modules.
+Skip silently if data unavailable.
+Commit after each module is complete.

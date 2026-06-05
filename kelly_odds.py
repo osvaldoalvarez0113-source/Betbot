@@ -1313,12 +1313,11 @@ def fetch_wind(lat, lon):
         )
         if r.status_code != 200:
             return None
-        w     = r.json().get('wind', {})
+        jd    = r.json()
+        w     = jd.get('wind', {})
         speed = round(float(w.get('speed', 0)), 1)
         deg   = float(w.get('deg', 0))
-        # Wind direction convention: degrees = direction wind is COMING FROM
-        # OUT = blowing from west (toward east / outfield in most parks)
-        # IN  = blowing from east (toward west / home plate)
+        temp_f = jd.get('main', {}).get('temp', None)   # °F (imperial units)
         if 225 <= deg <= 315:
             label = 'OUT'
         elif 45 <= deg <= 135:
@@ -1326,7 +1325,7 @@ def fetch_wind(lat, lon):
         else:
             label = 'CROSS'
         result = {'speed': speed, 'deg': deg, 'label': label,
-                  'fetched_at': datetime.now(pytz.utc)}
+                  'temp_f': temp_f, 'fetched_at': datetime.now(pytz.utc)}
         _weather_cache[city_key] = result
         return result
     except Exception:
@@ -1779,19 +1778,46 @@ def analyze_game_full(game, sport_key, prev_map=None):
         except Exception:
             pass
 
+        # MLB A1: pitcher recent form (last 3 starts)
+        pform_h = pform_a = None
+        try:
+            pform_h = fetch_pitcher_recent_form(h_pname)
+            pform_a = fetch_pitcher_recent_form(a_pname)
+        except Exception:
+            pass
+
+        # MLB A2: home plate umpire
+        umpire = None
+        try:
+            game_date = commence[:10]
+            umpire    = fetch_home_plate_umpire(home, game_date)
+        except Exception:
+            pass
+
+        # MLB A3: temperature adjustment
+        temp_f     = (wind.get("temp_f") if wind else None)
+        t_adj, t_label = _temp_run_adj(temp_f)
+        # apply temperature to projected totals
+        home_exp = max(0.1, home_exp + t_adj / 2)
+        away_exp = max(0.1, away_exp + t_adj / 2)
+
         context = {
-            "pitcher_home": f"{h_pname} (ERA {h_era:.2f})",
-            "pitcher_away": f"{a_pname} (ERA {a_era:.2f})",
+            "pitcher_home":  f"{h_pname} (ERA {h_era:.2f})",
+            "pitcher_away":  f"{a_pname} (ERA {a_era:.2f})",
             "rs_home": f"{h_stats['rs_pg']:.1f}", "ra_home": f"{h_stats['ra_pg']:.1f}",
             "rs_away": f"{a_stats['rs_pg']:.1f}", "ra_away": f"{a_stats['ra_pg']:.1f}",
-            "park_factor": park,
-            "wind_info":   w_label,
-            "line_moved":  moved_h or moved_a,
-            "line_note":   (f"Línea {home} {dir_h}{dlt_h}" if moved_h
-                           else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
-            "il_data":     il_data,   # Module 4
-            "h_splits":    h_splits,  # Module 6
-            "a_splits":    a_splits,  # Module 6
+            "park_factor":   park,
+            "wind_info":     w_label,
+            "temp_label":    t_label,   # MLB A3
+            "line_moved":    moved_h or moved_a,
+            "line_note":     (f"Línea {home} {dir_h}{dlt_h}" if moved_h
+                              else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
+            "il_data":       il_data,   # Module 4
+            "h_splits":      h_splits,  # Module 6
+            "a_splits":      a_splits,  # Module 6
+            "pform_h":       pform_h,   # MLB A1
+            "pform_a":       pform_a,   # MLB A1
+            "umpire":        umpire,    # MLB A2
         }
 
     # ── SOCCER ────────────────────────────────────────────────────────────────
@@ -1875,17 +1901,50 @@ def analyze_game_full(game, sport_key, prev_map=None):
         except Exception:
             pass
 
+        # Soccer S1: recent form detail (last 3 matches)
+        sform_h = sform_a = None
+        try:
+            sform_h = fetch_soccer_team_recent(home, sport_key)
+            sform_a = fetch_soccer_team_recent(away, sport_key)
+        except Exception:
+            pass
+
+        # Soccer S2: match referee
+        referee = None
+        try:
+            referee = fetch_match_referee(home, away, sport_key)
+        except Exception:
+            pass
+
+        # Soccer S3: venue temperature
+        t_adj_g  = 0.0
+        t_label_s = ""
+        try:
+            venue_city = (referee.get("venue_city", "") if referee else "")
+            temp_f_s   = fetch_venue_temp(venue_city) if venue_city else None
+            t_adj_g, t_label_s = _temp_goals_adj(temp_f_s)
+        except Exception:
+            pass
+
+        # Apply temp goal adjustment to projected totals
+        blend_h = max(0.1, blend_h + t_adj_g / 2)
+        blend_a = max(0.1, blend_a + t_adj_g / 2)
+
         context = {
             "elo_home": elo_h, "elo_away": elo_a, "elo_diff": elo_h - elo_a,
             "form_home": form_note_h,
             "form_away": form_note_a,
             "conceded_home": (f"{form_h['goals_against']:.1f}" if form_h else "N/A"),
             "conceded_away": (f"{form_a['goals_against']:.1f}" if form_a else "N/A"),
-            "p_draw":    round(p_draw * 100, 1),
+            "p_draw":     round(p_draw * 100, 1),
             "line_moved": moved_h or moved_a,
-            "line_note": (f"Línea {home} {dir_h}{dlt_h}" if moved_h
-                         else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
-            "wc_standings": wc_standings,   # Module 5
+            "line_note":  (f"Línea {home} {dir_h}{dlt_h}" if moved_h
+                          else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
+            "wc_standings": wc_standings,  # Module 5
+            "sform_h":   sform_h,          # Soccer S1
+            "sform_a":   sform_a,          # Soccer S1
+            "referee":   referee,          # Soccer S2
+            "temp_label_s": t_label_s,     # Soccer S3
         }
 
     # Drop any pick whose true probability is below the minimum threshold
@@ -1947,6 +2006,23 @@ def notify_game_analysis(analyses, sport_key):
                 f"📊 RS/RA visita:   {ctx['rs_away']} / {ctx['ra_away']} por juego\n"
                 f"🏟️  Factor parque:  x{ctx['park_factor']:.2f}\n"
             )
+            # MLB A1: pitcher recent form
+            pf_h = ctx.get("pform_h")
+            pf_a = ctx.get("pform_a")
+            if pf_h:
+                eras_str = ", ".join(f"{e:.1f}" for e in pf_h["eras"])
+                ctx_lines += f"📈 {home_es} últ. 3: {eras_str} → {pf_h['trend']}\n"
+            if pf_a:
+                eras_str = ", ".join(f"{e:.1f}" for e in pf_a["eras"])
+                ctx_lines += f"📈 {away_es} últ. 3: {eras_str} → {pf_a['trend']}\n"
+            # MLB A2: umpire
+            ump = ctx.get("umpire")
+            if ump and ump.get("name"):
+                tend_icon = "📈 OVER" if ump["tendency"] == "OVER" else ("📉 UNDER" if ump["tendency"] == "UNDER" else "➡️ NEUTRAL")
+                ctx_lines += f"👨‍⚖️ Ump: {ump['name']} — {ump['zone']} → Favorece: {tend_icon}\n"
+            # MLB A3: temperature
+            if ctx.get("temp_label"):
+                ctx_lines += f"{ctx['temp_label']}\n"
             if ctx.get("wind_info"):
                 ctx_lines += f"💨 {ctx['wind_info']}\n"
             # Module 4: injury warnings
@@ -1958,9 +2034,9 @@ def notify_game_analysis(analyses, sport_key):
             as_ = ctx.get("a_splits", {})
             if hs.get("home_rs"):
                 ctx_lines += (
-                    f"🏠 {home} en casa: RS {hs['home_rs']} | RA {hs['home_ra']} | "
+                    f"🏠 {home_es} en casa: RS {hs['home_rs']} | RA {hs['home_ra']} | "
                     f"{hs['home_wpct']*100:.0f}% win\n"
-                    f"🚗 {away} de visita: RS {as_['away_rs']} | RA {as_['away_ra']} | "
+                    f"🚗 {away_es} de visita: RS {as_['away_rs']} | RA {as_['away_ra']} | "
                     f"{as_['away_wpct']*100:.0f}% win\n"
                 )
         else:
@@ -1973,13 +2049,49 @@ def notify_game_analysis(analyses, sport_key):
                 f"   Concedidos:   {ctx['conceded_away']} / partido\n"
                 f"🤝 Prob. empate: {ctx['p_draw']}%\n"
             )
-            # Module 5: WC group urgency
+            # Soccer S1: last 3 match detail
+            sf_h = ctx.get("sform_h")
+            sf_a = ctx.get("sform_a")
+            if sf_h:
+                res_str = " ".join(sf_h["results"])
+                ctx_lines += (
+                    f"🔵 {home_es} últ. {sf_h['n']}:\n"
+                    f"   ⚽ {sf_h['gf_pg']}/juego | 🛡️ {sf_h['ga_pg']} rec.\n"
+                    f"   Forma: {res_str} {sf_h['emoji']}\n"
+                )
+            if sf_a:
+                res_str = " ".join(sf_a["results"])
+                ctx_lines += (
+                    f"🔴 {away_es} últ. {sf_a['n']}:\n"
+                    f"   ⚽ {sf_a['gf_pg']}/juego | 🛡️ {sf_a['ga_pg']} rec.\n"
+                    f"   Forma: {res_str} {sf_a['emoji']}\n"
+                )
+            # Soccer S2: referee
+            ref = ctx.get("referee")
+            if ref and ref.get("name"):
+                ctx_lines += (
+                    f"🟨 Árbitro: {ref['name']}\n"
+                    f"   → Promedio: {ref['goals_pg']:.1f} goles/partido\n"
+                    f"   → Favorece: {ref['tendency']}\n"
+                )
+            # Soccer S3: temperature
+            if ctx.get("temp_label_s"):
+                ctx_lines += f"{ctx['temp_label_s']}\n"
+            # Module 5: WC group urgency (enhanced)
             standings = ctx.get("wc_standings", {})
             if standings:
-                for tname in (home, away):
+                for tname, tname_es in ((home, home_es), (away, away_es)):
                     urg = _wc_urgency_line(tname, standings)
                     if urg:
-                        ctx_lines += f"📋 {urg}\n"
+                        # Enhanced: detect must-win urgency
+                        if "necesita" in urg.lower() or "eliminado" in urg.lower():
+                            ctx_lines += (
+                                f"🔴 URGENTE {tname_es}: necesitan ganar\n"
+                                f"   → Atacarán desde el inicio\n"
+                                f"   → Favorece OVER y ML rival (contraataque)\n"
+                            )
+                        else:
+                            ctx_lines += f"📋 {urg}\n"
 
         if ctx.get("line_moved") and ctx.get("line_note"):
             ctx_lines += f"📉 {ctx['line_note']}\n"
@@ -2687,6 +2799,324 @@ def fetch_mlb_home_away_splits(team_name):
         return result
     except Exception:
         return empty
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ANALYSIS IMPROVEMENTS — MLB & SOCCER (7 new data modules)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Temperature adjustments ───────────────────────────────────────────────────
+def _temp_run_adj(temp_f) -> tuple:
+    """MLB: cold suppresses runs, heat boosts slightly. Returns (adj, label)."""
+    if temp_f is None:
+        return 0.0, ""
+    t = float(temp_f)
+    if t < 55:
+        return -0.3, f"🥶 Frío ({t:.0f}°F): -0.3 carreras ajustadas"
+    if t > 85:
+        return +0.3, f"🌡️ Calor ({t:.0f}°F): +0.3 carreras ajustadas"
+    return 0.0, f"🌤️ Temp: {t:.0f}°F"
+
+def _temp_goals_adj(temp_f) -> tuple:
+    """Soccer: extreme temps reduce pace/goals. Returns (adj, label)."""
+    if temp_f is None:
+        return 0.0, ""
+    t = float(temp_f)
+    if t < 50:
+        return -0.2, f"🥶 Frío ({t:.0f}°F): -0.2 goles proyectados"
+    if t > 90:
+        return -0.3, f"🌡️ Calor extremo ({t:.0f}°F): -0.3 goles proyectados"
+    return 0.0, f"🌤️ Temp: {t:.0f}°F"
+
+# ── MLB A1: Pitcher recent form (last 3 starts) ────────────────────────────────
+_pitcher_form_cache: dict = {}
+
+def fetch_pitcher_recent_form(pitcher_name: str) -> dict | None:
+    """
+    Last 3 starts ERA + trend for a named pitcher via MLB Stats API game log.
+    Returns {eras: [float,...], trend: str, avg_era: float} or None.
+    """
+    if not pitcher_name or pitcher_name in ("TBD", ""):
+        return None
+    if pitcher_name in _pitcher_form_cache:
+        return _pitcher_form_cache[pitcher_name]
+    try:
+        # Look up player ID
+        search = _mlb_rest("/people/search", {"names": pitcher_name, "sportId": 1})
+        people = search.get("people", []) if search else []
+        if not people:
+            return None
+        pid    = people[0]["id"]
+        season = datetime.now().year
+        data   = _mlb_rest(f"/people/{pid}/stats", {
+            "stats": "gameLog", "group": "pitching",
+            "season": season, "limit": 10,
+        })
+        splits = (data.get("stats", [{}])[0].get("splits", [])
+                  if data and data.get("stats") else [])
+        # Only real starts (IP ≥ 1.0)
+        starts = []
+        for s in splits:
+            ip_raw = s.get("stat", {}).get("inningsPitched", "0") or "0"
+            if float(ip_raw) >= 1.0:
+                starts.append(s)
+        last3 = starts[-3:] if len(starts) >= 3 else starts
+        if not last3:
+            return None
+        eras = []
+        for s in last3:
+            ip = float(s["stat"].get("inningsPitched", "0") or "0")
+            er = float(s["stat"].get("earnedRuns", "0") or "0")
+            eras.append(round(er / ip * 9, 2) if ip > 0 else 0.0)
+        avg_era = round(sum(eras) / len(eras), 2)
+        # Trend
+        if len(eras) >= 2 and eras[-1] < eras[0] - 1.5:
+            trend = "MEJORANDO 📈"
+        elif len(eras) >= 2 and eras[-1] > eras[0] + 1.5:
+            trend = "EN DECLIVE ⚠️"
+        elif avg_era < 2.5:
+            trend = "DOMINANDO 🔥"
+        elif avg_era < 4.0:
+            trend = "ESTABLE ✅"
+        else:
+            trend = "EN DECLIVE ⚠️"
+        result = {"eras": eras, "trend": trend, "avg_era": avg_era}
+        _pitcher_form_cache[pitcher_name] = result
+        return result
+    except Exception:
+        return None
+
+# ── MLB A2: Home plate umpire ──────────────────────────────────────────────────
+_umpire_cache: dict = {}
+
+# Known umpire ball/strike tendencies (OVER = tight zone → more baserunners;
+# UNDER = wide zone → quicker outs → fewer runs)
+_UMPIRE_TENDENCIES: dict = {
+    "Angel Hernandez":  ("OVER",  "zona apretada"),
+    "CB Bucknor":       ("OVER",  "zona apretada"),
+    "Laz Diaz":         ("OVER",  "zona apretada"),
+    "Chris Guccione":   ("OVER",  "zona apretada"),
+    "Dan Iassogna":     ("OVER",  "zona apretada"),
+    "Mike Muchlinski":  ("OVER",  "zona apretada"),
+    "Ryan Additon":     ("OVER",  "zona apretada"),
+    "Phil Cuzzi":       ("UNDER", "zona expandida"),
+    "Kerwin Danley":    ("UNDER", "zona expandida"),
+    "Ted Barrett":      ("UNDER", "zona expandida"),
+    "Bruce Dreckman":   ("UNDER", "zona expandida"),
+    "Jerry Layne":      ("UNDER", "zona expandida"),
+    "Mark Carlson":     ("UNDER", "zona expandida"),
+    "Greg Gibson":      ("UNDER", "zona expandida"),
+    "Tom Hallion":      ("UNDER", "zona expandida"),
+    "Alfonso Marquez":  ("UNDER", "zona expandida"),
+    "David Rackley":    ("UNDER", "zona expandida"),
+    "Cory Blaser":      ("UNDER", "zona expandida"),
+    "Tripp Gibson":     ("UNDER", "zona expandida"),
+    "Doug Eddings":     ("OVER",  "zona apretada"),
+    "Jordan Baker":     ("OVER",  "zona apretada"),
+    "Bill Miller":      ("UNDER", "zona expandida"),
+    "Vic Carapazza":    ("OVER",  "zona apretada"),
+}
+
+def fetch_home_plate_umpire(home_team: str, game_date: str) -> dict | None:
+    """
+    Fetch home plate umpire via MLB Stats API schedule with officials hydration.
+    game_date: 'YYYY-MM-DD'. Returns {name, tendency, zone} or None.
+    """
+    ck = f"{home_team}_{game_date}"
+    if ck in _umpire_cache:
+        return _umpire_cache[ck]
+    try:
+        data = _mlb_rest("/schedule", {
+            "sportId": 1, "date": game_date,
+            "hydrate": "officials",
+            "fields": "dates,games,gamePk,teams,home,teamName,officials,officialType,official,fullName",
+        })
+        if not data:
+            return None
+        for date_entry in data.get("dates", []):
+            for game in date_entry.get("games", []):
+                home_nm = (game.get("teams", {}).get("home", {})
+                           .get("team", {}).get("teamName", ""))
+                if home_nm.lower() not in home_team.lower() and home_team.lower() not in home_nm.lower():
+                    continue
+                for official in game.get("officials", []):
+                    if official.get("officialType") == "Home Plate":
+                        name      = official.get("official", {}).get("fullName", "")
+                        tendency, zone = _UMPIRE_TENDENCIES.get(name, ("NEUTRAL", "zona normal"))
+                        res = {"name": name, "tendency": tendency, "zone": zone}
+                        _umpire_cache[ck] = res
+                        return res
+        return None
+    except Exception:
+        return None
+
+# ── Soccer S1: Team recent form detail (last 3 matches) ───────────────────────
+_soccer_recent_cache: dict = {}
+
+def fetch_soccer_team_recent(team: str, sport_key: str) -> dict | None:
+    """
+    Last 3 completed matches via Odds API scores endpoint.
+    Returns {gf_pg, ga_pg, results: ['W','D','L',...], emoji, n} or None.
+    """
+    ck = f"{team}_{sport_key}_{datetime.now().strftime('%Y-%m-%d')}"
+    if ck in _soccer_recent_cache:
+        return _soccer_recent_cache[ck]
+    try:
+        url = (f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/"
+               f"?apiKey={API_KEY}&daysFrom=14&dateFormat=iso")
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        games = [g for g in r.json()
+                 if (g.get("home_team") == team or g.get("away_team") == team)
+                 and g.get("completed") is True]
+        games.sort(key=lambda g: g.get("commence_time", ""), reverse=True)
+        last3 = games[:3]
+        if not last3:
+            return None
+        gf = ga = 0
+        results = []
+        for g in last3:
+            is_home  = g["home_team"] == team
+            sc_list  = g.get("scores") or []
+            scores   = {s["name"]: int(s["score"]) for s in sc_list
+                        if s.get("score") is not None}
+            my_score  = scores.get(team, 0)
+            opp       = g["away_team"] if is_home else g["home_team"]
+            opp_score = scores.get(opp, 0)
+            gf += my_score
+            ga += opp_score
+            if my_score > opp_score:   results.append("W")
+            elif my_score == opp_score: results.append("D")
+            else:                       results.append("L")
+        n    = len(last3)
+        wins = results.count("W")
+        emoji = ("🔥" if wins == 3 else
+                 "✅" if wins >= 2 else
+                 "⚠️" if wins == 0 else "➡️")
+        res = {"gf_pg": round(gf / n, 1), "ga_pg": round(ga / n, 1),
+               "results": results, "emoji": emoji, "n": n}
+        _soccer_recent_cache[ck] = res
+        return res
+    except Exception:
+        return None
+
+# ── Soccer S2: Match referee + tendency ───────────────────────────────────────
+_referee_cache: dict = {}
+
+# FIFA/UEFA referee historical goals-per-game and OVER/UNDER tendency
+_REF_TENDENCIES: dict = {
+    "Felix Brych":         (2.4, "UNDER ⚠️"),
+    "Slavko Vincic":       (2.1, "UNDER ⚠️"),
+    "Slavko Vinčić":       (2.1, "UNDER ⚠️"),
+    "Szymon Marciniak":    (3.1, "OVER ✅"),
+    "Antonio Mateu":       (3.8, "OVER ✅"),
+    "Antonio Mateu Lahoz": (3.8, "OVER ✅"),
+    "Clement Turpin":      (2.8, "NEUTRAL ➡️"),
+    "Clément Turpin":      (2.8, "NEUTRAL ➡️"),
+    "Daniele Orsato":      (2.5, "UNDER ⚠️"),
+    "Danny Makkelie":      (3.0, "NEUTRAL ➡️"),
+    "Ismail Elfath":       (2.6, "UNDER ⚠️"),
+    "Victor Gomes":        (2.2, "UNDER ⚠️"),
+    "Raphael Claus":       (3.4, "OVER ✅"),
+    "Facundo Tello":       (3.2, "OVER ✅"),
+    "Ivan Barton":         (2.3, "UNDER ⚠️"),
+    "Mario Escobar":       (2.9, "NEUTRAL ➡️"),
+    "Jesus Valenzuela":    (2.7, "NEUTRAL ➡️"),
+    "Howard Webb":         (3.5, "OVER ✅"),
+    "Michael Oliver":      (3.0, "NEUTRAL ➡️"),
+    "Bjorn Kuipers":       (2.6, "UNDER ⚠️"),
+}
+
+def _referee_tendency(name: str) -> tuple:
+    """Return (avg_goals_pg, tendency_label) for a known referee."""
+    return _REF_TENDENCIES.get(name, (2.7, "NEUTRAL ➡️"))
+
+def fetch_match_referee(home: str, away: str, sport_key: str) -> dict | None:
+    """
+    Fetch today's match referee from ESPN soccer scoreboard + summary API.
+    Returns {name, goals_pg, tendency} or None.
+    """
+    ck = f"{home}_{away}_{datetime.now().strftime('%Y-%m-%d')}"
+    if ck in _referee_cache:
+        return _referee_cache[ck]
+    try:
+        _ESPN_LEAGUE = {
+            "soccer_fifa_world_cup":             "fifa.world",
+            "soccer_uefa_euro_qualification":    "uefa.euro.qualification",
+            "soccer_spain_la_liga":              "esp.1",
+            "soccer_england_league1":            "eng.1",
+            "soccer_germany_bundesliga":         "ger.1",
+            "soccer_italy_serie_a":              "ita.1",
+            "soccer_france_ligue_one":           "fra.1",
+            "soccer_uefa_champions_league":      "uefa.champions",
+            "soccer_conmebol_copa_america":      "conmebol.america",
+        }
+        league = _ESPN_LEAGUE.get(sport_key, "fifa.world")
+        today  = datetime.now().strftime("%Y%m%d")
+        r = requests.get(
+            f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard",
+            params={"dates": today}, timeout=8,
+        )
+        if r.status_code != 200:
+            return None
+        for event in r.json().get("events", []):
+            nm = event.get("name", "").lower()
+            if home.lower() not in nm and away.lower() not in nm:
+                continue
+            eid = event.get("id")
+            det = requests.get(
+                f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/summary",
+                params={"event": eid}, timeout=8,
+            ).json()
+            # Also grab venue for temperature
+            venue = det.get("gameInfo", {}).get("venue", {})
+            city  = venue.get("address", {}).get("city", "")
+            for official in det.get("officials", []):
+                pos = official.get("position", {}).get("name", "")
+                if pos in ("Referee", "Center Referee", "Head Official"):
+                    ref_name         = official.get("displayName", "")
+                    goals_pg, tend   = _referee_tendency(ref_name)
+                    res = {"name": ref_name, "goals_pg": goals_pg,
+                           "tendency": tend, "venue_city": city}
+                    _referee_cache[ck] = res
+                    return res
+        return None
+    except Exception:
+        return None
+
+# ── Soccer S3: Venue temperature (WC 2026 host cities) ───────────────────────
+_WC2026_VENUES: dict = {
+    "Dallas":       (32.7473,  -97.0945),
+    "New York":     (40.8135,  -74.0745),
+    "Los Angeles":  (34.0139, -118.2881),
+    "San Francisco":(37.4030, -121.9697),
+    "Miami":        (25.9581,  -80.2387),
+    "Seattle":      (47.5952, -122.3316),
+    "Kansas City":  (39.0488,  -94.4839),
+    "Atlanta":      (33.7554,  -84.4011),
+    "Philadelphia": (39.9008,  -75.1674),
+    "Houston":      (29.6847,  -95.4107),
+    "Boston":       (42.0909,  -71.2643),
+    "Toronto":      (43.6333,  -79.4191),
+    "Vancouver":    (49.2781, -123.1120),
+    "Mexico City":  (19.3033,  -99.1503),
+    "Guadalajara":  (20.6852, -103.3119),
+    "Monterrey":    (25.6695, -100.3077),
+}
+
+def fetch_venue_temp(venue_city: str) -> float | None:
+    """Fetch temperature for a WC 2026 host city. Returns °F or None."""
+    coords = _WC2026_VENUES.get(venue_city)
+    if not coords:
+        # fuzzy match
+        for city, ll in _WC2026_VENUES.items():
+            if city.lower() in venue_city.lower() or venue_city.lower() in city.lower():
+                coords = ll
+                break
+    if not coords:
+        return None
+    wind_data = fetch_wind(coords[0], coords[1])
+    return wind_data.get("temp_f") if wind_data else None
 
 # ── Module 5: World Cup group context ─────────────────────────────────────────
 _wc_standings_cache: dict = {}
