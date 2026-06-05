@@ -1446,10 +1446,10 @@ def analyze_totals(games, sport_key):
             blend_a = (0.6 * form_a["goals_for"] + 0.4 * elo_base_a) if form_a else elo_base_a
 
             our_line    = round(blend_h + blend_a, 2)
-            form_note_h = (f"{form_h['goals_for']:.1f} gpg ({form_h['matches']} WC)"
-                           if form_h else "ELO only")
-            form_note_a = (f"{form_a['goals_for']:.1f} gpg ({form_a['matches']} WC)"
-                           if form_a else "ELO only")
+            form_note_h = (f"{form_h['goals_for']:.1f} gpg ({form_h['matches']} partidos)"
+                           if form_h else "")
+            form_note_a = (f"{form_a['goals_for']:.1f} gpg ({form_a['matches']} partidos)"
+                           if form_a else "")
             extra = {
                 "form_home":    form_note_h,
                 "form_away":    form_note_a,
@@ -1889,10 +1889,10 @@ def analyze_game_full(game, sport_key, prev_map=None):
         moved_h, dir_h, dlt_h = detect_line_movement(game_id, home, h_cur, prev_map)
         moved_a, dir_a, dlt_a = detect_line_movement(game_id, away, a_cur, prev_map)
 
-        form_note_h = (f"{form_h['goals_for']:.1f} goles/partido ({form_h['matches']} WC)"
-                       if form_h else "ELO only")
-        form_note_a = (f"{form_a['goals_for']:.1f} goles/partido ({form_a['matches']} WC)"
-                       if form_a else "ELO only")
+        form_note_h = (f"{form_h['goals_for']:.1f} goles/partido ({form_h['matches']} partidos)"
+                       if form_h else "")
+        form_note_a = (f"{form_a['goals_for']:.1f} goles/partido ({form_a['matches']} partidos)"
+                       if form_a else "")
 
         # Module 5: WC group standings
         wc_standings = {}
@@ -1934,8 +1934,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "elo_home": elo_h, "elo_away": elo_a, "elo_diff": elo_h - elo_a,
             "form_home": form_note_h,
             "form_away": form_note_a,
-            "conceded_home": (f"{form_h['goals_against']:.1f}" if form_h else "N/A"),
-            "conceded_away": (f"{form_a['goals_against']:.1f}" if form_a else "N/A"),
+            "conceded_home": (f"{form_h['goals_against']:.1f}" if form_h else ""),
+            "conceded_away": (f"{form_a['goals_against']:.1f}" if form_a else ""),
             "p_draw":     round(p_draw * 100, 1),
             "line_moved": moved_h or moved_a,
             "line_note":  (f"Línea {home} {dir_h}{dlt_h}" if moved_h
@@ -2043,12 +2043,17 @@ def notify_game_analysis(analyses, sport_key):
             sign = "+" if ctx["elo_diff"] >= 0 else ""
             ctx_lines = (
                 f"🔵 ELO local:    {ctx['elo_home']} ({sign}{ctx['elo_diff']})\n"
-                f"📊 Forma local:  {ctx['form_home']}\n"
-                f"   Concedidos:   {ctx['conceded_home']} / partido\n"
-                f"📊 Forma visita: {ctx['form_away']}\n"
-                f"   Concedidos:   {ctx['conceded_away']} / partido\n"
                 f"🤝 Prob. empate: {ctx['p_draw']}%\n"
             )
+            # Show legacy form only if real data exists (not ELO-only fallback)
+            if ctx.get("form_home"):
+                ctx_lines += f"📊 Forma local:  {ctx['form_home']}\n"
+                if ctx.get("conceded_home"):
+                    ctx_lines += f"   Concedidos:   {ctx['conceded_home']} / partido\n"
+            if ctx.get("form_away"):
+                ctx_lines += f"📊 Forma visita: {ctx['form_away']}\n"
+                if ctx.get("conceded_away"):
+                    ctx_lines += f"   Concedidos:   {ctx['conceded_away']} / partido\n"
             # Soccer S1: last 3 match detail
             sf_h = ctx.get("sform_h")
             sf_a = ctx.get("sform_a")
@@ -2104,15 +2109,36 @@ def notify_game_analysis(analyses, sport_key):
         action_line = f"⭐ ACCIÓN: {best_clean} en {best['book']} — {gt}"
 
         # Picks block
-        picks_lines = ""
+        picks_lines  = ""
+        high_ev_flag = ""
         for idx, c in enumerate(a["candidates"]):
+            # Fix 4: skip picks where EV in dollars < $2.00 (not worth the risk)
+            ev_d = _ev_dollars(c["stake"], c["ev_pct"])
+            if ev_d < 2.00:
+                continue
+
             rank_emoji = _RANK_EMOJIS[idx] if idx < 3 else "🔹"
             safe_tag   = " ✅ SEGURO" if c["safest"] else ""
-            ev_d       = _ev_dollars(c["stake"], c["ev_pct"])
+
+            # Fix 5: flag suspiciously high EV (likely a soft/stale line)
+            if c["ev_pct"] > 30:
+                high_ev_flag = "⚠️ Edge muy alto — verificar línea antes de apostar\n"
+
+            # Fix 2: book warning for risky books (applies to MLB and soccer)
+            bk_warn_pick = _book_warning(c.get("book", ""))
+
+            # Fix 3: omit Kelly% for soccer alerts
+            if is_mlb:
+                odds_line = (f"   💰 ${c['stake']} @ {c['odds']} "
+                             f"({c['kelly_pct']}% Kelly) — {c['book']}{bk_warn_pick}\n")
+            else:
+                odds_line = (f"   💰 ${c['stake']} @ {c['odds']} "
+                             f"— {c['book']}{bk_warn_pick}\n")
+
             picks_lines += (
                 f"{rank_emoji} {c['label']} | EV +{c['ev_pct']}% → ${ev_d} por ${c['stake']}"
                 f" | Prob {round(c['true_prob']*100):.0f}%{safe_tag}\n"
-                f"   💰 ${c['stake']} @ {c['odds']} ({c['kelly_pct']}% Kelly) — {c['book']}\n"
+                f"{odds_line}"
             )
 
         # Verdict based on best pick
@@ -2130,6 +2156,7 @@ def notify_game_analysis(analyses, sport_key):
             f"📊 TOP PICKS (EV > {EV_MIN_PCT:.0f}%)\n"
             f"{_DIV}\n"
             f"{picks_lines}"
+            f"{high_ev_flag}"
             f"{verdict}\n"
             f"{_DIV2}"
         )
@@ -2962,7 +2989,7 @@ def fetch_soccer_team_recent(team: str, sport_key: str) -> dict | None:
         return _soccer_recent_cache[ck]
     try:
         url = (f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/"
-               f"?apiKey={API_KEY}&daysFrom=14&dateFormat=iso")
+               f"?apiKey={API_KEY}&daysFrom=30&dateFormat=iso")
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
             return None
