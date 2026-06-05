@@ -550,8 +550,11 @@ def check_lineup_changes():
 # MODULE 5 — ARBITRAGE SCANNER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _check_arb(home, away, team_a, odds_a, book_a, team_b, odds_b, book_b):
-    """Return an arb dict if the two odds form a valid opportunity, else None."""
+def _check_arb2(home, away, team_a, odds_a, book_a, team_b, odds_b, book_b):
+    """
+    2-way arb check (MLB, NHL, etc. — no draw).
+    Returns arb dict or None.
+    """
     margin = (1.0 / odds_a) + (1.0 / odds_b)
     if margin >= 1.0:
         return None
@@ -562,91 +565,161 @@ def _check_arb(home, away, team_a, odds_a, book_a, team_b, odds_b, book_b):
     stake_b = BANKROLL / (odds_b * margin)
     return {
         "match":      f"{home} vs {away}",
+        "legs":       2,
         "team_a":     team_a, "odds_a": odds_a, "book_a": book_a,
-        "team_b":     team_b, "odds_b": odds_b, "book_b": book_b,
         "stake_a":    round(stake_a, 2),
+        "team_b":     team_b, "odds_b": odds_b, "book_b": book_b,
         "stake_b":    round(stake_b, 2),
+        "profit":     round(BANKROLL * (1.0 - margin) / margin, 2),
+        "profit_pct": round(profit_pct, 2),
+    }
+
+def _check_arb3(home, away,
+                team_h, odds_h, book_h,
+                team_d, odds_d, book_d,
+                team_a, odds_a, book_a):
+    """
+    3-way arb check (soccer — home / draw / away all covered).
+    ALL THREE legs must be placed; a draw kills any 2-way soccer arb.
+    Returns arb dict or None.
+    """
+    margin = (1.0 / odds_h) + (1.0 / odds_d) + (1.0 / odds_a)
+    if margin >= 1.0:
+        return None
+    profit_pct = (1.0 - margin) / margin * 100
+    if profit_pct < 0.3 or profit_pct > 8.0:
+        return None
+    stake_h = BANKROLL / (odds_h * margin)
+    stake_d = BANKROLL / (odds_d * margin)
+    stake_a = BANKROLL / (odds_a * margin)
+    return {
+        "match":      f"{home} vs {away}",
+        "legs":       3,
+        "team_a":     team_h, "odds_a": odds_h, "book_a": book_h,
+        "stake_a":    round(stake_h, 2),
+        "team_b":     team_d, "odds_b": odds_d, "book_b": book_d,
+        "stake_b":    round(stake_d, 2),
+        "team_c":     team_a, "odds_c": odds_a, "book_c": book_a,
+        "stake_c":    round(stake_a, 2),
         "profit":     round(BANKROLL * (1.0 - margin) / margin, 2),
         "profit_pct": round(profit_pct, 2),
     }
 
 def scan_arbitrage(games):
     arbs = []
-    seen = set()   # avoid duplicate alerts for same game
+    seen = set()
 
     for g in games:
         home, away = g["home_team"], g["away_team"]
         game_key   = f"{home}|{away}"
+        if game_key in seen:
+            continue
 
-        # Collect best odds per team for every bookmaker in scope
-        # Structure: {team: {book_name_lower: (price, display_name)}}
+        # Build best-odds map: outcome_name → {book_lower: (price, display_name)}
         book_odds: dict = {}
         for bk in g.get("bookmakers", []):
             bk_lower = bk["title"].lower()
             for m in bk.get("markets", []):
                 if m["key"] == "h2h":
                     for o in m["outcomes"]:
-                        team  = o["name"]
-                        price = o["price"]
-                        book_odds.setdefault(team, {})
-                        prev = book_odds[team].get(bk_lower)
+                        outcome = o["name"]
+                        price   = o["price"]
+                        book_odds.setdefault(outcome, {})
+                        prev = book_odds[outcome].get(bk_lower)
                         if prev is None or price > prev[0]:
-                            book_odds[team][bk_lower] = (price, bk["title"])
+                            book_odds[outcome][bk_lower] = (price, bk["title"])
 
-        teams = list(book_odds.keys())
-        if len(teams) < 2:
-            continue
+        outcomes = list(book_odds.keys())
+        n = len(outcomes)
 
-        team_a, team_b = teams[0], teams[1]
-        books_a = book_odds[team_a]
-        books_b = book_odds[team_b]
+        # ── 3-WAY (soccer): home + draw + away must ALL be covered ───────────
+        if n == 3:
+            # Draw outcome key may be "Draw" (The Odds API standard)
+            draw_key = next((k for k in outcomes
+                             if k.lower() in ("draw", "the draw")), None)
+            if draw_key is None:
+                continue   # can't find draw — skip rather than give false arb
 
-        # ── Priority: Bovada vs BetOnline.ag specifically ─────────────────────
-        bov_key = next((k for k in books_a if k in PREFERRED_BOOKS), None)
-        bol_key = "betonline.ag"
+            home_key = home   # odds API uses full team names as outcome names
+            away_key = away
+            if home_key not in book_odds or away_key not in book_odds:
+                # Fall back: outcomes that aren't the draw
+                non_draw = [k for k in outcomes if k != draw_key]
+                if len(non_draw) != 2:
+                    continue
+                home_key, away_key = non_draw[0], non_draw[1]
 
-        if bov_key and bol_key in books_b and game_key not in seen:
-            bov_price_a, bov_name = books_a[bov_key]
-            bol_price_b, bol_name = books_b[bol_key]
-            arb = _check_arb(home, away,
-                             team_a, bov_price_a, bov_name,
-                             team_b, bol_price_b, bol_name)
+            # Best price per leg across all available books
+            best_h = max(book_odds[home_key].values(), key=lambda x: x[0])
+            best_d = max(book_odds[draw_key].values(), key=lambda x: x[0])
+            best_a = max(book_odds[away_key].values(), key=lambda x: x[0])
+
+            arb = _check_arb3(home, away,
+                              home_key, best_h[0], best_h[1],
+                              draw_key, best_d[0], best_d[1],
+                              away_key, best_a[0], best_a[1])
             if arb:
                 arbs.append(arb)
                 seen.add(game_key)
 
-        if bov_key and bol_key in books_a and game_key not in seen:
-            bol_price_a, bol_name = books_a.get(bol_key, (None, None))
-            bov_price_b, bov_name = books_b.get(bov_key, (None, None))
-            if bol_price_a and bov_price_b:
-                arb = _check_arb(home, away,
-                                 team_a, bol_price_a, bol_name,
-                                 team_b, bov_price_b, bov_name)
+        # ── 2-WAY (MLB, NHL, etc.): no draw outcome ───────────────────────────
+        elif n >= 2:
+            team_a, team_b = outcomes[0], outcomes[1]
+            books_a = book_odds[team_a]
+            books_b = book_odds[team_b]
+
+            # Priority: Bovada vs BetOnline.ag
+            bov_key = next((k for k in books_a if k in PREFERRED_BOOKS), None)
+            bol_key = "betonline.ag"
+
+            if bov_key and bol_key in books_b:
+                arb = _check_arb2(home, away,
+                                  team_a, books_a[bov_key][0], books_a[bov_key][1],
+                                  team_b, books_b[bol_key][0], books_b[bol_key][1])
                 if arb:
                     arbs.append(arb)
                     seen.add(game_key)
 
-        # ── Fallback: best available odds across all books ────────────────────
-        if game_key not in seen:
-            best_a = max(books_a.values(), key=lambda x: x[0])
-            best_b = max(books_b.values(), key=lambda x: x[0])
-            arb = _check_arb(home, away,
-                             team_a, best_a[0], best_a[1],
-                             team_b, best_b[0], best_b[1])
-            if arb:
-                arbs.append(arb)
-                seen.add(game_key)
+            if game_key not in seen and bov_key and bol_key in books_a:
+                bol = books_a.get(bol_key)
+                bov = books_b.get(bov_key)
+                if bol and bov:
+                    arb = _check_arb2(home, away,
+                                      team_a, bol[0], bol[1],
+                                      team_b, bov[0], bov[1])
+                    if arb:
+                        arbs.append(arb)
+                        seen.add(game_key)
+
+            if game_key not in seen:
+                best_a = max(books_a.values(), key=lambda x: x[0])
+                best_b = max(books_b.values(), key=lambda x: x[0])
+                arb = _check_arb2(home, away,
+                                  team_a, best_a[0], best_a[1],
+                                  team_b, best_b[0], best_b[1])
+                if arb:
+                    arbs.append(arb)
+                    seen.add(game_key)
 
     return arbs
 
 def notify_arbitrage(arbs):
     for i, arb in enumerate(arbs):
         if i > 0:
-            time.sleep(2)   # avoid ntfy.sh HTTP 429 rate limiting
-        body = (
-            f"Bet ${arb['stake_a']} on {arb['team_a']} @ {arb['odds_a']} ({arb['book_a']})\n"
-            f"Bet ${arb['stake_b']} on {arb['team_b']} @ {arb['odds_b']} ({arb['book_b']})\n"
-            f"Guaranteed profit: ${arb['profit']} ({arb['profit_pct']}%)"
+            time.sleep(2)
+        if arb.get("legs") == 3:
+            body = (
+                f"⚽ 3-WAY ARB — all legs required (draw covered)\n"
+                f"Leg 1: ${arb['stake_a']} on {arb['team_a']} @ {arb['odds_a']} ({arb['book_a']})\n"
+                f"Leg 2: ${arb['stake_b']} on {arb['team_b']} @ {arb['odds_b']} ({arb['book_b']})\n"
+                f"Leg 3: ${arb['stake_c']} on {arb['team_c']} @ {arb['odds_c']} ({arb['book_c']})\n"
+                f"Guaranteed profit: ${arb['profit']} ({arb['profit_pct']}%)"
+            )
+        else:
+            body = (
+                f"Bet ${arb['stake_a']} on {arb['team_a']} @ {arb['odds_a']} ({arb['book_a']})\n"
+                f"Bet ${arb['stake_b']} on {arb['team_b']} @ {arb['odds_b']} ({arb['book_b']})\n"
+                f"Guaranteed profit: ${arb['profit']} ({arb['profit_pct']}%)"
         )
         ntfy_post(f"ARB FOUND: {arb['match']}", body, "urgent")
         print(f"  💰 ARB: {arb['match']} — ${arb['profit']} profit ({arb['profit_pct']}%)")
