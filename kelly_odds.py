@@ -115,6 +115,7 @@ MLB_PARK_CITIES = {
 # ── RUNTIME STATE ─────────────────────────────────────────────────────────────
 alerted_bets:          set  = set()
 alerted_game_analysis: set  = set()
+_sent_alerts:          dict = {}   # key → {date, odds, edge} for smart dedup
 daily_bets:            list = []
 last_reset:            date = datetime.now(CDT).date()
 last_morning_report:   date = date(2000, 1, 1)   # force first run at 8 AM
@@ -585,6 +586,8 @@ def check_lineup_changes():
 # MODULE 5 — ARBITRAGE SCANNER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+ARB_MIN_PROFIT = 2.0   # minimum guaranteed profit % to fire an arb alert
+
 def _check_arb2(home, away, team_a, odds_a, book_a, team_b, odds_b, book_b):
     """
     2-way arb check (MLB, NHL, etc. — no draw).
@@ -594,7 +597,7 @@ def _check_arb2(home, away, team_a, odds_a, book_a, team_b, odds_b, book_b):
     if margin >= 1.0:
         return None
     profit_pct = (1.0 - margin) / margin * 100
-    if profit_pct < 0.3 or profit_pct > 8.0:
+    if profit_pct < ARB_MIN_PROFIT or profit_pct > 8.0:
         return None
     stake_a = BANKROLL / (odds_a * margin)
     stake_b = BANKROLL / (odds_b * margin)
@@ -622,7 +625,7 @@ def _check_arb3(home, away,
     if margin >= 1.0:
         return None
     profit_pct = (1.0 - margin) / margin * 100
-    if profit_pct < 0.3 or profit_pct > 8.0:
+    if profit_pct < ARB_MIN_PROFIT or profit_pct > 8.0:
         return None
     stake_h = BANKROLL / (odds_h * margin)
     stake_d = BANKROLL / (odds_d * margin)
@@ -743,8 +746,41 @@ def scan_arbitrage(games, sport_key=""):
 
     return arbs
 
+# ── SMART DEDUP HELPER ────────────────────────────────────────────────────────
+
+def _should_alert(key, odds=None, edge=None):
+    """
+    Return True if this alert should be sent; False if it's a duplicate.
+    Re-alerts on the same day only when odds improve ≥10% OR edge grows ≥1.5 units.
+    Updates _sent_alerts[key] whenever it returns True.
+    """
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    prev  = _sent_alerts.get(key)
+
+    send = False
+    if prev is None:
+        send = True                          # never alerted before
+    elif prev["date"] != today:
+        send = True                          # new day → fresh alert
+    else:
+        # Same day — only re-alert if conditions improved significantly
+        if odds is not None and prev.get("odds"):
+            if (odds - prev["odds"]) / prev["odds"] >= 0.10:
+                send = True                  # odds improved ≥10%
+        if not send and edge is not None and prev.get("edge") is not None:
+            if edge - prev["edge"] >= 1.5:
+                send = True                  # edge grew ≥1.5 units
+
+    if send:
+        _sent_alerts[key] = {"date": today, "odds": odds, "edge": edge}
+    return send
+
 def notify_arbitrage(arbs):
     for i, arb in enumerate(arbs):
+        home, away = arb["match"].split(" vs ", 1)
+        arb_key = f"{home}_{away}_arb"
+        if not _should_alert(arb_key, edge=arb["profit_pct"]):
+            continue
         if i > 0:
             time.sleep(2)
         sport  = arb.get("sport", "")
@@ -1214,9 +1250,11 @@ def analyze_totals(games, sport_key):
 def notify_totals(total_bets):
     global alerted_bets
     for b in total_bets:
-        key = f"{b['game_id']}|totals|{b['team']}"
-        if key in alerted_bets:
+        home, away = b["match"].split(" vs ", 1)
+        dedup_key = f"{home}_{away}_{b['team']}_totals"
+        if not _should_alert(dedup_key, odds=b["odds"], edge=b["edge"]):
             continue
+        key = f"{b['game_id']}|totals|{b['team']}"
 
         sport   = b.get("sport", "")
         emoji   = _sport_emoji(sport)
@@ -1554,7 +1592,9 @@ def notify_game_analysis(analyses, sport_key):
     emoji  = _sport_emoji(sport_key)
 
     for i, a in enumerate(analyses):
-        if a["game_id"] in alerted_game_analysis:
+        home, away = a["match"].split(" vs ", 1)
+        analysis_key = f"{home}_{away}_analysis"
+        if not _should_alert(analysis_key, edge=a["best_ev"]):
             continue
         if i > 0:
             time.sleep(2)
@@ -1958,6 +1998,10 @@ def analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map):
 
 def notify_sharp_money(sharp_moves):
     for m in sharp_moves:
+        home, away = m["match"].split(" vs ", 1)
+        sharp_key = f"{home}_{away}_{m['team']}_sharp"
+        if not _should_alert(sharp_key, odds=m["odds_now"]):
+            continue
         sport = m.get("sport", "")
         emoji = _sport_emoji(sport)
         if m.get("public_pct"):
@@ -2083,11 +2127,14 @@ def analyze(games, prev_map, new_map):
 
 def notify_bets(new_bets):
     global alerted_bets
-    fresh = [b for b in new_bets if f"{b['game_id']}|{b['team']}" not in alerted_bets]
-    if not fresh:
+    if not new_bets:
         return
 
-    for b in fresh:
+    for b in new_bets:
+        home, away = b["match"].split(" vs ", 1)
+        dedup_key = f"{home}_{away}_{b['team']}_ml"
+        if not _should_alert(dedup_key, odds=b["odds"], edge=b["edge"]):
+            continue
         sport   = b.get("sport", "")
         emoji   = _sport_emoji(sport)
         conf_es = _conf_es(b["confidence"])
@@ -2214,14 +2261,15 @@ def send_daily_summary():
     ntfy_post("BetBot Daily Summary", body, "default")
 
 def check_midnight_reset():
-    global alerted_bets, daily_bets, last_reset
+    global alerted_bets, daily_bets, last_reset, _sent_alerts
     today = datetime.now(CDT).date()
     if today != last_reset:
         print(f"\n🌙 Midnight reset — sending daily summary...")
         send_daily_summary()
-        alerted_bets = set()
-        daily_bets   = []
-        last_reset   = today
+        alerted_bets  = set()
+        _sent_alerts  = {}
+        daily_bets    = []
+        last_reset    = today
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE — MAIN SCAN
