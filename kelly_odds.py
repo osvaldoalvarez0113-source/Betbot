@@ -7,7 +7,7 @@ API_KEY  = os.environ.get("ODDS_API_KEY", "")
 BANKROLL = 1000
 FRACTION = 0.25      # fractional Kelly
 MIN_EDGE = 2.0       # minimum edge % to alert
-INTERVAL = 900       # seconds between scans (15 min)
+INTERVAL = 600       # seconds between scans (10 min)
 NOTIFY   = "my-bets" # ntfy.sh topic
 LOG_CSV  = True      # always log to bets_log.csv
 
@@ -17,11 +17,7 @@ BETS_LOG_FILE  = "bets_log.csv"
 
 # ── season-aware leagues: sport_key -> active months ─────────────────────────
 SEASON_MONTHS = {
-    "soccer_epl":                   [8,9,10,11,12,1,2,3,4,5],
-    "soccer_spain_la_liga":         [8,9,10,11,12,1,2,3,4,5],
-    "soccer_germany_bundesliga":    [8,9,10,11,12,1,2,3,4,5],
-    "soccer_italy_serie_a":         [8,9,10,11,12,1,2,3,4,5],
-    "soccer_france_ligue_1":        [8,9,10,11,12,1,2,3,4,5],
+    "soccer_fifa_world_cup":        [1,2,3,4,5,6,7,8,9,10,11,12],
     "baseball_mlb":                 [3,4,5,6,7,8,9,10],
 }
 
