@@ -1,0 +1,97 @@
+ULTIMATE UPGRADE: Integrate Claude AI 
+into the bot's decision engine.
+
+Instead of hardcoded rules, use 
+Claude API to reason about each game.
+
+━━━━━━━━━━━━━━━━━━━━
+SETUP
+━━━━━━━━━━━━━━━━━━━━
+Install anthropic library:
+pip install anthropic
+
+Add to Railway variables:
+ANTHROPIC_API_KEY = (user will add)
+
+━━━━━━━━━━━━━━━━━━━━
+HOW IT WORKS
+━━━━━━━━━━━━━━━━━━━━
+After collecting ALL data for a game,
+instead of applying hardcoded rules,
+send everything to Claude and ask 
+for expert analysis.
+
+Create function: analyze_with_claude(game_data)
+
+```python
+import anthropic
+
+def analyze_with_claude(game_data, sport):
+    client = anthropic.Anthropic()
+    
+    if sport == "MLB":
+        prompt = f"""
+Eres un analista experto en apuestas 
+deportivas de MLB con 20 años de 
+experiencia. Analiza este partido y 
+dame tu recomendación profesional.
+
+DATOS DEL PARTIDO:
+{game_data}
+
+Analiza todos los factores y responde 
+en este formato JSON exacto:
+{{
+  "pick": "OVER/UNDER/HOME_ML/AWAY_ML",
+  "line": "número de la línea",
+  "confianza": "ALTA/MEDIA/BAJA",
+  "razonamiento": "explicación en 
+   español de 3-4 oraciones como 
+   experto",
+  "factores_positivos": ["factor1", 
+   "factor2"],
+  "factores_negativos": ["factor1"],
+  "apostar": true/false
+}}
+
+Solo responde con el JSON, nada más.
+        """
+    
+    elif sport == "SOCCER":
+        prompt = f"""
+Eres un analista experto en apuestas 
+de fútbol internacional con 20 años 
+de experiencia en el Mundial FIFA.
+Analiza este partido.
+
+DATOS DEL PARTIDO:
+{game_data}
+
+Responde en este formato JSON exacto:
+{{
+  "pick": "HOME_ML/AWAY_ML/DRAW/
+          OVER/UNDER/HOME_HANDICAP/
+          AWAY_HANDICAP",
+  "line": "número o descripción",
+  "confianza": "ALTA/MEDIA/BAJA",
+  "razonamiento": "explicación en 
+   español de 3-4 oraciones como 
+   experto",
+  "factores_positivos": ["factor1",
+   "factor2"],
+  "factores_negativos": ["factor1"],
+  "apostar": true/false
+}}
+
+Solo responde con el JSON, nada más.
+        """
+    
+    message = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=1000,
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+    
+    return json.loads(message.content[0].text)

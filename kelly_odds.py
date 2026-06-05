@@ -2258,13 +2258,74 @@ def analyze_totals(games, sport_key):
                            if form_h else "")
             form_note_a = (f"{form_a['goals_for']:.1f} gpg ({form_a['matches']} partidos)"
                            if form_a else "")
+
+            # ── Module S1: WC Venue Tendency ──────────────────────────────
+            _soc_venue_adj  = 0.0
+            _soc_venue_note = ""
+            try:
+                _ref_tot = fetch_match_referee(home, away, sport_key)
+                _vcity   = (_ref_tot.get("venue_city", "") if _ref_tot else "")
+                _soc_venue_adj, _soc_venue_note = _wc_venue_adj(_vcity)
+                if abs(_soc_venue_adj) > 0.0:
+                    our_line = round(our_line + _soc_venue_adj, 2)
+            except Exception:
+                pass
+
+            # ── Module S2: Días de Descanso Fútbol ────────────────────────
+            _soc_rest_h = _soc_rest_a = (0, 0.0, "")
+            try:
+                _soc_rest_h = fetch_soccer_rest_days(home)
+                _soc_rest_a = fetch_soccer_rest_days(away)
+                our_line = round(our_line + _soc_rest_h[1] + _soc_rest_a[1], 2)
+            except Exception:
+                pass
+
+            # ── Module S3: Rachas en el Mundial ───────────────────────────
+            _soc_wcs_h = _soc_wcs_a = None
+            _soc_streak_note  = ""
+            _soc_streak_parts = []
+            try:
+                _soc_wcs_h = fetch_wc_streak(home)
+                _soc_wcs_a = fetch_wc_streak(away)
+                for _sk in (_soc_wcs_h, _soc_wcs_a):
+                    if not _sk:
+                        continue
+                    _soc_streak_parts.append(_sk["label"])
+                    _sadj = _sk["tot_adj_gf"] + _sk["tot_adj_ga"] + _sk["tot_adj_def"]
+                    if abs(_sadj) > 0.0:
+                        our_line = round(our_line + _sadj, 2)
+                        _soc_streak_parts.append(
+                            f"   → Ajuste carreras: {_sadj:+.1f} goles"
+                        )
+                _soc_streak_note = "\n".join(_soc_streak_parts)
+            except Exception:
+                pass
+
+            # ── Module S6: Presión Psicológica ────────────────────────────
+            _soc_press_tot  = 0.0
+            _soc_press_note = ""
+            try:
+                _wc_st = fetch_wc_standings()
+                _soc_press_tot, _, _soc_press_note = _wc_pressure_block(
+                    home, away, _wc_st
+                )
+                if abs(_soc_press_tot) > 0.0:
+                    our_line = round(our_line + _soc_press_tot, 2)
+            except Exception:
+                pass
+
             extra = {
-                "form_home":    form_note_h,
-                "form_away":    form_note_a,
-                "pitcher_home": "",
-                "pitcher_away": "",
-                "pitch_adj":    0.0,
-                "wind_info":    "",
+                "form_home":       form_note_h,
+                "form_away":       form_note_a,
+                "pitcher_home":    "",
+                "pitcher_away":    "",
+                "pitch_adj":       0.0,
+                "wind_info":       "",
+                "venue_note_s":    _soc_venue_note,
+                "srest_note_h":    _soc_rest_h[2],
+                "srest_note_a":    _soc_rest_a[2],
+                "soc_streak_note": _soc_streak_note,
+                "pressure_note":   _soc_press_note,
             }
 
         diff = our_line - book_line
@@ -2408,7 +2469,37 @@ def notify_totals(total_bets):
             if form_a:
                 form_parts.append(f"📋 Forma visita:  {form_a}")
             if form_parts:
-                form_block = "\n" + "\n".join(form_parts)
+                form_block = "\n".join(form_parts)
+
+            # Build soccer adjustment block (S1–S6 notes)
+            _soc_venue_n  = (b.get("venue_note_s")    or "").strip()
+            _soc_rh_n     = (b.get("srest_note_h")    or "").strip()
+            _soc_ra_n     = (b.get("srest_note_a")    or "").strip()
+            _soc_strk_n   = (b.get("soc_streak_note") or "").strip()
+            _soc_press_n  = (b.get("pressure_note")   or "").strip()
+            _soc_ln_h_n   = ""
+            _soc_ln_a_n   = ""
+            try:
+                _ln_h_d = b.get("lineup_h_s")
+                _ln_a_d = b.get("lineup_a_s")
+                if isinstance(_ln_h_d, dict):
+                    _soc_ln_h_n = _ln_h_d.get("note", "")
+                if isinstance(_ln_a_d, dict):
+                    _soc_ln_a_n = _ln_a_d.get("note", "")
+            except Exception:
+                pass
+
+            soc_adj_parts = [
+                _n for _n in [
+                    _soc_venue_n, _soc_rh_n, _soc_ra_n,
+                    _soc_strk_n, _soc_press_n,
+                    _soc_ln_h_n, _soc_ln_a_n,
+                ] if _n
+            ]
+            soc_adj_block = ""
+            if soc_adj_parts:
+                soc_adj_block = f"\n{_DIV2}\n" + "\n".join(soc_adj_parts) + f"\n{_DIV2}"
+
             match_es_tot = f"{_es(home)} vs {_es(away)}"
             body = (
                 f"{emoji} {match_es_tot}\n"
@@ -2421,8 +2512,9 @@ def notify_totals(total_bets):
                 f"Modelo proyecta: {b['our_line']} {unit}\n"
                 f"El libro pone:   {line} {unit}\n"
                 f"Diferencia:      {b['edge']} {unit} de edge"
-                f"{form_block}\n"
-                f"{_DIV}\n"
+                f"{soc_adj_block}\n"
+                + (f"\n{form_block}\n" if form_block else "")
+                + f"{_DIV}\n"
                 f"{action}\n"
                 f"{_DIV2}"
             )
@@ -2964,6 +3056,57 @@ def analyze_game_full(game, sport_key, prev_map=None):
 
         p_win, p_draw, p_loss = poisson_match_probs(blend_h, blend_a)
 
+        # ── Module S3/S5/S6: Pre-adjust probabilities before ML loop ─────────
+        _wc_pre   = {}
+        _wcs_h_g  = _wcs_a_g  = None
+        _ln_h_g   = _ln_a_g   = {"confirmed": False, "prob_adj": 0.0, "note": ""}
+        _draw_boost_g  = 0.0
+        _press_note_g  = ""
+        _press_tot_g   = 0.0
+        try:
+            _wc_pre = fetch_wc_standings()
+        except Exception:
+            pass
+
+        # Module S3: WC streak ML adjustment
+        _streak_ml_delta = 0.0
+        try:
+            _wcs_h_g = fetch_wc_streak(home)
+            _wcs_a_g = fetch_wc_streak(away)
+            if _wcs_h_g:
+                _streak_ml_delta += _wcs_h_g["ml_adj"]
+            if _wcs_a_g:
+                _streak_ml_delta -= _wcs_a_g["ml_adj"]
+        except Exception:
+            pass
+
+        # Module S5: Lineup intel
+        _ln_adj_g = 0.0
+        try:
+            _ln_h_g = fetch_soccer_lineup_intel(home, sport_key)
+            _ln_a_g = fetch_soccer_lineup_intel(away, sport_key)
+            _ln_adj_g = _ln_h_g["prob_adj"] - _ln_a_g["prob_adj"]
+        except Exception:
+            pass
+
+        # Module S6: Psychological pressure
+        try:
+            _press_tot_g, _draw_boost_g, _press_note_g = _wc_pressure_block(
+                home, away, _wc_pre
+            )
+        except Exception:
+            pass
+
+        # Apply all adjustments to p_win / p_draw / p_loss
+        _ml_delta_g = _streak_ml_delta + _ln_adj_g
+        if abs(_ml_delta_g) > 0.001 or _draw_boost_g > 0.001:
+            p_win   = max(0.05, min(0.85, p_win  + _ml_delta_g))
+            p_loss  = max(0.05, min(0.85, p_loss - _ml_delta_g))
+            if _draw_boost_g > 0:
+                p_draw = min(0.60, p_draw + _draw_boost_g)
+            _tot_g  = max(0.01, p_win + p_draw + p_loss)
+            p_win  /= _tot_g; p_draw /= _tot_g; p_loss /= _tot_g
+
         # ML — 3 outcomes
         draw_key = next((k for k in h2h_odds if k.lower() in ("draw", "the draw")), None)
         for lbl, team_key, true_p in [
@@ -3154,6 +3297,26 @@ def analyze_game_full(game, sport_key, prev_map=None):
         blend_h = max(0.1, blend_h + t_adj_g / 2)
         blend_a = max(0.1, blend_a + t_adj_g / 2)
 
+        # ── Module S1: WC Venue Tendency (context) ────────────────────────
+        _venue_adj_g  = 0.0
+        _venue_note_g = ""
+        try:
+            _vcity_g = (referee.get("venue_city", "") if referee else "")
+            _venue_adj_g, _venue_note_g = _wc_venue_adj(_vcity_g)
+            if abs(_venue_adj_g) > 0.0:
+                blend_h = max(0.1, blend_h + _venue_adj_g / 2)
+                blend_a = max(0.1, blend_a + _venue_adj_g / 2)
+        except Exception:
+            pass
+
+        # ── Module S2: Días de Descanso Fútbol (context) ─────────────────
+        _rest_h_g = _rest_a_g = (0, 0.0, "")
+        try:
+            _rest_h_g = fetch_soccer_rest_days(home)
+            _rest_a_g = fetch_soccer_rest_days(away)
+        except Exception:
+            pass
+
         context = {
             "elo_home": elo_h, "elo_away": elo_a, "elo_diff": elo_h - elo_a,
             "form_home": form_note_h,
@@ -3164,12 +3327,21 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "line_moved": moved_h or moved_a,
             "line_note":  (f"Línea {home} {dir_h}{dlt_h}" if moved_h
                           else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
-            "wc_standings": wc_standings,  # Module 5
-            "sform_h":   sform_h,          # Soccer S1
-            "sform_a":   sform_a,          # Soccer S1
-            "referee":   referee,          # Soccer S2
-            "temp_label_s": t_label_s,     # Soccer S3
-            "soccer_intel": {              # intelligence rules output
+            "wc_standings":  _wc_pre,                # Module 5 / S6
+            "sform_h":       sform_h,                # Soccer S1
+            "sform_a":       sform_a,                # Soccer S1
+            "referee":       referee,                # Soccer S2
+            "temp_label_s":  t_label_s,              # Soccer S3
+            "venue_note_s":  _venue_note_g,          # Module S1
+            "rest_h_s":      _rest_h_g[2],           # Module S2
+            "rest_a_s":      _rest_a_g[2],           # Module S2
+            "wc_streak_h":   _wcs_h_g,               # Module S3
+            "wc_streak_a":   _wcs_a_g,               # Module S3
+            "lineup_h_s":    _ln_h_g,                # Module S5
+            "lineup_a_s":    _ln_a_g,                # Module S5
+            "pressure_note": _press_note_g,          # Module S6
+            "draw_boost":    round(_draw_boost_g, 3),# Module S6
+            "soccer_intel": {                        # intelligence rules output
                 "notes":         _soc_notes,
                 "reasoning":     _soc_reason,
                 "contradiction": _contradiction_s,
@@ -4756,6 +4928,337 @@ def fetch_venue_temp(venue_city: str) -> float | None:
     wind_data = fetch_wind(coords[0], coords[1])
     return wind_data.get("temp_f") if wind_data else None
 
+# ── Module S1: WC VENUE TENDENCIES ───────────────────────────────────────────
+WC_VENUE_TEND: dict = {
+    "Dallas":        (+0.4, "🏟️ Dallas: estadio de goles"),
+    "Miami":         (+0.3, "🏟️ Miami: estadio ofensivo"),
+    "Houston":       (+0.3, "🏟️ Houston: estadio de goles"),
+    "San Francisco": (-0.3, "🏟️ San Francisco: estadio defensivo"),
+    "Vancouver":     (-0.2, "🏟️ Vancouver: estadio de bajos marcadores"),
+    "Toronto":       (-0.2, "🏟️ Toronto: estadio defensivo"),
+    "Los Angeles":   ( 0.0, ""),
+    "Kansas City":   ( 0.0, ""),
+    "Seattle":       ( 0.0, ""),
+    "New York":      ( 0.0, ""),
+    "Boston":        ( 0.0, ""),
+    "Atlanta":       ( 0.0, ""),
+}
+
+def _wc_venue_adj(venue_city: str) -> tuple:
+    """Return (adj, note) for a WC venue city. adj is a goal-line adjustment."""
+    if not venue_city:
+        return 0.0, ""
+    for city_key, (adj, note) in WC_VENUE_TEND.items():
+        if city_key.lower() in venue_city.lower():
+            return adj, note
+    return 0.0, ""
+
+
+# ── Module S2: DÍAS DE DESCANSO FÚTBOL ───────────────────────────────────────
+_soc_rest_cache: dict = {}
+
+def fetch_soccer_rest_days(team: str) -> tuple:
+    """
+    Days since last completed match for a soccer/WC team.
+    Returns (days: int, adj: float, note: str).
+    Uses _fetch_espn_matches; 3-day rest → +0.2 adj; 4-5 → 0; 6+ → 0.
+    """
+    today_str = datetime.now(ET).strftime("%Y-%m-%d")
+    ck = (team.lower(), today_str)
+    if ck in _soc_rest_cache:
+        return _soc_rest_cache[ck]
+
+    try:
+        matches = _fetch_espn_matches(team)
+        if not matches:
+            _soc_rest_cache[ck] = (0, 0.0, "")
+            return (0, 0.0, "")
+        last_date_s = matches[0].get("date", "")
+        if not last_date_s:
+            _soc_rest_cache[ck] = (0, 0.0, "")
+            return (0, 0.0, "")
+        last_dt = datetime.fromisoformat(last_date_s.replace("Z", "+00:00"))
+        days    = (datetime.now(pytz.utc) - last_dt).days
+        if days <= 3:
+            adj  = +0.2
+            note = (f"⚠️ Solo {days}d descanso — {team}\n"
+                    f"   Equipo cansado → puede aumentar errores\n"
+                    f"   → +0.2 goles al total")
+        elif days <= 5:
+            adj  = 0.0
+            note = f"✅ Descanso normal ({days}d) — {team}"
+        else:
+            adj  = 0.0
+            note = f"💪 {days}d descanso — {team} fresco y recuperado"
+        result = (days, adj, note)
+        _soc_rest_cache[ck] = result
+        return result
+    except Exception:
+        _soc_rest_cache[ck] = (0, 0.0, "")
+        return (0, 0.0, "")
+
+
+# ── Module S3: RACHAS EN EL MUNDIAL ──────────────────────────────────────────
+_wc_streak_cache_s: dict = {}
+
+def fetch_wc_streak(team: str) -> "dict | None":
+    """
+    WC 2026 streak and goal stats for a team via fetch_soccer_team_recent.
+    Returns {wins, draws, losses, n, streak_type, streak_len, gf_pg, ga_pg,
+             label, ml_adj, tot_adj_gf, tot_adj_ga, tot_adj_def} or None.
+    ml_adj: +0.05 for 3 straight wins, -0.05 for no wins.
+    tot_adj_gf: +0.3 when scoring ≥2 gpg.
+    tot_adj_ga: +0.3 when conceding ≥2 gpg.
+    tot_adj_def: -0.3 when 0 goals last 2+ games.
+    """
+    today_str = datetime.now(ET).strftime("%Y-%m-%d")
+    ck = (team.lower(), today_str)
+    if ck in _wc_streak_cache_s:
+        return _wc_streak_cache_s[ck]
+
+    try:
+        sdata = fetch_soccer_team_recent(team, "soccer_fifa_world_cup")
+        if not sdata or sdata["n"] == 0:
+            _wc_streak_cache_s[ck] = None
+            return None
+
+        results = sdata["results"]
+        gf_pg   = sdata["gf_pg"]
+        ga_pg   = sdata["ga_pg"]
+        wins    = results.count("W")
+        draws   = results.count("D")
+        losses  = results.count("L")
+        n       = len(results)
+
+        streak_type = results[0] if results else "D"
+        streak_len  = 1
+        for r in results[1:]:
+            if r == streak_type: streak_len += 1
+            else:                break
+
+        ml_adj = 0.0
+        if streak_type == "W" and streak_len >= 3:
+            ml_adj = +0.05
+        elif wins == 0:
+            ml_adj = -0.05
+
+        tot_adj_gf  = +0.3 if gf_pg >= 2.0 else 0.0
+        tot_adj_ga  = +0.3 if ga_pg >= 2.0 else 0.0
+        tot_adj_def = -0.3 if (gf_pg == 0 and n >= 2) else 0.0
+
+        streak_sym = {"W": "victorias", "D": "empates", "L": "derrotas"}.get(
+            streak_type, ""
+        )
+        if wins == 0:
+            mood = "❄️"; mood_lbl = "EN CAÍDA"
+        elif ml_adj > 0:
+            mood = "🔥"; mood_lbl = "EN RACHA"
+        else:
+            mood = "➡️"; mood_lbl = "regular"
+
+        label = (
+            f"{mood} {team} — {mood_lbl}:\n"
+            f"   Últimos {n} WC: {wins}-{draws}-{losses}\n"
+            f"   Racha actual: {streak_len} {streak_sym} seguidos\n"
+            f"   Goles a favor: {gf_pg:.1f}/g | En contra: {ga_pg:.1f}/g"
+        )
+
+        res = {
+            "wins": wins, "draws": draws, "losses": losses, "n": n,
+            "streak_type": streak_type, "streak_len": streak_len,
+            "gf_pg": gf_pg, "ga_pg": ga_pg,
+            "label": label, "ml_adj": ml_adj,
+            "tot_adj_gf": tot_adj_gf,
+            "tot_adj_ga": tot_adj_ga,
+            "tot_adj_def": tot_adj_def,
+        }
+        _wc_streak_cache_s[ck] = res
+        return res
+    except Exception:
+        _wc_streak_cache_s[ck] = None
+        return None
+
+
+# ── Module S5: LINEUP FÚTBOL (XI TITULAR) ────────────────────────────────────
+WC_KEY_PLAYERS: dict = {
+    "Argentina":      ["Messi", "Di María"],
+    "France":         ["Mbappé", "Griezmann"],
+    "Francia":        ["Mbappé", "Griezmann"],
+    "Brasil":         ["Vinicius", "Rodrygo"],
+    "Brazil":         ["Vinicius", "Rodrygo"],
+    "España":         ["Pedri", "Yamal"],
+    "Spain":          ["Pedri", "Yamal"],
+    "England":        ["Bellingham", "Salah"],
+    "Germany":        ["Musiala", "Kane"],
+    "Alemania":       ["Musiala", "Kane"],
+    "Portugal":       ["Ronaldo", "Leão"],
+    "Netherlands":    ["Van Dijk", "Gakpo"],
+    "Países Bajos":   ["Van Dijk", "Gakpo"],
+    "Morocco":        ["En-Nesyri", "Hakimi"],
+    "Marruecos":      ["En-Nesyri", "Hakimi"],
+    "Japan":          ["Kubo", "Mitoma"],
+    "Japón":          ["Kubo", "Mitoma"],
+    "USA":            ["Pulisic", "McKennie"],
+    "United States":  ["Pulisic", "McKennie"],
+    "Mexico":         ["Jiménez", "Álvarez"],
+    "México":         ["Jiménez", "Álvarez"],
+    "Colombia":       ["James", "Díaz"],
+    "Uruguay":        ["Núñez", "Valverde"],
+    "Ecuador":        ["Caicedo", "Valencia"],
+}
+
+_soc_lineup_cache: dict = {}
+
+def fetch_soccer_lineup_intel(team: str,
+                               sport_key: str = "soccer_fifa_world_cup") -> dict:
+    """
+    Fetch confirmed starting XI from ESPN for a WC team.
+    Returns {confirmed, missing_stars, prob_adj, note}.
+    prob_adj: -0.08 for 1 star absent, -0.15 for 2+ stars absent.
+    Falls back gracefully — never blocks execution.
+    """
+    today_str = datetime.now(ET).strftime("%Y-%m-%d")
+    ck = (team.lower(), today_str)
+    if ck in _soc_lineup_cache:
+        return _soc_lineup_cache[ck]
+
+    stars  = WC_KEY_PLAYERS.get(team, [])
+    result = {"confirmed": False, "missing_stars": [], "prob_adj": 0.0, "note": ""}
+    if not stars:
+        _soc_lineup_cache[ck] = result
+        return result
+
+    try:
+        url = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
+        r   = requests.get(url, timeout=6)
+        if r.status_code == 200:
+            for event in r.json().get("events", []):
+                comp  = event.get("competitions", [{}])[0]
+                comps = comp.get("competitors", [])
+                te    = next(
+                    (c for c in comps
+                     if team.lower() in c.get("team", {}).get("displayName", "").lower()),
+                    None,
+                )
+                if not te:
+                    continue
+                starters = [
+                    p.get("athlete", {}).get("displayName", "")
+                    for p in te.get("roster", {}).get("entries", [])
+                    if p.get("starter", False)
+                ]
+                if not starters:
+                    break
+                missing  = [s for s in stars
+                            if not any(s.lower() in sp.lower() for sp in starters)]
+                present  = [s for s in stars if s not in missing]
+                prob_adj = (-0.15 if len(missing) >= 2 else
+                            -0.08 if len(missing) == 1 else 0.0)
+                note_lines = [f"📋 XI {team} confirmado:"]
+                for s in present:
+                    note_lines.append(f"   {s} ✅")
+                for s in missing:
+                    note_lines.append(f"   ⚠️ {s} FUERA del XI titular")
+                if missing:
+                    note_lines.append(
+                        f"   → {'Jugadores clave' if len(missing)>1 else 'Jugador clave'} "
+                        f"ausente{'s' if len(missing)>1 else ''} "
+                        f"→ ajuste ML {prob_adj*100:+.0f}%"
+                    )
+                result = {
+                    "confirmed":     True,
+                    "missing_stars": missing,
+                    "prob_adj":      prob_adj,
+                    "note":          "\n".join(note_lines),
+                }
+                break
+        if not result["confirmed"]:
+            result["note"] = (
+                f"📋 XI {team}: "
+                + " | ".join(f"{s} ✅" for s in stars)
+            )
+    except Exception:
+        pass
+
+    _soc_lineup_cache[ck] = result
+    return result
+
+
+# ── Module S6: PRESIÓN PSICOLÓGICA WC ────────────────────────────────────────
+def _wc_pressure_block(home: str, away: str, standings: dict) -> tuple:
+    """
+    Analyze psychological pressure from WC group standings.
+    Returns (tot_adj: float, draw_prob_boost: float, note: str).
+    """
+    if not standings:
+        return 0.0, 0.0, ""
+    try:
+        sh = standings.get(home)
+        sa = standings.get(away)
+        if not sh and not sa:
+            return 0.0, 0.0, ""
+
+        notes      = []
+        tot_adj    = 0.0
+        draw_boost = 0.0
+
+        gp_h  = sh.get("gp",  0) if sh else 0
+        gp_a  = sa.get("gp",  0) if sa else 0
+        pos_h = sh.get("pos", 3) if sh else 3
+        pos_a = sa.get("pos", 3) if sa else 3
+        pts_h = sh.get("pts", 0) if sh else 0
+        pts_a = sa.get("pts", 0) if sa else 0
+
+        elim_h = bool(sh) and gp_h >= 2 and pos_h == 4
+        elim_a = bool(sa) and gp_a >= 2 and pos_a == 4
+        qual_h = bool(sh) and pos_h <= 2 and gp_h >= 2
+        qual_a = bool(sa) and pos_a <= 2 and gp_a >= 2
+
+        if elim_h or elim_a:
+            tot_adj += 0.3
+            et = home if elim_h else away
+            notes.append(
+                f"🧠 FACTOR PSICOLÓGICO:\n"
+                f"   {et} ELIMINADO si no gana\n"
+                f"   → Presión extrema — atacan más → más goles\n"
+                f"   → Favorece Over rival ML → +0.3 goles"
+            )
+
+        if qual_h and qual_a:
+            tot_adj -= 0.3
+            notes.append(
+                f"🧠 {home} & {away} ya clasificados:\n"
+                f"   → Pueden rotar jugadores → menos motivación\n"
+                f"   → Favorece UNDER → -0.3 goles al total"
+            )
+        elif qual_h and not elim_a:
+            tot_adj -= 0.3
+            notes.append(
+                f"🧠 {home} ya clasificado:\n"
+                f"   → Puede rotar → -0.3 goles | Favorece {away} ML"
+            )
+        elif qual_a and not elim_h:
+            tot_adj -= 0.3
+            notes.append(
+                f"🧠 {away} ya clasificado:\n"
+                f"   → Puede rotar → -0.3 goles | Favorece {home} ML"
+            )
+
+        if (not elim_h and not elim_a and not qual_h and not qual_a
+                and pts_h == pts_a and gp_h >= 1 and gp_a >= 1):
+            draw_boost = 0.15
+            notes.append(
+                f"🧠 Ambos equipos necesitan empate para clasificar:\n"
+                f"   → Pacto táctico posible\n"
+                f"   → FUERTE señal para Empate ML → Favorece UNDER\n"
+                f"   → +15% probabilidad de empate"
+            )
+
+        return tot_adj, draw_boost, "\n".join(notes)
+    except Exception:
+        return 0.0, 0.0, ""
+
+
 # ── Module 5: World Cup group context ─────────────────────────────────────────
 _wc_standings_cache: dict = {}
 
@@ -4814,11 +5317,15 @@ def _wc_urgency_line(team_name, standings):
 # ── Module 2: consolidated daily ntfy report ──────────────────────────────────
 # ── Module B1: ANALÍTICA DE RENDIMIENTO ──────────────────────────────────────
 _MTYPE_LABEL = {
-    "totals":  "⚾ Totals MLB",
-    "h2h":     "🎯 Moneyline",
-    "spreads": "📊 Run Line",
-    "arb":     "⚡ ARBs",
-    "premium": "💎 Picks Premium",
+    "totals":         "⚾ Totals MLB",
+    "h2h":            "🎯 Moneyline MLB",
+    "spreads":        "📊 Run Line",
+    "arb":            "⚡ ARBs",
+    "premium":        "💎 Picks Premium",
+    "totals_soccer":  "⚽ Totals Mundial",
+    "h2h_soccer":     "⚽ Moneyline Mundial",
+    "spreads_soccer": "⚽ Hándicap Mundial",
+    "arb_soccer":     "⚡ ARBs Fútbol",
 }
 
 def performance_by_type_block(bets=None) -> str:
