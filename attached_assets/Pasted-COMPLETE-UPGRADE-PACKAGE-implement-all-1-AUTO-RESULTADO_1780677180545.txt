@@ -1,0 +1,190 @@
+COMPLETE UPGRADE PACKAGE — implement all:
+
+━━━━━━━━━━━━━━━━━━━━
+1. AUTO-RESULTADOS
+━━━━━━━━━━━━━━━━━━━━
+After every scan, check completed games:
+- MLB: fetch scores from MLB Stats API
+  https://statsapi.mlb.com/api/v1/schedule
+  ?sportId=1&date=TODAY&hydrate=decisions
+- Soccer: use The Odds API scores endpoint
+
+When game is final:
+- Compare result to logged bets in bets_log.csv
+- Auto-call log_bankroll_entry with W/L/P
+- Send ntfy summary:
+  "✅ Yankees GANÓ | +$47.50 | 
+   Bankroll: $1,095"
+  or
+  "❌ Marlins perdió | -$50 | 
+   Bankroll: $950"
+
+━━━━━━━━━━━━━━━━━━━━
+2. REPORTE DIARIO 8 AM
+━━━━━━━━━━━━━━━━━━━━
+Every day at 8:00 AM ET send ntfy report:
+
+📊 REPORTE DIARIO — [fecha]
+━━━━━━━━━━━━
+💰 Bankroll: $X,XXX
+📈 ROI total: +X.X%
+🏆 Record: XX-XX-X
+━━━━━━━━━━━━
+AYER:
+✅ [Bet] → +$XX
+❌ [Bet] → -$XX
+Net: +/-$XX
+━━━━━━━━━━━━
+HOY:
+⚾ X juegos MLB
+⚽ X juegos fútbol/Mundial
+🔍 Escaneando desde las 10 AM ET
+
+━━━━━━━━━━━━━━━━━━━━
+3. FILTRO LIBROS RIESGOSOS
+━━━━━━━━━━━━━━━━━━━━
+Add book safety ratings:
+
+SAFE books (no warning):
+Bovada, BetOnline, FanDuel, 
+DraftKings, MyBookie, PointsBet,
+Caesars, BetMGM, Unibet, William Hill
+
+RISKY books (add warning):
+1xBet, GTbets, Betfred, Smarkets,
+Ladbrokes (for US users), Betway
+
+When pick is on RISKY book, add:
+"⚠️ LIBRO RIESGOSO — limitan 
+cuentas ganadoras. Busca línea 
+similar en Bovada o BetOnline"
+And show best SAFE book alternative.
+
+━━━━━━━━━━━━━━━━━━━━
+4. LESIONES MLB
+━━━━━━━━━━━━━━━━━━━━
+Before each MLB game analysis:
+- Check MLB Stats API for IL/injuries:
+  https://statsapi.mlb.com/api/v1/teams/
+  {teamId}/roster?rosterType=injured
+  
+If starting pitcher is IL or doubtful:
+- Flag in alert: 
+  "⚠️ Pitcher probable no confirmado"
+- Use league average ERA (4.50) instead
+- Lower confidence to MEDIA max
+
+If key lineup player is IL:
+- Note in context:
+  "⚠️ [Player] fuera — ofensiva reducida"
+
+━━━━━━━━━━━━━━━━━━━━
+5. CONTEXTO MUNDIAL — GRUPOS
+━━━━━━━━━━━━━━━━━━━━
+For every World Cup game, add 
+group stage context:
+
+Fetch standings from API-Football 
+or The Odds API tournament data.
+
+Add to alert context:
+"📋 SITUACIÓN:
+ España: 1er lugar Grupo X (clasificada)
+ Marruecos: 3er lugar (necesita ganar)
+ → Marruecos jugará con urgencia"
+
+Urgency levels:
+- ELIMINADO si pierde → 🔴 URGENTE
+- Necesita ganar → 🟡 ALTA PRESIÓN  
+- Ya clasificado → 🟢 SIN PRESIÓN
+- Ambos clasificados → ⚪ RELAJADO
+
+━━━━━━━━━━━━━━━━━━━━
+6. RÉCORD LOCAL/VISITA MLB
+━━━━━━━━━━━━━━━━━━━━
+Add home/away splits to MLB context:
+
+Fetch from MLB Stats API:
+- Home RS/RA per game
+- Away RS/RA per game
+- Home win% vs Away win%
+
+Show in alert:
+"🏠 Yankees en casa: 
+   RS 5.2 | RA 3.8 | 68% win
+🚗 Red Sox de visita: 
+   RS 3.9 | RA 4.8 | 41% win"
+
+Use home stats for home team
+Use away stats for visiting team
+(more accurate than season avg)
+
+━━━━━━━━━━━━━━━━━━━━
+7. STAKE MÍNIMO $10
+━━━━━━━━━━━━━━━━━━━━
+Never send alert if Kelly stake < $10.
+Not worth the account action risk.
+Add constant: MIN_STAKE = 10.00
+
+━━━━━━━━━━━━━━━━━━━━
+8. CLV AUTO-TRACKING
+━━━━━━━━━━━━━━━━━━━━
+Closing Line Value tracking:
+
+When alert fires:
+- Save opening odds to bets_log.csv
+  as 'alert_odds'
+
+5 minutes before game start:
+- Fetch current odds from The Odds API
+- Save as 'closing_odds'
+- Calculate CLV = closing_odds - alert_odds
+
+After 50+ bets, calculate:
+- Average CLV across all bets
+- Positive avg CLV = model has real edge
+- Negative avg CLV = model needs tuning
+
+Add CLV column to bankroll report.
+
+━━━━━━━━━━━━━━━━━━━━
+9. LINE SHOPPING MEJORADO
+━━━━━━━━━━━━━━━━━━━━
+Currently shows only best book.
+Now show top 3 books with odds:
+
+"📚 MEJORES LÍNEAS:
+ 1. FanDuel:   1.95 ← MEJOR
+ 2. Bovada:    1.91
+ 3. BetOnline: 1.88"
+
+Always prioritize SAFE books over
+RISKY books even if odds are 
+slightly worse.
+
+━━━━━━━━━━━━━━━━━━━━
+10. RESUMEN SEMANAL DOMINGO 9 AM
+━━━━━━━━━━━━━━━━━━━━
+Every Sunday send weekly summary:
+
+📊 RESUMEN SEMANAL
+━━━━━━━━━━━━
+💰 Bankroll: $X,XXX (+/-$XXX)
+📈 ROI semana: +X.X%
+🏆 Record: XX-XX-X
+━━━━━━━━━━━━
+MEJOR BET: [game] +$XXX
+PEOR BET:  [game] -$XXX
+━━━━━━━━━━━━
+MEJOR DEPORTE: ⚾/⚽
+MEJOR TIPO:    ML/Total/ARB
+━━━━━━━━━━━━
+PRÓXIMA SEMANA:
+Mundial: X juegos
+MLB: ~X juegos/día
+
+Keep all existing functionality.
+Apply each module independently
+so if one fails, others keep running.
+Add try/except to every new module.
+Commit after each module is complete.

@@ -16,8 +16,9 @@ except ImportError:
 API_KEY  = os.environ.get("ODDS_API_KEY", "")
 BANKROLL = 1000
 FRACTION = 0.25
-MIN_EDGE = 2.0
-INTERVAL = 600        # 10-minute main scan (API limit-friendly)
+MIN_EDGE  = 2.0
+MIN_STAKE = 10.00     # Module 7: never alert if Kelly stake < $10
+INTERVAL  = 600       # 10-minute main scan (API limit-friendly)
 NOTIFY   = "my-bets"
 LOG_CSV  = True
 
@@ -120,6 +121,7 @@ _sent_alerts:          dict = {}   # key → {date, odds, edge} for smart dedup
 daily_bets:            list = []
 last_reset:            date = datetime.now(CDT).date()
 last_morning_report:   date = date(2000, 1, 1)   # force first run at 8 AM
+last_weekly_report:    date = date(2000, 1, 1)   # force first run Sunday 9 AM
 lineup_scan_counter:   int  = 0                  # increments each main scan
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
@@ -518,10 +520,15 @@ def morning_report_world_cup():
 def morning_report():
     global last_morning_report
     print("\n" + "="*50)
-    print(f"🌅 MORNING REPORT — {datetime.now(CDT).strftime('%Y-%m-%d %H:%M CDT')}")
+    print(f"🌅 MORNING REPORT — {datetime.now(ET).strftime('%Y-%m-%d %H:%M ET')}")
+    # Module 2: consolidated daily ntfy report first
+    try:
+        send_daily_ntfy_report()
+    except Exception as e:
+        print(f"  ⚠️  Daily report error: {e}")
     morning_report_mlb()
     morning_report_world_cup()
-    last_morning_report = datetime.now(CDT).date()
+    last_morning_report = datetime.now(ET).date()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULE 2 — REAL-TIME LINEUP CHANGE MONITOR (every 15 min)
@@ -1295,6 +1302,10 @@ def analyze_totals(games, sport_key):
 def notify_totals(total_bets):
     global alerted_bets
     for b in total_bets:
+        # Module 7: stake minimum filter
+        if b.get("stake", 0) < MIN_STAKE:
+            continue
+
         home, away = b["match"].split(" vs ", 1)
         dedup_key = f"{home}_{away}_{b['team']}_totals"
         if not _should_alert(dedup_key, odds=b["odds"], edge=b["edge"]):
@@ -1308,6 +1319,9 @@ def notify_totals(total_bets):
         side    = b["team"]        # "OVER" / "UNDER"
         line    = b["side"]        # the book line number
         gt      = _fmt_et(b.get("time", ""))
+
+        # Module 3: book safety warning
+        bk_warn_tot = _book_warning(b.get("bookmaker", ""))
 
         if is_mlb:
             # ── MLB clean format ──────────────────────────────────────────
@@ -1327,7 +1341,7 @@ def notify_totals(total_bets):
                 f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
                 f"🎯 APUESTA: {side} {line} carreras (Total)\n\n"
-                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}\n"
+                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn_tot}\n"
                 f"{_DIV}\n"
                 f"📊 POR QUÉ:\n"
                 f"Modelo proyecta: {b['our_line']} carreras\n"
@@ -1361,7 +1375,7 @@ def notify_totals(total_bets):
                 f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
                 f"🎯 APUESTA: {side} {line} {unit} (Total)\n\n"
-                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}\n"
+                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn_tot}\n"
                 f"{_DIV}\n"
                 f"📊 POR QUÉ:\n"
                 f"Modelo proyecta: {b['our_line']} {unit}\n"
@@ -1539,6 +1553,22 @@ def analyze_game_full(game, sport_key, prev_map=None):
         moved_h, dir_h, dlt_h = detect_line_movement(game_id, home, h_cur, prev_map)
         moved_a, dir_a, dlt_a = detect_line_movement(game_id, away, a_cur, prev_map)
 
+        # Module 4: injury check
+        il_data = {}
+        try:
+            il_data = fetch_mlb_il(home, away)
+        except Exception:
+            pass
+
+        # Module 6: home/away splits
+        h_splits = {"home_rs": 0, "home_ra": 0, "home_wpct": 0}
+        a_splits = {"away_rs": 0, "away_ra": 0, "away_wpct": 0}
+        try:
+            h_splits = fetch_mlb_home_away_splits(home)
+            a_splits = fetch_mlb_home_away_splits(away)
+        except Exception:
+            pass
+
         context = {
             "pitcher_home": f"{h_pname} (ERA {h_era:.2f})",
             "pitcher_away": f"{a_pname} (ERA {a_era:.2f})",
@@ -1549,6 +1579,9 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "line_moved":  moved_h or moved_a,
             "line_note":   (f"Línea {home} {dir_h}{dlt_h}" if moved_h
                            else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
+            "il_data":     il_data,   # Module 4
+            "h_splits":    h_splits,  # Module 6
+            "a_splits":    a_splits,  # Module 6
         }
 
     # ── SOCCER ────────────────────────────────────────────────────────────────
@@ -1625,6 +1658,13 @@ def analyze_game_full(game, sport_key, prev_map=None):
         form_note_a = (f"{form_a['goals_for']:.1f} goles/partido ({form_a['matches']} WC)"
                        if form_a else "ELO only")
 
+        # Module 5: WC group standings
+        wc_standings = {}
+        try:
+            wc_standings = fetch_wc_standings()
+        except Exception:
+            pass
+
         context = {
             "elo_home": elo_h, "elo_away": elo_a, "elo_diff": elo_h - elo_a,
             "form_home": form_note_h,
@@ -1635,6 +1675,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "line_moved": moved_h or moved_a,
             "line_note": (f"Línea {home} {dir_h}{dlt_h}" if moved_h
                          else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
+            "wc_standings": wc_standings,   # Module 5
         }
 
     # Drop any pick whose true probability is below the minimum threshold
@@ -1679,6 +1720,11 @@ def notify_game_analysis(analyses, sport_key):
         gt  = _fmt_et(a["time"])
         ctx = a["context"]
 
+        # Module 7: filter candidates below MIN_STAKE
+        a["candidates"] = [c for c in a["candidates"] if c.get("stake", 0) >= MIN_STAKE]
+        if not a["candidates"]:
+            continue
+
         # Context block
         if is_mlb:
             ctx_lines = (
@@ -1690,6 +1736,20 @@ def notify_game_analysis(analyses, sport_key):
             )
             if ctx.get("wind_info"):
                 ctx_lines += f"💨 {ctx['wind_info']}\n"
+            # Module 4: injury warnings
+            for tname, il_list in ctx.get("il_data", {}).items():
+                if il_list:
+                    ctx_lines += f"⚠️ IL {tname}: {', '.join(il_list[:3])}\n"
+            # Module 6: home/away splits
+            hs = ctx.get("h_splits", {})
+            as_ = ctx.get("a_splits", {})
+            if hs.get("home_rs"):
+                ctx_lines += (
+                    f"🏠 {home} en casa: RS {hs['home_rs']} | RA {hs['home_ra']} | "
+                    f"{hs['home_wpct']*100:.0f}% win\n"
+                    f"🚗 {away} de visita: RS {as_['away_rs']} | RA {as_['away_ra']} | "
+                    f"{as_['away_wpct']*100:.0f}% win\n"
+                )
         else:
             sign = "+" if ctx["elo_diff"] >= 0 else ""
             ctx_lines = (
@@ -1700,6 +1760,13 @@ def notify_game_analysis(analyses, sport_key):
                 f"   Concedidos:   {ctx['conceded_away']} / partido\n"
                 f"🤝 Prob. empate: {ctx['p_draw']}%\n"
             )
+            # Module 5: WC group urgency
+            standings = ctx.get("wc_standings", {})
+            if standings:
+                for tname in (home, away):
+                    urg = _wc_urgency_line(tname, standings)
+                    if urg:
+                        ctx_lines += f"📋 {urg}\n"
 
         if ctx.get("line_moved") and ctx.get("line_note"):
             ctx_lines += f"📉 {ctx['line_note']}\n"
@@ -2120,6 +2187,476 @@ def notify_sharp_money(sharp_moves):
         print(f"  ⚡ Sharp: {team} en {m['match']} ({m['pct']}% movimiento)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# UPGRADE PACKAGE — 10 MODULES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Module 3: book safety ─────────────────────────────────────────────────────
+SAFE_BOOKS = {
+    "bovada", "bodog", "betmgm", "fanduel", "draftkings", "mybookie",
+    "pointsbet", "caesars", "unibet", "williamhill", "william hill",
+    "betonline.ag", "betonline",
+}
+RISKY_BOOKS = {
+    "1xbet", "gtbets", "betfred", "smarkets", "ladbrokes", "betway",
+}
+
+def _book_warning(bookmaker):
+    """Return warning line if bookmaker is risky, else empty string."""
+    bk = (bookmaker or "").lower()
+    if any(r in bk for r in RISKY_BOOKS):
+        return ("\n⚠️ LIBRO RIESGOSO — limitan cuentas ganadoras. "
+                "Busca línea similar en Bovada o BetOnline")
+    return ""
+
+# ── Module 9: line shopping top-3 ─────────────────────────────────────────────
+def _top3_from_book_list(book_list):
+    """
+    Deduplicate by bookmaker name, prioritise SAFE books, return top 3 sorted
+    by odds descending. book_list = [(price, book_name), ...]
+    Returns [(book_name, price), ...]
+    """
+    book_best: dict = {}
+    for price, bk_name in book_list:
+        if bk_name not in book_best or price > book_best[bk_name]:
+            book_best[bk_name] = price
+    sorted_items = sorted(
+        book_best.items(),
+        key=lambda x: (x[0].lower() not in SAFE_BOOKS, -x[1]),
+    )
+    return sorted_items[:3]   # [(book_name, price), ...]
+
+def _top3_block(top3):
+    """Format line-shopping block for ntfy body. top3 = [(book_name, price), ...]"""
+    if not top3:
+        return ""
+    lines = []
+    for i, (bk, pr) in enumerate(top3):
+        tag = " ← MEJOR" if i == 0 else ""
+        lines.append(f"  {i+1}. {bk:<16} {pr:.2f}{tag}")
+    return "📚 MEJORES LÍNEAS:\n" + "\n".join(lines) + "\n"
+
+# ── Module 1: auto-resultados ─────────────────────────────────────────────────
+RESULTS_CHECKED_FILE = "results_checked.json"
+
+def _load_results_checked():
+    if os.path.exists(RESULTS_CHECKED_FILE):
+        try:
+            with open(RESULTS_CHECKED_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def _save_results_checked(checked):
+    try:
+        with open(RESULTS_CHECKED_FILE, "w") as f:
+            json.dump(checked, f)
+    except Exception:
+        pass
+
+def _fetch_mlb_scores_today():
+    """Return list of finished MLB games today as dicts with home/away/scores."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    results = []
+    try:
+        data = _mlb_rest("/schedule", {
+            "sportId": 1, "date": today,
+            "hydrate": "decisions,team,linescore",
+        })
+        for date_entry in data.get("dates", []):
+            for g in date_entry.get("games", []):
+                status = g.get("status", {}).get("detailedState", "")
+                if status not in ("Final", "Game Over", "Completed Early"):
+                    continue
+                home = g.get("teams", {}).get("home", {})
+                away = g.get("teams", {}).get("away", {})
+                results.append({
+                    "home":       home.get("team", {}).get("name", ""),
+                    "away":       away.get("team", {}).get("name", ""),
+                    "home_score": int(home.get("score", 0) or 0),
+                    "away_score": int(away.get("score", 0) or 0),
+                })
+    except Exception as e:
+        print(f"  ⚠️  MLB scores error: {e}")
+    return results
+
+def _fetch_soccer_scores():
+    """Return list of completed soccer/WC games from The Odds API scores endpoint."""
+    results = []
+    for sk in SPORT_KEYS:
+        if "soccer" not in sk and "world" not in sk:
+            continue
+        try:
+            r = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{sk}/scores",
+                params={"apiKey": API_KEY, "daysFrom": 1, "dateFormat": "iso"},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                continue
+            for g in r.json():
+                if not g.get("completed"):
+                    continue
+                sc = {s["name"]: int(s["score"] or 0)
+                      for s in (g.get("scores") or []) if s.get("score") is not None}
+                hn, an = g.get("home_team", ""), g.get("away_team", "")
+                if hn in sc and an in sc:
+                    results.append({"home": hn, "away": an,
+                                    "home_score": sc[hn], "away_score": sc[an]})
+        except Exception as e:
+            print(f"  ⚠️  Soccer scores error ({sk}): {e}")
+    return results
+
+def check_results():
+    """Auto-resultados: check completed games vs pending bets_log rows → W/L ntfy."""
+    try:
+        if not os.path.exists(BETS_LOG_FILE):
+            return
+        with open(BETS_LOG_FILE, newline="") as f:
+            all_bets = list(csv.DictReader(f))
+        pending = [b for b in all_bets if not b.get("result")]
+        if not pending:
+            return
+
+        checked = _load_results_checked()
+        scores  = _fetch_mlb_scores_today() + _fetch_soccer_scores()
+
+        for bet in pending:
+            match  = bet.get("match", "")
+            team   = bet.get("team", "")
+            stake  = float(bet.get("stake", 0) or 0)
+            odds   = float(bet.get("odds",  0) or 0)
+            mtype  = bet.get("market_type", "h2h")
+            side_f = bet.get("side", "")
+            bkey   = f"{match}|{team}|{bet.get('game_time','')}"
+            if bkey in checked:
+                continue
+
+            score = next(
+                (s for s in scores
+                 if s["home"].lower() in match.lower()
+                 and s["away"].lower() in match.lower()),
+                None,
+            )
+            if not score:
+                continue
+
+            result      = None
+            profit_loss = 0.0
+            home_won    = score["home_score"] > score["away_score"]
+
+            if mtype in ("h2h", "moneyline", ""):
+                is_home = (score["home"].lower() in team.lower()
+                           or team.lower() in score["home"].lower())
+                result      = "W" if (home_won == is_home) else "L"
+                profit_loss = round(stake * (odds - 1), 2) if result == "W" else -stake
+
+            elif mtype == "totals":
+                total = score["home_score"] + score["away_score"]
+                try:
+                    line = float(side_f)
+                except Exception:
+                    continue
+                if team.upper() == "OVER":
+                    result = "W" if total > line else ("P" if total == line else "L")
+                else:
+                    result = "W" if total < line else ("P" if total == line else "L")
+                profit_loss = (round(stake * (odds - 1), 2) if result == "W"
+                               else (0.0 if result == "P" else -stake))
+
+            if result is None:
+                continue
+
+            try:
+                log_bankroll_entry(
+                    sport=bet.get("sport", ""),
+                    match=match,
+                    market_type=mtype,
+                    stake=stake,
+                    result=result,
+                    profit_loss=profit_loss,
+                )
+            except Exception as ex:
+                print(f"  ⚠️  bankroll log error: {ex}")
+
+            checked[bkey] = result
+            new_br = load_bankroll_state()["current"]
+            icon  = "✅" if result == "W" else ("🤝" if result == "P" else "❌")
+            verb  = "GANÓ" if result == "W" else ("PUSH" if result == "P" else "perdió")
+            pl_s  = f"+${profit_loss:.2f}" if profit_loss >= 0 else f"-${abs(profit_loss):.2f}"
+            body  = (
+                f"{icon} {team} {verb} | {pl_s}\n"
+                f"Bankroll: ${new_br:,.2f}\n"
+                f"Partido: {match}\n"
+                f"Resultado: {score['home']} {score['home_score']} – "
+                f"{score['away_score']} {score['away']}"
+            )
+            ntfy_post(f"{icon} RESULTADO | {team} {verb} | {pl_s}", body, "high")
+            print(f"  {icon} Resultado: {team} {verb} | {pl_s}")
+
+        _save_results_checked(checked)
+
+    except Exception as e:
+        print(f"  ⚠️  check_results error: {e}")
+
+# ── Module 4: MLB IL / injuries ───────────────────────────────────────────────
+_injury_cache: dict = {}
+
+def fetch_mlb_il(home, away):
+    """Return {team_name: [player_names]} for IL players on both teams today."""
+    today_str = datetime.now(ET).strftime("%Y-%m-%d")
+    if today_str in _injury_cache:
+        return _injury_cache[today_str]
+    result = {}
+    for tname in (home, away):
+        try:
+            if HAS_STATSAPI:
+                teams = statsapi.lookup_team(tname)
+                tid   = teams[0]["id"] if teams else None
+            else:
+                data  = _mlb_rest("/teams", {"name": tname, "sportId": 1})
+                teams = data.get("teams", [])
+                tid   = teams[0]["id"] if teams else None
+            if tid is None:
+                continue
+            roster  = _mlb_rest(f"/teams/{tid}/roster", {"rosterType": "injured"})
+            players = [p.get("person", {}).get("fullName", "")
+                       for p in roster.get("roster", [])]
+            if players:
+                result[tname] = players
+        except Exception:
+            pass
+    _injury_cache[today_str] = result
+    return result
+
+# ── Module 6: home/away splits ────────────────────────────────────────────────
+_splits_cache: dict = {}
+
+def fetch_mlb_home_away_splits(team_name):
+    """Return home/away RS, RA, win% from MLB Stats API homeAndAway group."""
+    if team_name in _splits_cache:
+        return _splits_cache[team_name]
+    empty = {"home_rs": 4.5, "home_ra": 4.5, "home_wpct": 0.500,
+             "away_rs": 4.5, "away_ra": 4.5, "away_wpct": 0.500}
+    try:
+        if HAS_STATSAPI:
+            teams = statsapi.lookup_team(team_name)
+            tid   = teams[0]["id"] if teams else None
+        else:
+            data  = _mlb_rest("/teams", {"name": team_name, "sportId": 1})
+            teams = data.get("teams", [])
+            tid   = teams[0]["id"] if teams else None
+        if tid is None:
+            return empty
+        data   = _mlb_rest(f"/teams/{tid}/stats", {
+            "stats": "homeAndAway", "group": "hitting",
+            "season": MLB_YEAR, "sportId": 1,
+        })
+        splits = (data.get("stats", [{}])[0].get("splits", [])
+                  if data.get("stats") else [])
+        result = dict(empty)
+        for s in splits:
+            loc  = s.get("split", {}).get("code", "")
+            stat = s.get("stat", {})
+            gp   = max(float(stat.get("gamesPlayed", 1) or 1), 1)
+            runs = float(stat.get("runs",        0) or 0)
+            ra   = float(stat.get("earnedRuns",  0) or 0)
+            wins = float(stat.get("wins",        0) or 0)
+            if loc == "H":
+                result["home_rs"]   = round(runs / gp, 2)
+                result["home_ra"]   = round(ra   / gp, 2)
+                result["home_wpct"] = round(wins / gp, 3)
+            elif loc == "A":
+                result["away_rs"]   = round(runs / gp, 2)
+                result["away_ra"]   = round(ra   / gp, 2)
+                result["away_wpct"] = round(wins / gp, 3)
+        _splits_cache[team_name] = result
+        return result
+    except Exception:
+        return empty
+
+# ── Module 5: World Cup group context ─────────────────────────────────────────
+_wc_standings_cache: dict = {}
+
+def fetch_wc_standings():
+    """Fetch WC group standings from ESPN. Returns {team_name: {pos,group,pts,w,d,l,gp}}."""
+    today_str = datetime.now(ET).strftime("%Y-%m-%d")
+    if today_str in _wc_standings_cache:
+        return _wc_standings_cache[today_str]
+    result = {}
+    try:
+        r = requests.get(
+            "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/standings",
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return result
+        data   = r.json()
+        groups = (data.get("children")
+                  or data.get("standings", {}).get("entries", [])
+                  or [])
+        for group in groups:
+            grp_name = group.get("abbreviation") or group.get("name", "?")
+            entries  = group.get("standings", {}).get("entries", [])
+            for i, entry in enumerate(entries):
+                tname = entry.get("team", {}).get("displayName", "")
+                stats = {s.get("name"): s.get("value")
+                         for s in entry.get("stats", [])}
+                result[tname] = {
+                    "pos":   i + 1,
+                    "group": grp_name,
+                    "pts":   int(stats.get("points",     0) or 0),
+                    "w":     int(stats.get("wins",       0) or 0),
+                    "d":     int(stats.get("ties",       0) or 0),
+                    "l":     int(stats.get("losses",     0) or 0),
+                    "gp":    int(stats.get("gamesPlayed", 0) or 0),
+                }
+    except Exception as e:
+        print(f"  ⚠️  WC standings error: {e}")
+    _wc_standings_cache[today_str] = result
+    return result
+
+def _wc_urgency_line(team_name, standings):
+    """Single-line urgency description for a WC team (module 5)."""
+    s = standings.get(team_name)
+    if not s:
+        return ""
+    pos, gp, grp = s["pos"], s["gp"], s["group"]
+    if gp >= 2:
+        if pos <= 2:    urg = "🟢 ya clasificado"
+        elif pos == 3:  urg = "🟡 ALTA PRESIÓN — necesita ganar"
+        else:           urg = "🔴 URGENTE — eliminado si pierde"
+    else:
+        urg = f"{'🟢' if pos <= 2 else '🟡'} {pos}° lugar"
+    return f"{team_name} (Grupo {grp}, {pos}°): {urg}"
+
+# ── Module 2: consolidated daily ntfy report ──────────────────────────────────
+def send_daily_ntfy_report():
+    """Send consolidated 8 AM ntfy: bankroll, ROI, record, yesterday, today count."""
+    try:
+        state   = load_bankroll_state()
+        bets    = state["bets"]
+        current = state["current"]
+        settled = [b for b in bets if b.get("result") in ("W", "L", "P")]
+        wins    = len([b for b in settled if b.get("result") == "W"])
+        losses  = len([b for b in settled if b.get("result") == "L"])
+        pushes  = len([b for b in settled if b.get("result") == "P"])
+        roi     = (current - BANKROLL) / BANKROLL * 100 if BANKROLL else 0
+
+        yesterday = (datetime.now(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
+        yday_bets = [b for b in bets
+                     if b.get("date", "").startswith(yesterday) and b.get("result")]
+        yday_net   = 0.0
+        yday_lines = ""
+        for b in yday_bets:
+            pl   = float(b.get("profit_loss", 0) or 0)
+            yday_net += pl
+            icon = ("✅" if b.get("result") == "W"
+                    else ("❌" if b.get("result") == "L" else "🤝"))
+            name = f"{b.get('team','')} ({b.get('market_type','')})"
+            pl_s = f"+${pl:.2f}" if pl >= 0 else f"-${abs(pl):.2f}"
+            yday_lines += f"{icon} {name} → {pl_s}\n"
+        if not yday_lines:
+            yday_lines = "Sin apuestas resueltas ayer\n"
+        yday_net_s = f"+${yday_net:.2f}" if yday_net >= 0 else f"-${abs(yday_net):.2f}"
+
+        mlb_cnt = 0
+        try:
+            mlb_cnt = len(fetch_mlb_games_today())
+        except Exception:
+            pass
+
+        today_s = datetime.now(ET).strftime("%d %b %Y")
+        body = (
+            f"📊 REPORTE DIARIO — {today_s}\n"
+            f"{_DIV}\n"
+            f"💰 Bankroll: ${current:,.2f}\n"
+            f"📈 ROI total: {roi:+.1f}%\n"
+            f"🏆 Record: {wins}-{losses}-{pushes}\n"
+            f"{_DIV}\n"
+            f"AYER:\n"
+            f"{yday_lines}"
+            f"Net: {yday_net_s}\n"
+            f"{_DIV}\n"
+            f"HOY:\n"
+            f"⚾ {mlb_cnt} juegos MLB\n"
+            f"⚽ Ver scan para fútbol/Mundial\n"
+            f"🔍 Escaneando desde las 10 AM ET"
+        )
+        ntfy_post("📊 REPORTE DIARIO", body, "default")
+        print("  📊 Reporte diario ntfy enviado")
+    except Exception as e:
+        print(f"  ⚠️  send_daily_ntfy_report error: {e}")
+
+# ── Module 10: weekly summary Sunday 9 AM ─────────────────────────────────────
+def send_weekly_summary():
+    """Send weekly ntfy summary every Sunday at 9 AM ET."""
+    try:
+        state   = load_bankroll_state()
+        bets    = state["bets"]
+        current = state["current"]
+        settled = [b for b in bets if b.get("result") in ("W", "L", "P")]
+        wins    = len([b for b in settled if b.get("result") == "W"])
+        losses  = len([b for b in settled if b.get("result") == "L"])
+        pushes  = len([b for b in settled if b.get("result") == "P"])
+        roi     = (current - BANKROLL) / BANKROLL * 100 if BANKROLL else 0
+
+        week_ago  = (datetime.now(ET) - timedelta(days=7)).strftime("%Y-%m-%d")
+        week_bets = [b for b in settled if b.get("date", "") >= week_ago]
+        week_stk  = sum(float(b.get("stake",       0) or 0) for b in week_bets)
+        week_net  = sum(float(b.get("profit_loss", 0) or 0) for b in week_bets)
+        week_wins = len([b for b in week_bets if b.get("result") == "W"])
+        week_loss = len([b for b in week_bets if b.get("result") == "L"])
+        week_roi  = (week_net / week_stk * 100) if week_stk else 0.0
+
+        by_pl  = sorted(week_bets, key=lambda x: float(x.get("profit_loss", 0) or 0))
+        worst  = by_pl[0]  if by_pl else None
+        best   = by_pl[-1] if by_pl else None
+        best_s = (f"{best.get('team','')}  +${float(best.get('profit_loss',0)):.2f}"
+                  if best  else "N/A")
+        worst_s = (f"{worst.get('team','')}  -${abs(float(worst.get('profit_loss',0))):.2f}"
+                   if worst else "N/A")
+
+        sport_pnl: dict = {}
+        type_pnl:  dict = {}
+        for b in week_bets:
+            for key, cat in [(b.get("sport", "?"), sport_pnl),
+                              (b.get("market_type", "?"), type_pnl)]:
+                pl  = float(b.get("profit_loss", 0) or 0)
+                stk = float(b.get("stake",       0) or 0)
+                cat.setdefault(key, {"pnl": 0.0, "stake": 0.0})
+                cat[key]["pnl"]   += pl
+                cat[key]["stake"] += stk
+        best_sport = (max(sport_pnl, key=lambda s: sport_pnl[s]["pnl"])
+                      if sport_pnl else "N/A")
+        best_type  = (max(type_pnl,  key=lambda t: type_pnl[t]["pnl"])
+                      if type_pnl  else "N/A")
+
+        delta   = current - BANKROLL
+        delta_s = f"+${delta:.2f}" if delta >= 0 else f"-${abs(delta):.2f}"
+
+        body = (
+            f"📊 RESUMEN SEMANAL\n"
+            f"{_DIV}\n"
+            f"💰 Bankroll: ${current:,.2f} ({delta_s})\n"
+            f"📈 ROI semana: {week_roi:+.1f}%  |  Total: {roi:+.1f}%\n"
+            f"🏆 Semana: {week_wins}-{week_loss}  |  Total: {wins}-{losses}-{pushes}\n"
+            f"{_DIV}\n"
+            f"MEJOR BET: {best_s}\n"
+            f"PEOR BET:  {worst_s}\n"
+            f"{_DIV}\n"
+            f"MEJOR DEPORTE: {best_sport}\n"
+            f"MEJOR TIPO:    {best_type}\n"
+            f"{_DIV}\n"
+            f"PRÓXIMA SEMANA:\n"
+            f"⚾ MLB activo  ⚽ Mundial en curso"
+        )
+        ntfy_post("📊 RESUMEN SEMANAL", body, "default")
+        print("  📊 Resumen semanal ntfy enviado")
+    except Exception as e:
+        print(f"  ⚠️  send_weekly_summary error: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CORE — ANALYSIS & NOTIFICATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2139,7 +2676,9 @@ def analyze(games, prev_map, new_map):
         if len(bookmakers) < 4:
             continue
 
-        odds_h, odds_a = [], []
+        odds_h, odds_a     = [], []
+        book_list_h: list  = []   # Module 9: [(price, book_name)] for top-3
+        book_list_a: list  = []
         best_bk_h = best_bk_a = ""
         bov_odds_h = bov_odds_a = None   # Bovada/Bodog specific odds
         for bk in bookmakers:
@@ -2152,12 +2691,14 @@ def analyze(games, prev_map, new_map):
                             if not odds_h or price > max(odds_h):
                                 best_bk_h = bk["title"]
                             odds_h.append(price)
+                            book_list_h.append((price, bk["title"]))
                             if is_preferred and (bov_odds_h is None or price > bov_odds_h):
                                 bov_odds_h = price
                         else:
                             if not odds_a or price > max(odds_a):
                                 best_bk_a = bk["title"]
                             odds_a.append(price)
+                            book_list_a.append((price, bk["title"]))
                             if is_preferred and (bov_odds_a is None or price > bov_odds_a):
                                 bov_odds_a = price
 
@@ -2183,9 +2724,12 @@ def analyze(games, prev_map, new_map):
         new_map[f"{game_id}_{home}"] = best_h
         new_map[f"{game_id}_{away}"] = best_a
 
-        for team, prob, best_odd, side, bookmaker, bov_odds in [
-            (home, fp_h, best_h, "HOME", best_bk_h, bov_odds_h),
-            (away, fp_a, best_a, "AWAY", best_bk_a, bov_odds_a),
+        top3_h = _top3_from_book_list(book_list_h)   # Module 9
+        top3_a = _top3_from_book_list(book_list_a)
+
+        for team, prob, best_odd, side, bookmaker, bov_odds, top3 in [
+            (home, fp_h, best_h, "HOME", best_bk_h, bov_odds_h, top3_h),
+            (away, fp_a, best_a, "AWAY", best_bk_a, bov_odds_a, top3_a),
         ]:
             r = kelly_stake(prob, best_odd)
             if not r["has_value"] or r["edge"] < MIN_EDGE:
@@ -2218,6 +2762,7 @@ def analyze(games, prev_map, new_map):
                 "roi":          roi,
                 "value_pct":    val_pct,
                 "elo_prob":     round(elo_p * 100, 1),
+                "top3_books":   top3,  # Module 9: line shopping
             })
 
     return bets, sharp_moves
@@ -2228,24 +2773,24 @@ def notify_bets(new_bets):
         return
 
     for b in new_bets:
+        # Module 7: stake minimum filter
+        if b.get("stake", 0) < MIN_STAKE:
+            continue
+
         home, away = b["match"].split(" vs ", 1)
         dedup_key = f"{home}_{away}_{b['team']}_ml"
         if not _should_alert(dedup_key, odds=b["odds"], edge=b["edge"]):
             continue
         sport   = b.get("sport", "")
         emoji   = _sport_emoji(sport)
-        conf_es = _conf_es(b["confidence"])
         gt      = _fmt_et(b.get("time", ""))
-        bov     = b.get("bovada_odds")
-
-        mv_line = ""
-        if b["line_moved"]:
-            mv_line = f"📉 Movimiento de línea: {b['line_dir']}{b['line_delta']}\n"
-
-        bov_line = f"📖 Bovada: {bov}\n" if bov else ""
-
         elo_p   = b.get("elo_prob", 0)
         is_mlb  = b.get("sport", "") == "MLB"
+
+        # Module 9: top-3 line shopping block
+        top3_blk = _top3_block(b.get("top3_books", []))
+        # Module 3: book safety warning
+        bk_warn  = _book_warning(b.get("bookmaker", ""))
 
         if is_mlb:
             # ── MLB clean format ──────────────────────────────────────────
@@ -2265,8 +2810,9 @@ def notify_bets(new_bets):
                 f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
                 f"🎯 APUESTA: {b['team']} GANA (ML)\n\n"
-                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}\n"
+                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn}\n"
                 f"{_DIV}\n"
+                f"{top3_blk}"
                 f"📊 POR QUÉ:\n"
                 f"Modelo → {elo_p}% de ganar\n"
                 f"Libro  → {impl_pct}% implícito\n"
@@ -2291,8 +2837,9 @@ def notify_bets(new_bets):
                 f"⏰ Hoy {gt}\n"
                 f"{_DIV}\n"
                 f"🎯 APUESTA: {b['team']} GANA (ML)\n\n"
-                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}\n"
+                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn}\n"
                 f"{_DIV}\n"
+                f"{top3_blk}"
                 f"📊 POR QUÉ:\n"
                 f"Nuestro modelo: {elo_p}% | Libro: {impl_pct}% → Edge {b['edge']}%\n"
                 f"{_DIV}\n"
@@ -2304,6 +2851,11 @@ def notify_bets(new_bets):
 
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
+        # Module 8: save ML bets to pending_bets for CLV tracking
+        try:
+            save_pending_bet(b)
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE — CSV LOGGING
@@ -2532,22 +3084,37 @@ if __name__ == "__main__":
 
     while True:
         now_cdt = datetime.now(CDT)
+        now_et  = datetime.now(ET)
         print(f"\n{'='*50}\n🕐 {now_cdt.strftime('%Y-%m-%d %H:%M CDT')}")
 
         check_midnight_reset()
 
-        # Morning report at 8 AM CDT (once per day)
-        if now_cdt.hour == 8 and last_morning_report < now_cdt.date():
+        # Morning report at 8 AM ET (once per day) — Module 2
+        if now_et.hour == 8 and last_morning_report < now_et.date():
             try:
                 morning_report()
             except Exception as e:
                 print(f"  ⚠️  Morning report error: {e}")
+
+        # Weekly summary every Sunday at 9 AM ET — Module 10
+        if now_et.weekday() == 6 and now_et.hour == 9 and last_weekly_report < now_et.date():
+            try:
+                send_weekly_summary()
+                last_weekly_report = now_et.date()
+            except Exception as e:
+                print(f"  ⚠️  Weekly summary error: {e}")
 
         print(f"🔍 Scan #{scan}")
         try:
             run_scan()
         except Exception as e:
             print(f"  ⚠️  Scan error (will retry): {e}")
+
+        # Module 1: auto-resultados — check after every scan
+        try:
+            check_results()
+        except Exception as e:
+            print(f"  ⚠️  check_results error: {e}")
 
         print(f"\n⏳ Next scan in {INTERVAL // 60} min...")
         time.sleep(INTERVAL)
