@@ -5147,71 +5147,159 @@ def fetch_venue_temp(venue_city: str) -> float | None:
 # ── CLAUDE AI ANALYSIS ENGINE ────────────────────────────────────────────────
 _claude_cache: dict = {}
 
+# ── ERA validity window used by both pre-validator and range guard ────────────
+_ERA_MIN = 1.50
+_ERA_MAX = 8.00
+
+def _pre_validate_for_claude(game_data: dict, sport: str) -> "tuple[dict, list]":
+    """
+    Sanitise game_data before sending to Claude.
+    Returns (clean_data, warnings) where:
+      - clean_data  : copy with suspicious numeric fields replaced by a
+                      "DATO NO VERIFICADO" marker so Claude can flag them.
+      - warnings    : list of human-readable warning strings logged to console.
+    Checks performed:
+      1. ERA values (era_home, era_away, bullpen ERA markers) must be 1.50–8.00.
+      2. Pitcher names must be present and non-TBD.
+      3. Bullpen data tagged as unverified in _data_quality → marked.
+    """
+    import copy
+    clean    = copy.deepcopy(game_data)
+    warnings = []
+
+    # ── 1. ERA range validation ───────────────────────────────────────────────
+    for era_key in ("era_home", "era_away", "bullpen_era_home", "bullpen_era_away"):
+        val = clean.get(era_key)
+        if val is None:
+            continue
+        try:
+            fval = float(val)
+        except (TypeError, ValueError):
+            continue
+        if not (_ERA_MIN <= fval <= _ERA_MAX):
+            msg = f"ERA sospechosa en '{era_key}': {fval} (fuera de rango {_ERA_MIN}–{_ERA_MAX})"
+            warnings.append(msg)
+            clean[era_key] = "DATO NO VERIFICADO"
+
+    # ── 2. Pitcher name validation ────────────────────────────────────────────
+    for p_key in ("pitcher_home", "pitcher_away", "pname_home", "pname_away"):
+        val = str(clean.get(p_key) or "")
+        if not val or val.strip().upper() in ("TBD", "UNKNOWN", "N/A", ""):
+            msg = f"Nombre de pitcher ausente/TBD en '{p_key}'"
+            warnings.append(msg)
+            clean[p_key] = "SIN CONFIRMAR"
+
+    # ── 3. Bullpen cross-source check (uses _data_quality populated earlier) ──
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    match_str = str(game_data.get("match", ""))
+    teams = [t.strip() for t in match_str.split(" vs ", 1)] if " vs " in match_str else []
+    for t in teams:
+        dq = _data_quality.get(f"{t}_{today}", {})
+        if dq.get("verified") is False:
+            msg = f"Bullpen ERA de '{t}' no verificado (fuera de rango o sin fuente)"
+            warnings.append(msg)
+            clean[f"bullpen_note_{t}"] = "DATO NO VERIFICADO"
+
+    if warnings:
+        for w in warnings:
+            print(f"  ⚠️  [pre-validate] {w}")
+
+    return clean, warnings
+
+
+_CLAUDE_SYSTEM = (
+    "Eres la capa final de verificación y análisis de apuestas deportivas. "
+    "Antes de recomendar apostar, verifica internamente que todos los datos sean "
+    "coherentes entre sí. Si cualquier valor parece incorrecto, imposible o "
+    "contradictorio con otros datos del partido, indícalo en 'datos_inconsistentes'. "
+    "Solo recomienda apostar: true si estás seguro de que los datos son precisos y "
+    "la apuesta tiene valor real. Si los datos parecen poco confiables, responde con "
+    "apostar: false y razonamiento: 'Datos insuficientes — no apostar'."
+)
+
+
 def analyze_with_claude(game_data: dict, sport: str) -> "dict | None":
     """
-    Send collected game data to Claude and get expert betting analysis.
+    Pre-validate game_data, then send to Claude as the final verification layer.
     sport: "MLB" or "SOCCER"
     Returns {pick, line, confianza, razonamiento, factores_positivos,
-             factores_negativos, apostar} or None if API unavailable / error.
-    Results cached per content hash to avoid duplicate calls.
-    If ANTHROPIC_API_KEY is not set, returns None silently.
+             factores_negativos, datos_inconsistentes, apostar}
+    or None if API unavailable / error.
+    Cached per content hash to avoid duplicate API calls.
     """
     if not ANTHROPIC_API_KEY or not HAS_ANTHROPIC:
         return None
 
     import hashlib
+
+    # ── Pre-validation: clean data before sending ─────────────────────────────
+    clean_data, pre_warnings = _pre_validate_for_claude(game_data, sport)
+
     _ck = hashlib.md5(
-        f"{sport}{json.dumps(game_data, default=str, sort_keys=True)}".encode()
+        f"{sport}{json.dumps(clean_data, default=str, sort_keys=True)}".encode()
     ).hexdigest()[:16]
     if _ck in _claude_cache:
         return _claude_cache[_ck]
 
+    # ── Build sport-specific user prompt ─────────────────────────────────────
+    warn_block = ""
+    if pre_warnings:
+        warn_block = (
+            "\n⚠️ ADVERTENCIAS DE VALIDACIÓN PREVIA (revisar con atención):\n"
+            + "\n".join(f"  - {w}" for w in pre_warnings)
+            + "\n"
+        )
+
     if sport == "MLB":
-        prompt = f"""Eres un analista experto en apuestas deportivas de MLB con 20 años de experiencia. Analiza este partido y dame tu recomendación profesional.
-
-DATOS DEL PARTIDO:
-{json.dumps(game_data, indent=2, default=str, ensure_ascii=False)}
-
-Analiza todos los factores y responde en este formato JSON exacto:
-{{
-  "pick": "OVER/UNDER/HOME_ML/AWAY_ML",
-  "line": "número de la línea",
-  "confianza": "ALTA/MEDIA/BAJA",
-  "razonamiento": "explicación en español de 3-4 oraciones como experto",
-  "factores_positivos": ["factor1", "factor2"],
-  "factores_negativos": ["factor1"],
-  "apostar": true
-}}
-
-Solo responde con el JSON, nada más."""
+        prompt = (
+            f"Analiza este partido de MLB y dame tu recomendación profesional.\n"
+            f"{warn_block}\n"
+            f"DATOS DEL PARTIDO:\n"
+            f"{json.dumps(clean_data, indent=2, default=str, ensure_ascii=False)}\n\n"
+            f"Responde en este formato JSON exacto:\n"
+            f"{{\n"
+            f'  "pick": "OVER/UNDER/HOME_ML/AWAY_ML",\n'
+            f'  "line": "número de la línea",\n'
+            f'  "confianza": "ALTA/MEDIA/BAJA",\n'
+            f'  "razonamiento": "explicación en español de 3-4 oraciones como experto",\n'
+            f'  "factores_positivos": ["factor1", "factor2"],\n'
+            f'  "factores_negativos": ["factor1"],\n'
+            f'  "datos_inconsistentes": [],\n'
+            f'  "apostar": true\n'
+            f"}}\n\n"
+            f"Si detectas datos sospechosos, agrégalos a 'datos_inconsistentes' y "
+            f"considera apostar: false. Solo responde con el JSON, nada más."
+        )
     else:
-        prompt = f"""Eres un analista experto en apuestas de fútbol internacional con 20 años de experiencia en el Mundial FIFA. Analiza este partido.
-
-DATOS DEL PARTIDO:
-{json.dumps(game_data, indent=2, default=str, ensure_ascii=False)}
-
-Responde en este formato JSON exacto:
-{{
-  "pick": "HOME_ML/AWAY_ML/DRAW/OVER/UNDER/HOME_HANDICAP/AWAY_HANDICAP",
-  "line": "número o descripción",
-  "confianza": "ALTA/MEDIA/BAJA",
-  "razonamiento": "explicación en español de 3-4 oraciones como experto",
-  "factores_positivos": ["factor1", "factor2"],
-  "factores_negativos": ["factor1"],
-  "apostar": true
-}}
-
-Solo responde con el JSON, nada más."""
+        prompt = (
+            f"Analiza este partido de fútbol internacional y dame tu recomendación.\n"
+            f"{warn_block}\n"
+            f"DATOS DEL PARTIDO:\n"
+            f"{json.dumps(clean_data, indent=2, default=str, ensure_ascii=False)}\n\n"
+            f"Responde en este formato JSON exacto:\n"
+            f"{{\n"
+            f'  "pick": "HOME_ML/AWAY_ML/DRAW/OVER/UNDER/HOME_HANDICAP/AWAY_HANDICAP",\n'
+            f'  "line": "número o descripción",\n'
+            f'  "confianza": "ALTA/MEDIA/BAJA",\n'
+            f'  "razonamiento": "explicación en español de 3-4 oraciones como experto",\n'
+            f'  "factores_positivos": ["factor1", "factor2"],\n'
+            f'  "factores_negativos": ["factor1"],\n'
+            f'  "datos_inconsistentes": [],\n'
+            f'  "apostar": true\n'
+            f"}}\n\n"
+            f"Si detectas datos sospechosos, agrégalos a 'datos_inconsistentes' y "
+            f"considera apostar: false. Solo responde con el JSON, nada más."
+        )
 
     try:
-        client  = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
-        msg     = client.messages.create(
+        client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg    = client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=1024,
+            system=_CLAUDE_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = msg.content[0].text.strip()
-        # Strip markdown code fences if Claude wraps in ```json
         if raw.startswith("```"):
             parts = raw.split("```")
             raw   = parts[1] if len(parts) >= 2 else raw
@@ -5219,14 +5307,25 @@ Solo responde con el JSON, nada más."""
                 raw = raw[4:]
         raw    = raw.strip()
         result = json.loads(raw)
+
+        # Merge any pre-validation warnings into datos_inconsistentes
+        existing = result.get("datos_inconsistentes") or []
+        if isinstance(existing, str):
+            existing = [existing]
+        result["datos_inconsistentes"] = existing + pre_warnings
+        result["pre_warnings"] = pre_warnings   # keep for _claude_block
+
         _claude_cache[_ck] = result
         conf_icon = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(
             result.get("confianza", ""), "⚪"
         )
+        has_issues = bool(result.get("datos_inconsistentes"))
         print(
             f"  🤖 Claude [{sport}]: {result.get('pick')} "
             f"{conf_icon}{result.get('confianza')} "
             f"apostar={result.get('apostar')}"
+            + (f" ⚠️ inconsistencias={len(result['datos_inconsistentes'])}"
+               if has_issues else "")
         )
         return result
     except Exception as e:
@@ -5239,32 +5338,56 @@ def _claude_block(claude: "dict | None") -> str:
     """
     Format Claude's analysis as an ntfy message block.
     Returns empty string if claude is None.
+
+    Two modes:
+      • Clean data + apostar:true  → verified header + pick + reasoning
+      • Inconsistencies detected OR apostar:false → warning header + issues list
     """
     if not claude:
         return ""
-    conf   = claude.get("confianza", "N/D")
-    pick   = claude.get("pick", "N/D")
+
+    conf    = claude.get("confianza", "N/D")
+    pick    = claude.get("pick", "N/D")
     apostar = claude.get("apostar", True)
-    reason = claude.get("razonamiento", "")
-    pos    = claude.get("factores_positivos", [])
-    neg    = claude.get("factores_negativos", [])
+    reason  = claude.get("razonamiento", "")
+    pos     = claude.get("factores_positivos", [])
+    neg     = claude.get("factores_negativos", [])
+    issues  = claude.get("datos_inconsistentes") or []
+    if isinstance(issues, str):
+        issues = [issues]
 
-    conf_icon = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
-    veto_line = "" if apostar else "   ⛔ Claude sugiere NO apostar\n"
+    conf_icon   = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
+    has_issues  = bool(issues)
+    data_ok     = apostar and not has_issues
 
-    pos_lines = "".join(f"   ✅ {p}\n" for p in pos[:3])
-    neg_lines = "".join(f"   ⚠️ {p}\n" for p in neg[:2])
-
-    return (
-        f"{_DIV}\n"
-        f"🤖 ANÁLISIS CLAUDE AI\n"
-        f"{_DIV}\n"
-        f"Pick: {pick}  |  Confianza: {conf_icon} {conf}\n"
-        f"{veto_line}"
-        f"{reason}\n"
-        + (f"{pos_lines}" if pos_lines else "")
-        + (f"{neg_lines}" if neg_lines else "")
-    )
+    if data_ok:
+        # ── Verified path ─────────────────────────────────────────────────
+        pos_lines = "".join(f"   ✅ {p}\n" for p in pos[:3])
+        neg_lines = "".join(f"   ⚠️ {p}\n" for p in neg[:2])
+        return (
+            f"{_DIV}\n"
+            f"🤖 Analizado y verificado por Claude AI\n"
+            f"✅ Datos confirmados antes de apostar\n"
+            f"{_DIV}\n"
+            f"Pick: {pick}  |  Confianza: {conf_icon} {conf}\n"
+            f"{reason}\n"
+            + (pos_lines if pos_lines else "")
+            + (neg_lines if neg_lines else "")
+        )
+    else:
+        # ── Issues detected path ──────────────────────────────────────────
+        issue_lines = "".join(f"   • {i}\n" for i in issues[:4])
+        veto = "⛔ Claude recomienda NO apostar\n" if not apostar else ""
+        return (
+            f"{_DIV}\n"
+            f"⚠️ Claude detectó datos inconsistentes\n"
+            f"→ Verificar manualmente antes de apostar\n"
+            f"{_DIV}\n"
+            f"{veto}"
+            f"Pick: {pick}  |  Confianza: {conf_icon} {conf}\n"
+            f"{reason}\n"
+            + (issue_lines if issue_lines else "")
+        )
 
 
 # ── Module S1: WC VENUE TENDENCIES ───────────────────────────────────────────
