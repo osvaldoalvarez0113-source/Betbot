@@ -34,6 +34,11 @@ SEASON_MONTHS = {
 }
 SPORT_KEYS = list(SEASON_MONTHS.keys())
 
+# Bovada operates under both names depending on region
+PREFERRED_BOOKS = {"bovada", "bodog"}
+# Target arb pair — both US-accessible from same regions
+ARB_BOOK_PAIR   = {"bovada", "bodog", "betonline.ag"}
+
 # ── RUNTIME STATE ─────────────────────────────────────────────────────────────
 alerted_bets:        set  = set()
 daily_bets:          list = []
@@ -490,45 +495,93 @@ def check_lineup_changes():
 # MODULE 5 — ARBITRAGE SCANNER
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _check_arb(home, away, team_a, odds_a, book_a, team_b, odds_b, book_b):
+    """Return an arb dict if the two odds form a valid opportunity, else None."""
+    margin = (1.0 / odds_a) + (1.0 / odds_b)
+    if margin >= 1.0:
+        return None
+    profit_pct = (1.0 - margin) / margin * 100
+    if profit_pct < 0.3 or profit_pct > 8.0:
+        return None
+    stake_a = BANKROLL / (odds_a * margin)
+    stake_b = BANKROLL / (odds_b * margin)
+    return {
+        "match":      f"{home} vs {away}",
+        "team_a":     team_a, "odds_a": odds_a, "book_a": book_a,
+        "team_b":     team_b, "odds_b": odds_b, "book_b": book_b,
+        "stake_a":    round(stake_a, 2),
+        "stake_b":    round(stake_b, 2),
+        "profit":     round(BANKROLL * (1.0 - margin) / margin, 2),
+        "profit_pct": round(profit_pct, 2),
+    }
+
 def scan_arbitrage(games):
     arbs = []
+    seen = set()   # avoid duplicate alerts for same game
+
     for g in games:
         home, away = g["home_team"], g["away_team"]
-        # Best odds per team across all bookmakers
-        best: dict = {}   # team -> (price, bookmaker_name)
+        game_key   = f"{home}|{away}"
+
+        # Collect best odds per team for every bookmaker in scope
+        # Structure: {team: {book_name_lower: (price, display_name)}}
+        book_odds: dict = {}
         for bk in g.get("bookmakers", []):
+            bk_lower = bk["title"].lower()
             for m in bk.get("markets", []):
                 if m["key"] == "h2h":
                     for o in m["outcomes"]:
                         team  = o["name"]
                         price = o["price"]
-                        if team not in best or price > best[team][0]:
-                            best[team] = (price, bk["title"])
+                        book_odds.setdefault(team, {})
+                        prev = book_odds[team].get(bk_lower)
+                        if prev is None or price > prev[0]:
+                            book_odds[team][bk_lower] = (price, bk["title"])
 
-        teams = list(best.keys())
+        teams = list(book_odds.keys())
         if len(teams) < 2:
             continue
 
-        odds_a, book_a = best[teams[0]]
-        odds_b, book_b = best[teams[1]]
-        margin = (1.0 / odds_a) + (1.0 / odds_b)
+        team_a, team_b = teams[0], teams[1]
+        books_a = book_odds[team_a]
+        books_b = book_odds[team_b]
 
-        if margin < 1.0:
-            profit_pct = (1.0 - margin) / margin * 100
-            if profit_pct < 0.3 or profit_pct > 8.0:
-                continue   # below threshold or likely stale-odds false positive
-            stake_a    = BANKROLL / (odds_a * margin)
-            stake_b    = BANKROLL / (odds_b * margin)
-            profit     = BANKROLL * (1.0 - margin) / margin
-            arbs.append({
-                "match":      f"{home} vs {away}",
-                "team_a":     teams[0], "odds_a": odds_a, "book_a": book_a,
-                "team_b":     teams[1], "odds_b": odds_b, "book_b": book_b,
-                "stake_a":    round(stake_a, 2),
-                "stake_b":    round(stake_b, 2),
-                "profit":     round(profit, 2),
-                "profit_pct": round(profit_pct, 2),
-            })
+        # ── Priority: Bovada vs BetOnline.ag specifically ─────────────────────
+        bov_key = next((k for k in books_a if k in PREFERRED_BOOKS), None)
+        bol_key = "betonline.ag"
+
+        if bov_key and bol_key in books_b and game_key not in seen:
+            bov_price_a, bov_name = books_a[bov_key]
+            bol_price_b, bol_name = books_b[bol_key]
+            arb = _check_arb(home, away,
+                             team_a, bov_price_a, bov_name,
+                             team_b, bol_price_b, bol_name)
+            if arb:
+                arbs.append(arb)
+                seen.add(game_key)
+
+        if bov_key and bol_key in books_a and game_key not in seen:
+            bol_price_a, bol_name = books_a.get(bol_key, (None, None))
+            bov_price_b, bov_name = books_b.get(bov_key, (None, None))
+            if bol_price_a and bov_price_b:
+                arb = _check_arb(home, away,
+                                 team_a, bol_price_a, bol_name,
+                                 team_b, bov_price_b, bov_name)
+                if arb:
+                    arbs.append(arb)
+                    seen.add(game_key)
+
+        # ── Fallback: best available odds across all books ────────────────────
+        if game_key not in seen:
+            best_a = max(books_a.values(), key=lambda x: x[0])
+            best_b = max(books_b.values(), key=lambda x: x[0])
+            arb = _check_arb(home, away,
+                             team_a, best_a[0], best_a[1],
+                             team_b, best_b[0], best_b[1])
+            if arb:
+                arbs.append(arb)
+                seen.add(game_key)
+
     return arbs
 
 def notify_arbitrage(arbs):
@@ -677,18 +730,25 @@ def analyze(games, prev_map, new_map):
 
         odds_h, odds_a = [], []
         best_bk_h = best_bk_a = ""
+        bov_odds_h = bov_odds_a = None   # Bovada/Bodog specific odds
         for bk in bookmakers:
+            is_preferred = bk["title"].lower() in PREFERRED_BOOKS
             for m in bk.get("markets", []):
                 if m["key"] == "h2h":
                     for o in m["outcomes"]:
+                        price = o["price"]
                         if o["name"] == home:
-                            if not odds_h or o["price"] > max(odds_h):
+                            if not odds_h or price > max(odds_h):
                                 best_bk_h = bk["title"]
-                            odds_h.append(o["price"])
+                            odds_h.append(price)
+                            if is_preferred and (bov_odds_h is None or price > bov_odds_h):
+                                bov_odds_h = price
                         else:
-                            if not odds_a or o["price"] > max(odds_a):
+                            if not odds_a or price > max(odds_a):
                                 best_bk_a = bk["title"]
-                            odds_a.append(o["price"])
+                            odds_a.append(price)
+                            if is_preferred and (bov_odds_a is None or price > bov_odds_a):
+                                bov_odds_a = price
 
         if not odds_h or not odds_a:
             continue
@@ -698,6 +758,12 @@ def analyze(games, prev_map, new_map):
         avg_a  = sum(odds_a) / len(odds_a)
         fp_h, fp_a = remove_vig([avg_h, avg_a])
 
+        # If Bovada has odds, prefer it as the displayed bookmaker
+        if bov_odds_h is not None:
+            best_bk_h = "Bovada"
+        if bov_odds_a is not None:
+            best_bk_a = "Bovada"
+
         # Sharp money radar check
         sharp_moves.extend(
             analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map)
@@ -706,9 +772,9 @@ def analyze(games, prev_map, new_map):
         new_map[f"{game_id}_{home}"] = best_h
         new_map[f"{game_id}_{away}"] = best_a
 
-        for team, prob, best_odd, side, bookmaker in [
-            (home, fp_h, best_h, "HOME", best_bk_h),
-            (away, fp_a, best_a, "AWAY", best_bk_a),
+        for team, prob, best_odd, side, bookmaker, bov_odds in [
+            (home, fp_h, best_h, "HOME", best_bk_h, bov_odds_h),
+            (away, fp_a, best_a, "AWAY", best_bk_a, bov_odds_a),
         ]:
             r = kelly_stake(prob, best_odd)
             if not r["has_value"] or r["edge"] < MIN_EDGE:
@@ -734,6 +800,7 @@ def analyze(games, prev_map, new_map):
                 "line_delta":   delta,
                 "game_id":      game_id,
                 "bookmaker":    bookmaker,
+                "bovada_odds":  bov_odds,
                 "market_type":  "h2h",
                 "closing_edge": "",
                 "ev":           ev,
@@ -752,15 +819,18 @@ def notify_bets(new_bets):
 
     for b in fresh:
         mv   = f" [LINE {b['line_dir']}{b['line_delta']}]" if b["line_moved"] else ""
+        bov  = b.get("bovada_odds")
+        bov_line = (f"Bovada:     {bov}" if bov else "Bovada:     not available")
         body = (
             f"[{b['confidence']}]{mv}\n"
             f"Match:      {b['match']}\n"
             f"Bet:        {b['team']} ({b['side']}) @ {b['odds']}\n"
+            f"{bov_line}\n"
+            f"Best Book:  {b['bookmaker']}\n"
             f"Edge:       {b['edge']}%  (Value: {b['value_pct']}%)\n"
             f"Kelly Stake: ${b['stake']} ({b['kelly_pct']}%)\n"
             f"ELO Win Prob: {b['elo_prob']}%\n"
-            f"EV: ${b['ev']}  |  Proj ROI: {b['roi']}%\n"
-            f"Bookmaker:  {b['bookmaker']}"
+            f"EV: ${b['ev']}  |  Proj ROI: {b['roi']}%"
         )
         has_high = b["edge"] >= 5.0
         priority = "urgent" if has_high else ("high" if b["edge"] >= 3 else "default")
