@@ -1,0 +1,34 @@
+Please restructure kelly_odds.py into a professional multi-module betting system. Keep all existing functionality and add these 5 new modules:
+
+MODULE 1 - DAILY MORNING REPORT (runs at 8 AM CDT daily):
+- Fetch today’s MLB games using MLB Stats API (statsapi Python library, free, no key needed)
+- Fetch today’s World Cup games using ESPN API: https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard
+- For each MLB game: get starting pitchers (ERA, WHIP, K/9, last 3 starts), team batting (AVG, OPS, last 10 record, home/away splits)
+- For each soccer game: team form last 5 games, head to head record, goals scored/conceded average
+- Apply Pythagorean expectation formula for MLB win probability
+- Apply Poisson model for soccer using average goals scored/conceded
+- For each game send a separate ntfy notification to ‘my-bets’ with: teams, starting pitchers, key stats, mathematical win probability, recommended bet (ML/Over/Under/No bet) and confidence level
+
+MODULE 2 - REAL-TIME CHANGE MONITOR (checks every 15 minutes):
+- Monitor MLB starting lineups via statsapi for pitcher changes or key player scratches
+- If a starting pitcher changes from the morning report, send immediate ntfy alert: ‘PITCHER CHANGE: [Game] - [New pitcher] replaces [Old pitcher]’
+- If a star player (top 3 in lineup by OPS) is scratched, send alert
+
+MODULE 3 - ENHANCED MATH MODELS:
+- Add ELO rating system: track team ELO ratings, update after each game result, use difference to calculate win probability
+- Add implied probability calculator: convert any odds format to true probability removing the vig
+- Add value percentage display: show exactly how much value each bet has vs the true probability
+- Add ROI projector: based on Kelly stake and edge, show projected return
+
+MODULE 4 - SHARP MONEY RADAR (enhanced):
+- Track public betting percentage (estimate from line movement direction vs public tendency)
+- When line moves opposite to expected public side, flag as SHARP action
+- Format: ‘SHARP ALERT: [Team] - Public 65% on opponent but line moved toward [Team]. Sharp money detected.’
+- Send as priority ntfy notification
+
+MODULE 5 - ARBITRAGE SCANNER:
+- After each odds scan, check all combinations of bookmakers for the same game
+- If profit is guaranteed regardless of outcome (true arb), calculate exact stakes for each book
+- Send ntfy alert: ‘ARB FOUND: [Game] - Bet $X on [Team A] at [Book1] and $Y on [Team B] at [Book2] = guaranteed profit of $Z’
+
+Use pip install MLB-statsapi for baseball data. No new API keys needed for ESPN or MLB Stats API. Keep INTERVAL at 300 seconds. Push everything to GitHub when done.”
