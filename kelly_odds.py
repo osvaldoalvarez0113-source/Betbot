@@ -6887,47 +6887,57 @@ if __name__ == "__main__":
     compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
 
     while True:
-        now_cdt = datetime.now(CDT)
-        now_et  = datetime.now(ET)
-        print(f"\n{'='*50}\n🕐 {now_cdt.strftime('%Y-%m-%d %H:%M CDT')}")
-
-        check_midnight_reset()
-
-        # Morning report at 8 AM ET (once per day) — Module 2
-        if now_et.hour == 8 and last_morning_report < now_et.date():
-            try:
-                morning_report()
-            except Exception as e:
-                print(f"  ⚠️  Morning report error: {e}")
-
-        # Weekly summary every Sunday at 9 AM ET — Module 10
-        if now_et.weekday() == 6 and now_et.hour == 9 and last_weekly_report < now_et.date():
-            try:
-                send_weekly_summary()
-                last_weekly_report = now_et.date()
-            except Exception as e:
-                print(f"  ⚠️  Weekly summary error: {e}")
-
-        # Night summary at 11 PM ET — Module P
-        if now_et.hour == 23 and last_night_summary < now_et.date():
-            try:
-                send_night_summary()
-                last_night_summary = now_et.date()
-            except Exception as e:
-                print(f"  ⚠️  Night summary error: {e}")
-
-        print(f"🔍 Scan #{scan}")
         try:
-            run_scan()
-        except Exception as e:
-            print(f"  ⚠️  Scan error (will retry): {e}")
+            now_cdt = datetime.now(CDT)
+            now_et  = datetime.now(ET)
+            print(f"\n{'='*50}\n🕐 {now_cdt.strftime('%Y-%m-%d %H:%M CDT')}")
 
-        # Module 1: auto-resultados — check after every scan
-        try:
-            check_results()
-        except Exception as e:
-            print(f"  ⚠️  check_results error: {e}")
+            check_midnight_reset()
 
-        print(f"\n⏳ Next scan in {INTERVAL // 60} min...")
-        time.sleep(INTERVAL)
-        scan += 1
+            # Morning report at 8 AM ET (once per day) — Module 2
+            if now_et.hour == 8 and last_morning_report < now_et.date():
+                try:
+                    morning_report()
+                except Exception as e:
+                    print(f"  ⚠️  Morning report error: {e}")
+
+            # Weekly summary every Sunday at 9 AM ET — Module 10
+            if now_et.weekday() == 6 and now_et.hour == 9 and last_weekly_report < now_et.date():
+                try:
+                    send_weekly_summary()
+                    last_weekly_report = now_et.date()
+                except Exception as e:
+                    print(f"  ⚠️  Weekly summary error: {e}")
+
+            # Night summary at 11 PM ET — Module P
+            if now_et.hour == 23 and last_night_summary < now_et.date():
+                try:
+                    send_night_summary()
+                    last_night_summary = now_et.date()
+                except Exception as e:
+                    print(f"  ⚠️  Night summary error: {e}")
+
+            print(f"🔍 Scan #{scan}")
+            try:
+                run_scan()
+            except Exception as e:
+                print(f"  ⚠️  Scan error (will retry): {e}")
+
+            # Module 1: auto-resultados — check after every scan
+            try:
+                check_results()
+            except Exception as e:
+                print(f"  ⚠️  check_results error: {e}")
+
+            print(f"\n⏳ Next scan in {INTERVAL // 60} min...")
+            time.sleep(INTERVAL)
+            scan += 1
+
+        except KeyboardInterrupt:
+            print("\n🛑 Bot detenido manualmente.")
+            break
+        except Exception as _loop_err:
+            print(f"  ⚠️  Error crítico en ciclo principal: {_loop_err}")
+            print("  🔄 Reintentando en 60 segundos...")
+            time.sleep(60)
+            scan += 1
