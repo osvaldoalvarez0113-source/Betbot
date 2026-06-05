@@ -167,7 +167,11 @@ def ntfy_post(title, body, priority="default"):
         resp = requests.post(
             f"https://ntfy.sh/{NOTIFY}",
             data=body.encode("utf-8"),
-            headers={"Title": title, "Priority": priority, "Content-Type": "text/plain"},
+            headers={
+                "Title":        title.encode("utf-8").decode("latin-1", errors="replace"),
+                "Priority":     priority,
+                "Content-Type": "text/plain; charset=utf-8",
+            },
             timeout=10,
         )
         print(f"  📲 ntfy [{title[:40]}] → HTTP {resp.status_code}")
