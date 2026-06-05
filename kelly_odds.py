@@ -26,6 +26,7 @@ ET             = pytz.timezone("America/New_York")
 
 _DIV  = "━━━━━━━━━━━━"
 _DIV2 = "━━━━━━━━━━━━━━━━━━━━"
+_DIV3 = "─────────────"
 
 def _sport_emoji(sport):
     """Map sport key/short string to emoji. World Cup → 🏆."""
@@ -779,6 +780,19 @@ def _should_alert(key, odds=None, edge=None):
         _sent_alerts[key] = {"date": today, "odds": odds, "edge": edge}
     return send
 
+def _verdict_line(ev_pct, true_prob=None):
+    """One-line confidence verdict appended to every alert."""
+    if ev_pct > 10 and (true_prob is None or true_prob > 0.60):
+        return f"{_DIV3}\n🟢 CONFIANZA: ALTA — apostar"
+    elif ev_pct >= 3 or (true_prob is not None and true_prob >= 0.50):
+        return f"{_DIV3}\n🟡 CONFIANZA: MEDIA — apostar mitad"
+    else:
+        return f"{_DIV3}\n🔴 CONFIANZA: BAJA — ignorar"
+
+def _ev_dollars(stake, ev_pct):
+    """Expected profit in $ for a given stake and EV%."""
+    return round(stake * ev_pct / 100, 2)
+
 def notify_arbitrage(arbs):
     for i, arb in enumerate(arbs):
         home, away = arb["match"].split(" vs ", 1)
@@ -794,6 +808,8 @@ def notify_arbitrage(arbs):
         pct    = arb["profit_pct"]
         gt     = _fmt_et(arb.get("game_time", ""))
 
+        verdict = _verdict_line(pct)
+
         if arb.get("legs") == 3:
             total_stake = round(arb["stake_a"] + arb["stake_b"] + arb["stake_c"], 2)
             body = (
@@ -806,6 +822,7 @@ def notify_arbitrage(arbs):
                 f"{_DIV}\n"
                 f"💵 Total apostado: ${total_stake}\n"
                 f"⏰ {gt}\n"
+                f"{verdict}\n"
                 f"{_DIV2}"
             )
         else:
@@ -819,6 +836,7 @@ def notify_arbitrage(arbs):
                 f"{_DIV}\n"
                 f"💵 Total apostado: ${total_stake}\n"
                 f"⏰ {gt}\n"
+                f"{verdict}\n"
                 f"{_DIV2}"
             )
 
@@ -1285,6 +1303,9 @@ def notify_totals(total_bets):
                 f"📋 Forma visita:  {b.get('form_away', 'ELO only')}\n"
             )
 
+        true_prob_approx = b["stake"] / (BANKROLL * 0.05) if b["stake"] > 0 else 0.5
+        verdict = _verdict_line(float(b["edge"]) * 10, true_prob_approx)
+
         body = (
             f"{emoji} {b['match']}\n"
             f"📊 {side} {line} {unit}\n"
@@ -1298,6 +1319,7 @@ def notify_totals(total_bets):
             f"💰 Apuesta: ${b['stake']} @ {b['odds']}\n"
             f"📖 Libro: {b['bookmaker']}\n"
             f"⏰ {gt}\n"
+            f"{verdict}\n"
             f"{_DIV2}"
         )
         title    = f"🎯 PICK | {side} {line} | {b['match']}"
@@ -1631,19 +1653,31 @@ def notify_game_analysis(analyses, sport_key):
         if ctx.get("line_moved") and ctx.get("line_note"):
             ctx_lines += f"📉 {ctx['line_note']}\n"
 
+        # Best pick for action line
+        best = a["candidates"][0]
+        best_clean = (best["label"]
+                      .replace("🔵 ", "").replace("🔴 ", "").replace("🤝 ", "")
+                      .replace("📈 ", "").replace("📉 ", "").replace("🏃 ", ""))
+        action_line = f"⭐ ACCIÓN: {best_clean} en {best['book']} — {gt}"
+
         # Picks block
         picks_lines = ""
         for idx, c in enumerate(a["candidates"]):
             rank_emoji = _RANK_EMOJIS[idx] if idx < 3 else "🔹"
             safe_tag   = " ✅ SEGURO" if c["safest"] else ""
+            ev_d       = _ev_dollars(c["stake"], c["ev_pct"])
             picks_lines += (
-                f"{rank_emoji} {c['label']} | EV +{c['ev_pct']}% | "
-                f"Prob {round(c['true_prob']*100):.0f}%{safe_tag}\n"
+                f"{rank_emoji} {c['label']} | EV +{c['ev_pct']}% → ${ev_d} por ${c['stake']}"
+                f" | Prob {round(c['true_prob']*100):.0f}%{safe_tag}\n"
                 f"   💰 ${c['stake']} @ {c['odds']} ({c['kelly_pct']}% Kelly) — {c['book']}\n"
             )
 
+        # Verdict based on best pick
+        verdict = _verdict_line(best["ev_pct"], best["true_prob"])
+
         body = (
             f"{emoji} {a['match']}\n"
+            f"{action_line}\n"
             f"⏰ {gt}\n"
             f"{_DIV}\n"
             f"📋 CONTEXTO\n"
@@ -1653,13 +1687,12 @@ def notify_game_analysis(analyses, sport_key):
             f"📊 TOP PICKS (EV > {EV_MIN_PCT:.0f}%)\n"
             f"{_DIV}\n"
             f"{picks_lines}"
+            f"{verdict}\n"
             f"{_DIV2}"
         )
 
         # Strip decorative emojis from title
-        clean = (a["best_label"]
-                 .replace("🔵 ", "").replace("🔴 ", "").replace("🤝 ", "")
-                 .replace("📈 ", "").replace("📉 ", "").replace("🏃 ", ""))
+        clean = best_clean
         title = f"🔍 {a['match']} | Mejor: {clean} +{a['best_ev']}%"
         ntfy_post(title, body, "high")
         alerted_game_analysis.add(a["game_id"])
@@ -2006,25 +2039,34 @@ def notify_sharp_money(sharp_moves):
         sharp_key = f"{home}_{away}_{m['team']}_sharp"
         if not _should_alert(sharp_key, odds=m["odds_now"]):
             continue
-        sport = m.get("sport", "")
-        emoji = _sport_emoji(sport)
+        sport  = m.get("sport", "")
+        emoji  = _sport_emoji(sport)
+        team   = m["team"]
+        opp    = away if team == home else home
+        arrow  = "▼" if m["odds_now"] < m["odds_prev"] else "▲"
+
         if m.get("public_pct"):
-            pub_note = (f"📢 Público ~{m['public_pct']}% en contra, "
-                        f"pero la línea {m['direction']}")
+            context_lines = (
+                f"👥 Público: ~{m['public_pct']}% en {opp}\n"
+                f"⚠️  Pero línea se movió a favor de {team}\n"
+                f"💡 Sharps vs público → señal fuerte\n"
+            )
         else:
-            pub_note = f"📉 Línea {m['direction']} {m['pct']}%"
+            context_lines = f"📉 Línea {m['direction']} {m['pct']}% sin contexto público\n"
+
         body = (
             f"{emoji} {m['match']}\n"
-            f"⚡ Dinero profesional detectado\n"
             f"{_DIV}\n"
-            f"📌 Pick: {m['team']}\n"
-            f"📊 Línea: {m['odds_prev']} → {m['odds_now']} "
-            f"({m['direction']} {m['pct']}%)\n"
-            f"{pub_note}\n"
+            f"📌 Pick: {team} @ {m['odds_now']}\n"
+            f"📊 Línea: {m['odds_prev']} → {m['odds_now']} ({arrow}{m['pct']}%)\n"
+            f"{context_lines}"
+            f"⭐ ACCIÓN: Apostar {team} en el mejor libro disponible\n"
+            f"{_DIV3}\n"
+            f"🟢 CONFIANZA: ALTA — apostar\n"
             f"{_DIV2}"
         )
-        ntfy_post(f"⚡ SHARP | {m['team']} | {m['match']}", body, "high")
-        print(f"  ⚡ Sharp: {m['team']} en {m['match']} ({m['pct']}% movimiento)")
+        ntfy_post(f"⚡ SHARP | {team} | {m['match']}", body, "high")
+        print(f"  ⚡ Sharp: {team} en {m['match']} ({m['pct']}% movimiento)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE — ANALYSIS & NOTIFICATIONS
@@ -2151,6 +2193,10 @@ def notify_bets(new_bets):
 
         bov_line = f"📖 Bovada: {bov}\n" if bov else ""
 
+        ev_d    = _ev_dollars(b["stake"], b["edge"])
+        elo_p   = b.get("elo_prob", 0)
+        verdict = _verdict_line(b["edge"], elo_p / 100 if elo_p else None)
+
         body = (
             f"{emoji} {b['match']}\n"
             f"{mv_line}"
@@ -2163,9 +2209,11 @@ def notify_bets(new_bets):
             f"📖 Mejor libro: {b['bookmaker']}\n"
             f"{bov_line}"
             f"{_DIV}\n"
-            f"📊 Prob. ELO: {b['elo_prob']}%  |  EV: ${b['ev']}\n"
+            f"📊 Prob. ELO: {elo_p}%\n"
+            f"💵 EV +{b['edge']}% → ${ev_d} ganancia esperada por cada ${b['stake']}\n"
             f"💹 ROI proy.: {b['roi']}%\n"
             f"⏰ {gt}\n"
+            f"{verdict}\n"
             f"{_DIV2}"
         )
         has_high = b["edge"] >= 5.0
