@@ -1310,6 +1310,7 @@ def poisson_runline_prob(home_exp, away_exp, home_spread, max_runs=15):
     return max(0.01, min(0.99, p))
 
 EV_MIN_PCT   = 3.0   # minimum EV% to include a bet in Full Game Analysis
+PROB_MIN     = 0.50  # minimum true probability to include a bet in Full Game Analysis
 _RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
 
 def analyze_game_full(game, sport_key, prev_map=None):
@@ -1520,6 +1521,9 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "line_note": (f"Línea {home} {dir_h}{dlt_h}" if moved_h
                          else f"Línea {away} {dir_a}{dlt_a}" if moved_a else ""),
         }
+
+    # Drop any pick whose true probability is below the minimum threshold
+    candidates = [c for c in candidates if c["true_prob"] >= PROB_MIN]
 
     if not candidates:
         return None
