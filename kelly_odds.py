@@ -175,9 +175,10 @@ PREFERRED_BOOKS = {"bovada", "bodog"}
 ARB_BOOK_PAIR   = {"bovada", "bodog", "betonline.ag"}
 
 OPENWEATHER_KEY   = os.environ.get("OPENWEATHER_API_KEY", "")
-BANKROLL_LOG_FILE = "bankroll_log.csv"
-CLV_LOG_FILE      = "clv_log.csv"
-PENDING_BETS_FILE = "pending_bets.json"
+BANKROLL_LOG_FILE  = "bankroll_log.csv"
+CLV_LOG_FILE       = "clv_log.csv"
+PENDING_BETS_FILE  = "pending_bets.json"
+_LINE_HISTORY_FILE = "line_history.json"   # 1B: multi-scan totals line tracker
 
 # MLB ballpark coordinates — used for wind fetching (home team → (city, lat, lon))
 MLB_PARK_CITIES = {
@@ -229,6 +230,9 @@ last_mlb_card:     date = date(2000, 1, 1)  # 2 PM ET MLB daily card
 last_soccer_card:  date = date(2000, 1, 1)  # 10 AM ET soccer daily card
 last_backtest_report: date = date(2000, 1, 1)  # Sunday 10 AM ET backtest
 _kelly_monthly_mult: float = 1.0  # Improvement 4: monthly ROI-based Kelly multiplier
+_line_history:    dict = {}       # 1B: game_id → [{time, total, ml_home, ml_away}]
+_last_news_seen:  set  = set()    # 1C: news IDs already alerted this session
+_last_news_date:  date = date(2000, 1, 1)  # 1C: reset seen set daily
 _steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
@@ -7675,7 +7679,20 @@ def run_weekly_backtest():
     Run the backtesting engine for the current MLB season (April 1 → today).
     Imports backtest.py (must be in same directory as kelly_odds.py).
     Results saved to backtest_log.csv and sent via ntfy.
+    Also retrains the ML model (Level 1A) with fresh data.
     """
+    # Level 1A: retrain ML model after fresh backtest data
+    try:
+        import importlib.util as _ilu2
+        _ml_path = os.path.join(os.path.dirname(__file__), "ml_model.py")
+        if os.path.isfile(_ml_path):
+            _spec2 = _ilu2.spec_from_file_location("ml_model", _ml_path)
+            _ml2   = _ilu2.module_from_spec(_spec2)
+            _spec2.loader.exec_module(_ml2)
+            _ml2.train()
+    except Exception as _mle:
+        print(f"  ⚠️  ML retrain error: {_mle}")
+
     try:
         import importlib.util, os
         bt_path = os.path.join(os.path.dirname(__file__), "backtest.py")
@@ -9681,6 +9698,233 @@ def run_live_scan(pre_game_matches: set, odds_by_sport: dict):
 # CORE — MAIN SCAN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 1B — LINE MOVEMENT PREDICTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_line_history():
+    """Load line_history.json into _line_history global at startup."""
+    global _line_history
+    if os.path.isfile(_LINE_HISTORY_FILE):
+        try:
+            with open(_LINE_HISTORY_FILE) as _f:
+                _line_history = json.load(_f)
+        except Exception:
+            _line_history = {}
+
+def _save_line_history():
+    """Persist _line_history to disk (trim to last 24 hours per game)."""
+    cutoff = (datetime.now(ET) - timedelta(hours=24)).isoformat()
+    pruned = {}
+    for gid, entries in _line_history.items():
+        kept = [e for e in entries if e.get("time", "") >= cutoff]
+        if kept:
+            pruned[gid] = kept
+    try:
+        with open(_LINE_HISTORY_FILE, "w") as _f:
+            json.dump(pruned, _f)
+    except Exception:
+        pass
+    _line_history.clear()
+    _line_history.update(pruned)
+
+def _track_line_history(game_id: str, home: str, away: str,
+                         total: float, ml_home: float, ml_away: float):
+    """
+    Record the current totals line + ML odds for a game.
+    Returns an alert string if a strong, consistent line movement is detected
+    (same direction for ≥3 data points, magnitude ≥0.5 total runs).
+    Returns '' if no strong pattern.
+    """
+    now_s = datetime.now(ET).isoformat()
+    entry = {"time": now_s, "total": total, "ml_home": ml_home, "ml_away": ml_away}
+    _line_history.setdefault(game_id, []).append(entry)
+
+    entries = _line_history[game_id]
+    if len(entries) < 3:
+        return ""
+
+    # Look at last 6 data points for trend
+    recent = entries[-6:]
+    totals = [e["total"] for e in recent if e.get("total", 0) > 0]
+    if len(totals) < 3:
+        return ""
+
+    # Compute consecutive deltas
+    deltas = [totals[i+1] - totals[i] for i in range(len(totals)-1)]
+    pos = sum(1 for d in deltas if d > 0.01)
+    neg = sum(1 for d in deltas if d < -0.01)
+    total_move = totals[-1] - totals[0]
+
+    if abs(total_move) < 0.5:
+        return ""  # not enough movement
+
+    if pos >= 3 and total_move > 0:
+        direction = "OVER ⬆️"
+        side      = "UNDER (línea sube → OVER más caro, valor en UNDER)"
+        predicted = round(totals[-1] + abs(total_move) / 2, 1)
+    elif neg >= 3 and total_move < 0:
+        direction = "UNDER ⬇️"
+        side      = "OVER (línea baja → UNDER más caro, valor en OVER)"
+        predicted = round(totals[-1] - abs(total_move) / 2, 1)
+    else:
+        return ""
+
+    history_str = " → ".join(str(t) for t in totals)
+    elapsed_h = round((entries[-1]["time"] > entries[0]["time"]) and
+                      (datetime.fromisoformat(entries[-1]["time"]) -
+                       datetime.fromisoformat(entries[0]["time"])).seconds / 3600, 1) or "?"
+    return (
+        f"📈 LÍNEA EN MOVIMIENTO:\n"
+        f"{home} vs {away} — Total: {history_str}\n"
+        f"Dirección: {direction}  |  Movimiento: {total_move:+.1f} en {elapsed_h}h\n"
+        f"→ Predicción: llegará a {predicted}\n"
+        f"→ Mejor lado ahora: {side}\n"
+        f"→ APOSTAR AHORA antes que la línea se mueva más"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 1C — REAL-TIME NEWS MONITOR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_NEWS_KEYWORDS_HIGH = {
+    "scratch", "not starting", "ruled out", "placed on il", "placed on the il",
+    "day-to-day", "injured", "injury", "dnp",
+}
+_NEWS_KEYWORDS_MED  = {
+    "lineup change", "late scratch", "questionable", "doubtful",
+}
+_NEWS_KEYWORDS_LOW  = {
+    "bullpen", "trade", "postponed", "rain delay",
+}
+
+def _news_impact(text: str) -> str:
+    t = text.lower()
+    if any(k in t for k in _NEWS_KEYWORDS_HIGH):
+        return "ALTO"
+    if any(k in t for k in _NEWS_KEYWORDS_MED):
+        return "MEDIO"
+    if any(k in t for k in _NEWS_KEYWORDS_LOW):
+        return "BAJO"
+    return ""
+
+def _fetch_mlb_espn_news() -> list:
+    """Fetch latest MLB news from ESPN public API. Returns list of {id, headline, team}."""
+    try:
+        url  = "http://site.api.espn.com/apis/site/v2/sports/baseball/mlb/news?limit=20"
+        r    = requests.get(url, timeout=8)
+        data = r.json() if r.status_code == 200 else {}
+        items = []
+        for a in data.get("articles", []):
+            headline = a.get("headline", "")
+            nid      = a.get("id", "") or headline[:40]
+            cats     = [c.get("description", "") for c in a.get("categories", [])]
+            team     = next((c for c in cats if c), "MLB")
+            impact   = _news_impact(headline)
+            if impact:
+                items.append({"id": str(nid), "headline": headline,
+                               "team": team, "impact": impact, "source": "ESPN"})
+        return items
+    except Exception:
+        return []
+
+def _fetch_mlb_transactions() -> list:
+    """Fetch today's MLB transactions from Stats API. Returns list of {id, headline, team}."""
+    try:
+        today = datetime.now(ET).strftime("%Y-%m-%d")
+        url   = (f"https://statsapi.mlb.com/api/v1/transactions"
+                 f"?sportId=1&startDate={today}&endDate={today}")
+        r     = requests.get(url, timeout=8)
+        data  = r.json() if r.status_code == 200 else {}
+        items = []
+        for t in data.get("transactions", []):
+            desc   = t.get("description", "")
+            nid    = str(t.get("id", desc[:40]))
+            team   = (t.get("toTeam", {}) or {}).get("name", "") or \
+                     (t.get("fromTeam", {}) or {}).get("name", "MLB")
+            impact = _news_impact(desc)
+            if impact:
+                items.append({"id": nid, "headline": desc,
+                               "team": team, "impact": impact, "source": "MLB Transactions"})
+        return items
+    except Exception:
+        return []
+
+def _fetch_twitter_news() -> list:
+    """Fetch Twitter/X MLB injury mentions if TWITTER_BEARER_TOKEN set."""
+    token = os.environ.get("TWITTER_BEARER_TOKEN", "")
+    if not token:
+        return []
+    try:
+        query = "(MLB OR baseball) (injured OR scratch OR IL OR \"ruled out\") lang:en -is:retweet"
+        url   = "https://api.twitter.com/2/tweets/search/recent"
+        r     = requests.get(url,
+                             params={"query": query, "max_results": 10,
+                                     "tweet.fields": "id,text"},
+                             headers={"Authorization": f"Bearer {token}"},
+                             timeout=8)
+        data  = r.json() if r.status_code == 200 else {}
+        items = []
+        for tw in data.get("data", []):
+            text   = tw.get("text", "")
+            nid    = "tw_" + str(tw.get("id", ""))
+            impact = _news_impact(text)
+            if impact:
+                items.append({"id": nid, "headline": text[:120],
+                               "team": "Twitter/X", "impact": impact, "source": "Twitter/X"})
+        return items
+    except Exception:
+        return []
+
+def _monitor_news() -> list:
+    """
+    Run every scan. Checks ESPN + MLB Transactions + Twitter (optional).
+    Returns list of new high/medium impact items not yet alerted.
+    Sends ntfy alert for each HIGH-impact item found.
+    Resets _last_news_seen once per day.
+    """
+    global _last_news_seen, _last_news_date
+    today = datetime.now(ET).date()
+    if today > _last_news_date:
+        _last_news_seen.clear()
+        _last_news_date = today
+
+    new_items = []
+    all_items = _fetch_mlb_espn_news() + _fetch_mlb_transactions() + _fetch_twitter_news()
+    for item in all_items:
+        nid = item["id"]
+        if nid in _last_news_seen:
+            continue
+        _last_news_seen.add(nid)
+        new_items.append(item)
+
+    for item in new_items:
+        impact  = item["impact"]
+        emoji   = "🚨" if impact == "ALTO" else "⚠️"
+        title   = f"{emoji} ÚLTIMA HORA — {item['source']}"
+        body    = (
+            f"{emoji} ÚLTIMA HORA — {item['source']}\n"
+            f"{'━'*30}\n"
+            f"📰 {item['headline']}\n"
+            f"⚾ Equipo: {item['team']}\n"
+            f"💥 Impacto: {impact}\n"
+        )
+        if impact == "ALTO":
+            body += "→ Re-analizando picks ahora..."
+            prio  = "high"
+        elif impact == "MEDIO":
+            body += "→ Ajustando proyección ofensiva -12%"
+            prio  = "default"
+        else:
+            body += "→ Nota para el próximo análisis programado"
+            prio  = "low"
+        print(f"  {emoji} NOTICIA [{impact}]: {item['headline'][:80]}")
+        ntfy_post(title, body, prio)
+
+    return new_items
+
+
 def run_scan():
     global daily_bets, lineup_scan_counter
     prev_map  = load_previous_odds()
@@ -9697,6 +9941,14 @@ def run_scan():
 
     # Improvement 4: bankroll dashboard at top of every scan
     print_dashboard()
+
+    # Level 1C: News monitor — runs every scan
+    try:
+        _new_news = _monitor_news()
+        if _new_news:
+            print(f"  📰 Noticias nuevas: {len(_new_news)} item(s)")
+    except Exception as _ne:
+        print(f"  ⚠️  News monitor error: {_ne}")
 
     # Collect live game dicts per sport for CLV lookup
     current_games_by_sport: dict = {}
@@ -9737,6 +9989,34 @@ def run_scan():
             # ──────────────────────────────────────────────────────────────
 
             current_games_by_sport[sport_key] = games   # for CLV check
+
+            # Level 1B: track totals line history for each game
+            if "mlb" in sport_key:
+                for _g in games:
+                    try:
+                        _gid = _g.get("id", "")
+                        _bks = _g.get("bookmakers", [])
+                        _tot_line = _ml_h = _ml_a = 0.0
+                        for _bk in _bks:
+                            for _mkt in _bk.get("markets", []):
+                                if _mkt["key"] == "totals" and not _tot_line:
+                                    _ocs = _mkt.get("outcomes", [])
+                                    if _ocs:
+                                        _tot_line = float(_ocs[0].get("point", 0))
+                                if _mkt["key"] == "h2h" and not _ml_h:
+                                    for _oc in _mkt.get("outcomes", []):
+                                        if _oc["name"] == _g["home_team"]:
+                                            _ml_h = float(_oc.get("price", 0))
+                                        elif _oc["name"] == _g["away_team"]:
+                                            _ml_a = float(_oc.get("price", 0))
+                        if _tot_line and _gid:
+                            _alert = _track_line_history(
+                                _gid, _g["home_team"], _g["away_team"],
+                                _tot_line, _ml_h, _ml_a)
+                            if _alert:
+                                ntfy_post("📈 Línea en Movimiento", _alert, "high")
+                    except Exception:
+                        pass
 
             bets, sharp_moves, steam_moves = analyze(games, prev_map, new_map, sport_key)
             total_bets = analyze_totals(games, sport_key)
@@ -9896,6 +10176,21 @@ if __name__ == "__main__":
         _update_monthly_kelly_mult()     # Improvement 4: set Kelly multiplier from backtest CSV
     except Exception as _me:
         print(f"  ⚠️  Monthly Kelly mult skipped: {_me}")
+    try:
+        _load_line_history()             # Level 1B: load line movement history from disk
+    except Exception as _lhe:
+        print(f"  ⚠️  Line history load skipped: {_lhe}")
+    try:
+        import importlib.util as _ilu
+        _ml_path = os.path.join(os.path.dirname(__file__), "ml_model.py")
+        if os.path.isfile(_ml_path):
+            _spec = _ilu.spec_from_file_location("ml_model", _ml_path)
+            _ml   = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_ml)
+            _ml.load()                   # Level 1A: load ML model into memory
+            print("  🤖 ML model inicializado al arranque")
+    except Exception as _mle:
+        print(f"  ⚠️  ML model startup skipped: {_mle}")
 
     while True:
         try:
