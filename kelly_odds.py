@@ -11856,6 +11856,13 @@ if __name__ == "__main__":
     except Exception as _mle:
         print(f"  ⚠️  ML model startup skipped: {_mle}")
 
+    # Telegram bot — background polling thread (daemon, never blocks main loop)
+    try:
+        from telegram_bot import iniciar_telegram as _iniciar_tg
+        _iniciar_tg(analyze_fn=analyze_game_full, get_odds_fn=get_odds)
+    except Exception as _tge:
+        print(f"  ⚠️  Telegram bot startup skipped: {_tge}")
+
     while True:
         try:
             now_cdt = datetime.now(CDT)
