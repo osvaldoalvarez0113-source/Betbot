@@ -200,11 +200,12 @@ def _is_us_book(title: str) -> bool:
     return any(us in t for us in US_BOOKS_ONLY)
 
 OPENWEATHER_KEY   = os.environ.get("OPENWEATHER_API_KEY", "")
-BANKROLL_LOG_FILE  = "bankroll_log.csv"
-CLV_LOG_FILE       = "clv_log.csv"
-PENDING_BETS_FILE  = "pending_bets.json"
-CONFIRM_FILE       = "pending_confirm.json"   # bets awaiting user confirmation
-_LINE_HISTORY_FILE = "line_history.json"   # 1B: multi-scan totals line tracker
+BANKROLL_LOG_FILE      = "bankroll_log.csv"
+CLV_LOG_FILE           = "clv_log.csv"
+PENDING_BETS_FILE      = "pending_bets.json"
+CONFIRM_FILE           = "pending_confirm.json"   # bets awaiting user confirmation
+_LINE_HISTORY_FILE     = "line_history.json"      # 1B: multi-scan totals line tracker
+DAILY_EXPOSURE_FILE    = "daily_exposure.json"    # persists daily exposure across redeploys
 
 # MLB ballpark coordinates — used for wind fetching (home team → (city, lat, lon))
 MLB_PARK_CITIES = {
@@ -5646,6 +5647,39 @@ def _save_confirm_queue(queue: list) -> None:
         print(f"  ⚠️  confirm_queue save error: {e}")
 
 
+def _load_daily_exposure() -> tuple:
+    """
+    Read daily_exposure.json on startup.
+    Returns (exposure_float, date_obj).
+    If file missing, unreadable, or dated before today → returns (0.0, today).
+    """
+    today = datetime.now(CDT).date()
+    try:
+        if os.path.exists(DAILY_EXPOSURE_FILE):
+            with open(DAILY_EXPOSURE_FILE) as f:
+                data = json.load(f)
+            saved_date = date.fromisoformat(data["date"])
+            if saved_date == today:
+                exposure = float(data.get("exposure", 0.0))
+                print(f"  💾 Exposición diaria restaurada: ${exposure:.2f} (fecha: {saved_date})")
+                return exposure, saved_date
+    except Exception as e:
+        print(f"  ⚠️  daily_exposure load error: {e}")
+    return 0.0, today
+
+
+def _save_daily_exposure() -> None:
+    """Persist current _daily_exposure and date to disk so redeploys don't reset it."""
+    try:
+        with open(DAILY_EXPOSURE_FILE, "w") as f:
+            json.dump({
+                "date":     _daily_exposure_date.isoformat(),
+                "exposure": round(_daily_exposure, 2),
+            }, f)
+    except Exception as e:
+        print(f"  ⚠️  daily_exposure save error: {e}")
+
+
 def queue_for_confirmation(bets: list, sport_key: str) -> None:
     """
     Replace log_bets() in the main scan loop.
@@ -5665,6 +5699,7 @@ def queue_for_confirmation(bets: list, sport_key: str) -> None:
     if today != _daily_exposure_date:
         _daily_exposure      = 0.0
         _daily_exposure_date = today
+        _save_daily_exposure()   # persist the reset so redeploys see $0 for the new day
 
     max_daily = BANKROLL * MAX_DAILY_EXPO_PCT   # e.g. $150 at $1000 bankroll
 
@@ -5706,6 +5741,7 @@ def queue_for_confirmation(bets: list, sport_key: str) -> None:
         entry["stake"]           = 0.0     # $0 until user manually confirms via "aposté"
         queue.append(entry)
         _daily_exposure += stake   # count toward cap — prevents double-queueing same pick
+        _save_daily_exposure()   # persist after every increment — survives redeploys
         queued_count    += 1
 
     if queued_count:
@@ -11483,6 +11519,7 @@ if __name__ == "__main__":
     print("🤖 BetBot Pro — starting...")
     scan = 1
     _load_stats_disk_cache()  # load persistent stats cache (survives Railway restarts)
+    _daily_exposure, _daily_exposure_date = _load_daily_exposure()  # restore today's exposure
     compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
     try:
         _check_pinnacle_availability()   # Module 11: verify Pinnacle in Odds API plan
