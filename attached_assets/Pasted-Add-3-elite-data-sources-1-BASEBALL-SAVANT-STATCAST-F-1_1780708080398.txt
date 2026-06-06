@@ -1,0 +1,126 @@
+Add 3 elite data sources:
+
+━━━━━━━━━━━━━━━━━━━━
+1. BASEBALL SAVANT (STATCAST)
+━━━━━━━━━━━━━━━━━━━━
+Fetch from Baseball Savant API:
+https://baseballsavant.mlb.com/
+leaderboard/custom?year=2026
+&type=pitcher&min=1&pos=p
+&player_type=pitcher
+
+For each pitcher fetch:
+- xERA (expected ERA based on contact)
+- Hard hit% (batted balls > 95mph)
+- Barrel% (optimal contact)
+- Whiff% (swing and miss rate)
+- Chase% (swings outside zone)
+- Sprint speed for defense
+
+For each team/hitter fetch:
+- xBA (expected batting average)
+- xSLG (expected slugging)
+- Hard hit% vs specific pitcher
+
+Add to alerts:
+"🔬 Statcast:
+ xERA: 2.85 (mejor que ERA 3.18)
+ Whiff%: 32% (dominante)
+ Hard hit%: 28% (bajo — controlado)"
+
+Use xERA instead of ERA when available
+for more accurate projections.
+
+Integrate with Claude prompt:
+Include Statcast metrics in game_data
+so Claude can reason with advanced stats.
+
+━━━━━━━━━━━━━━━━━━━━
+2. PINNACLE AS MARKET REFERENCE
+━━━━━━━━━━━━━━━━━━━━
+Pinnacle has sharpest lines in world.
+Use their odds as TRUE market price.
+
+Fetch Pinnacle odds from The Odds API:
+sport_key = mlb/soccer
+bookmaker = "pinnacle"
+
+For each game compare:
+- Pinnacle line vs Bovada line
+- Pinnacle line vs our model
+
+New value calculation:
+If our model agrees with Pinnacle
+AND Bovada differs → STRONG VALUE 💎
+
+If our model disagrees with Pinnacle
+→ lower confidence in our pick
+
+Show in alert:
+"📌 Referencia Pinnacle:
+ Pinnacle: UNDER 7.5 @ -108
+ Bovada:   UNDER 7.5 @ -130
+ → Bovada tiene línea blanda ✅"
+
+If Bovada = Pinnacle → market efficient
+→ reduce confidence
+
+New confidence rules:
+Model + Pinnacle agree vs Bovada:
+→ 🟢 ALTA — apostar normal
+
+Model agrees with Pinnacle:
+→ 🟡 MEDIA — apostar mitad
+
+Model disagrees with Pinnacle:
+→ 🔴 BAJA — no apostar
+
+━━━━━━━━━━━━━━━━━━━━
+3. UNDERSTAT FOR SOCCER xG
+━━━━━━━━━━━━━━━━━━━━
+Fetch xG data for World Cup teams:
+https://understat.com/team/{team}/2026
+
+For each team get:
+- xG for (expected goals scored)
+- xG against (expected goals conceded)
+- Last 5 matches xG rolling average
+
+Use xG instead of raw goals for
+more accurate total projections:
+
+Instead of:
+"Modelo proyecta: 2.3 goles"
+
+Use xG-based projection:
+"Modelo proyecta: 2.1 goles
+ (basado en xG real)"
+
+Show in alert:
+"📊 xG últimos 5 partidos:
+ España xG favor: 2.3/partido
+ España xG contra: 0.6/partido
+ → Ataque muy eficiente ✅"
+
+Use xG to adjust total projection:
+- Team xG > raw goals → 
+  likely to improve (underperforming)
+- Team xG < raw goals →
+  likely to regress (overperforming)
+
+For World Cup 2026 use qualifying
+xG data until tournament xG available.
+
+━━━━━━━━━━━━━━━━━━━━
+INTEGRATION RULES:
+━━━━━━━━━━━━━━━━━━━━
+- All 3 sources feed into Claude prompt
+- Statcast overrides ERA when available
+- Pinnacle disagreement = confidence drop
+- xG overrides raw goals for soccer
+- Cache all data per team per day
+- If source unavailable → skip silently
+- Add data quality points:
+  Statcast available: +15 points
+  Pinnacle available: +10 points
+  xG data available: +10 points
