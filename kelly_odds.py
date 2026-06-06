@@ -1888,9 +1888,9 @@ def _parse_pitcher(s):
 def _verdict_line(ev_pct, true_prob=None):
     """One-line confidence verdict appended to every alert."""
     if ev_pct > 10 and (true_prob is None or true_prob > 0.60):
-        return f"{_DIV3}\n🟢 CONFIANZA: ALTA — apostar"
+        return f"{_DIV3}\n🟢 CONFIANZA: ALTA"
     elif ev_pct >= 3 or (true_prob is not None and true_prob >= 0.50):
-        return f"{_DIV3}\n🟡 CONFIANZA: MEDIA — apostar mitad"
+        return f"{_DIV3}\n🟡 CONFIANZA: MEDIA"
     else:
         return f"{_DIV3}\n🔴 CONFIANZA: BAJA — ignorar"
 
@@ -3629,7 +3629,7 @@ def analyze_totals(games, sport_key):
 
     return total_bets
 
-def notify_totals(total_bets):
+def notify_totals(total_bets, alerted=None):
     global alerted_bets
     for b in total_bets:
         # Module 7: stake minimum filter
@@ -3644,6 +3644,10 @@ def notify_totals(total_bets):
         home, away = b["match"].split(" vs ", 1)
         dedup_key = f"{home}_{away}_{b['team']}_totals"
         if not _should_alert(dedup_key, odds=b["odds"], edge=b["edge"]):
+            continue
+        match_key_tot = b.get("match", f"{home} vs {away}").lower().strip()
+        if alerted is not None and match_key_tot in alerted:
+            print(f"  ⏭️  Totals {b.get('match','')} — ya alertado este scan")
             continue
         key = f"{b['game_id']}|totals|{b['team']}"
 
@@ -3668,13 +3672,10 @@ def notify_totals(total_bets):
             wind   = b.get("wind_info", "")
             wind_line = f"💨 {wind}\n" if wind and wind != "Wind: N/A" else ""
             is_high = b["confidence"] == "HIGH"
-            half_stake = round(b["stake"] / 2, 2)
             _sw = b.get("stake_warn", "")
-            action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
-                      else f"🟡 APOSTAR MITAD: ${half_stake}")
-            action += "\n💡 SUGERIDO — responde 'aposté' para registrar"
+            conf_line = "🟢 CONFIANZA: ALTA" if is_high else "🟡 CONFIANZA: MEDIA"
             if _sw:
-                action += f"\n{_sw}"
+                conf_line += f"\n{_sw}"
             # Build adjustment breakdown lines (Modules A9–A11)
             base_p  = b.get("base_proj", b["our_line"])
             park_n  = (b.get("park_tend_note") or "").strip()
@@ -3699,7 +3700,7 @@ def notify_totals(total_bets):
                 f"🎯 {_es(home)} vs {_es(away)}\n"
                 f"⏰ Hoy {gt} ET\n"
                 f"APUESTA: {side} {line} carreras @ {b['odds']} — {b['bookmaker']}\n"
-                f"{action}"
+                f"{conf_line}"
             )
             l2 = (
                 f"Nuestro modelo proyecta {b['our_line']} carreras totales.\n"
@@ -3723,13 +3724,10 @@ def notify_totals(total_bets):
         else:
             # ── Soccer / other sports ─────────────────────────────────────
             is_high    = b["confidence"] == "HIGH"
-            half_stake = round(b["stake"] / 2, 2)
             _sw = b.get("stake_warn", "")
-            action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
-                      else f"🟡 APOSTAR MITAD: ${half_stake}")
-            action += "\n💡 SUGERIDO — responde 'aposté' para registrar"
+            conf_line = "🟢 CONFIANZA: ALTA" if is_high else "🟡 CONFIANZA: MEDIA"
             if _sw:
-                action += f"\n{_sw}"
+                conf_line += f"\n{_sw}"
             form_h = b.get("form_home", "")
             form_a = b.get("form_away", "")
             form_block = ""
@@ -3775,7 +3773,7 @@ def notify_totals(total_bets):
                 f"🎯 {match_es_tot}\n"
                 f"⏰ Hoy {gt} ET\n"
                 f"APUESTA: {side} {line} {unit} @ {b['odds']} — {b['bookmaker']}\n"
-                f"{action}"
+                f"{conf_line}"
             )
             l2 = (
                 f"Nuestro modelo proyecta {b['our_line']} {unit} totales.\n"
@@ -3792,7 +3790,8 @@ def notify_totals(total_bets):
 
         ntfy_post(title, body, priority)
         alerted_bets.add(key)
-        # Do NOT auto-log — user must confirm via ntfy "aposté" command
+        if alerted is not None:
+            alerted[match_key_tot] = float(b.get("ev_pct", b.get("edge", 0)))
         print(f"    🎯 {side} {line} {b['match']} | Our:{b['our_line']} | Edge:{b['edge']} {unit}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5069,7 +5068,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
     }
 
 
-def notify_game_analysis(analyses, sport_key):
+def notify_game_analysis(analyses, sport_key, alerted=None):
     """Send one ntfy alert per game containing full analysis context + top picks."""
     global alerted_game_analysis
     is_mlb = "mlb" in sport_key
@@ -5088,6 +5087,10 @@ def notify_game_analysis(analyses, sport_key):
 
         analysis_key = f"{home}_{away}_analysis"
         if not _should_alert(analysis_key, edge=a["best_ev"]):
+            continue
+        match_key_ana = a["match"].lower().strip()
+        if alerted is not None and match_key_ana in alerted:
+            print(f"  ⏭️  {match_es} — ya alertado este scan (notify_game_analysis)")
             continue
         if i > 0:
             time.sleep(2)
@@ -5526,20 +5529,18 @@ def notify_game_analysis(analyses, sport_key):
             # Book warning
             bk_warn_pick = _book_warning(c.get("book", ""))
 
-            # EV in plain dollars
             prob_pct = round(c['true_prob'] * 100)
-            odds_line = (f"   💰 Apuesta ${c['stake']} @ {c['odds']} — {c['book']}{bk_warn_pick}\n")
+            odds_line = f"   💰 Cuota: {c['odds']} — {c['book']}{bk_warn_pick}\n"
 
             picks_lines += (
                 f"{rank_emoji} {c['label']}\n"
-                f"   Ganancia esperada: ${ev_d} por cada ${c['stake']} apostados\n"
-                f"   Probabilidad real: {prob_pct}%{safe_tag}\n"
+                f"   EV: +{c['ev_pct']:.1f}% — Probabilidad real: {prob_pct}%{safe_tag}\n"
                 f"{odds_line}"
             )
 
         # Verdict — cap to MEDIA whenever any ⚠️ warning is present
         if tc.get("cap_conf") or has_warning:
-            verdict = f"{_DIV3}\n🟡 CONFIANZA: MEDIA — apostar mitad"
+            verdict = f"{_DIV3}\n🟡 CONFIANZA: MEDIA"
         else:
             verdict = _verdict_line(best["ev_pct"], best["true_prob"])
 
@@ -5591,6 +5592,8 @@ def notify_game_analysis(analyses, sport_key):
         title = f"🔍 {match_es} | Mejor: {clean} +{a['best_ev']}%"
         ntfy_post(title, body, "high")
         alerted_game_analysis.add(a["game_id"])
+        if alerted is not None:
+            alerted[match_key_ana] = float(a.get("best_ev", 0))
         print(f"  🔍 Análisis: {a['match']} — {len(a['candidates'])} pick(s), "
               f"mejor EV +{a['best_ev']}%")
 
@@ -8831,7 +8834,7 @@ def analyze(games, prev_map, new_map, sport_key=""):
 
     return bets, sharp_moves, steam_moves
 
-def notify_bets(new_bets):
+def notify_bets(new_bets, alerted=None):
     global alerted_bets
     if not new_bets:
         return
@@ -8860,6 +8863,10 @@ def notify_bets(new_bets):
         dedup_key = f"{home}_{away}_{b['team']}_ml"
         if not _should_alert(dedup_key, odds=b["odds"], edge=b["edge"]):
             continue
+        match_key_bet = b.get("match", f"{home} vs {away}").lower().strip()
+        if alerted is not None and match_key_bet in alerted:
+            print(f"  ⏭️  {match_key_bet} — ya alertado este scan (notify_bets)")
+            continue
         sport   = b.get("sport", "")
         emoji   = _sport_emoji(sport)
         gt      = _fmt_smart_gt(b.get("time", ""))
@@ -8887,18 +8894,15 @@ def notify_bets(new_bets):
             pa_era    = p_data.get("away_era", 4.50)
             impl_pct  = round(100 / b["odds"], 1) if b["odds"] else 0
             is_high   = b["edge"] >= 5.0 and elo_p >= 60
-            half_stake = round(b["stake"] / 2, 2)
             _sw = b.get("stake_warn", "")
-            action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
-                      else f"🟡 APOSTAR MITAD: ${half_stake}")
-            action += "\n💡 SUGERIDO — responde 'aposté' para registrar"
+            conf_line = "🟢 CONFIANZA: ALTA" if is_high else "🟡 CONFIANZA: MEDIA"
             if _sw:
-                action += f"\n{_sw}"
+                conf_line += f"\n{_sw}"
             l1 = (
                 f"🎯 {match_es}\n"
                 f"⏰ Hoy {gt} ET\n"
                 f"APUESTA: {team_es} GANA @ {b['odds']} — {b['bookmaker']}\n"
-                f"{action}"
+                f"{conf_line}"
             )
             l2 = (
                 f"Nuestro modelo dice {team_es} tiene {elo_p}% de probabilidad de ganar.\n"
@@ -8918,18 +8922,15 @@ def notify_bets(new_bets):
             # ── Soccer / other sports ─────────────────────────────────────
             impl_pct   = round(100 / b["odds"], 1) if b["odds"] else 0
             is_high    = b["edge"] >= 5.0 and elo_p >= 60
-            half_stake = round(b["stake"] / 2, 2)
             _sw = b.get("stake_warn", "")
-            action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
-                      else f"🟡 APOSTAR MITAD: ${half_stake}")
-            action += "\n💡 SUGERIDO — responde 'aposté' para registrar"
+            conf_line = "🟢 CONFIANZA: ALTA" if is_high else "🟡 CONFIANZA: MEDIA"
             if _sw:
-                action += f"\n{_sw}"
+                conf_line += f"\n{_sw}"
             l1 = (
                 f"🎯 {match_es}\n"
                 f"⏰ Hoy {gt} ET\n"
                 f"APUESTA: {team_es} GANA @ {b['odds']} — {b['bookmaker']}\n"
-                f"{action}"
+                f"{conf_line}"
             )
             l2 = (
                 f"Nuestro modelo: {elo_p}% de ganar.\n"
@@ -8943,7 +8944,8 @@ def notify_bets(new_bets):
 
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
-        # Do NOT auto-log — user must confirm via ntfy "aposté" command
+        if alerted is not None:
+            alerted[match_key_bet] = float(b.get("edge", 0))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE — CSV LOGGING
@@ -11591,15 +11593,15 @@ def run_scan():
 
             if full_analyses:
                 print(f"  🔍 {short} — {len(full_analyses)} full analysis(es)")
-                # Full analysis has the best EV — alert FIRST so dedup favors it
-                _notify_simple_analyses(full_analyses, _scan_alerted)
+                # Full analysis has best EV — alert FIRST so dedup favors it
+                notify_game_analysis(full_analyses, sport_key, _scan_alerted)
                 all_full_analyses.extend(full_analyses)  # parlay collector
 
-            # Quick ML/totals picks — skip any match already alerted by full analysis
+            # ML and totals picks — skip any match already alerted by full analysis
             if bets:
-                _notify_simple_picks(bets, _scan_alerted)
+                notify_bets(bets, _scan_alerted)
             if total_bets:
-                _notify_simple_picks(total_bets, _scan_alerted)
+                notify_totals(total_bets, _scan_alerted)
 
         except Exception as e:
             print(f"  ⚠️  {sport_key} error (skipping): {e}")
