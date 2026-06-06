@@ -414,7 +414,194 @@ def _update_monthly_kelly_mult():
     except Exception as _e:
         print(f"  ⚠️  _update_monthly_kelly_mult: {_e}")
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TERM TRANSLATION — applied to ALL ntfy notifications automatically
+# Converts every English baseball abbreviation to plain Spanish.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import re as _re
+
+# Ordered list: (compiled_regex, replacement).
+# Most-specific patterns first to avoid partial matches.
+_TERM_RULES: "list[tuple]" = []
+
+def _build_term_rules():
+    global _TERM_RULES
+    _raw = [
+        # Pitcher handedness
+        (r'\bLHP\b',                    'pitcher zurdo'),
+        (r'\bRHP\b',                    'pitcher diestro'),
+        # Medical — longest forms first
+        (r'\b60-day\s+(?:IL|DL)\b',    'lista de lesionados (60 días)'),
+        (r'\b15-day\s+(?:IL|DL)\b',    'lista de lesionados (15 días)'),
+        (r'\b10-day\s+(?:IL|DL)\b',    'lista de lesionados (10 días)'),
+        (r'\b7-day\s+(?:IL|DL)\b',     'lista de lesionados (7 días)'),
+        (r'\binjured list\b',           'lista de lesionados'),
+        (r'\bdisabled list\b',          'lista de lesionados'),
+        (r'\b(?:IL|DL)\b',             'lista de lesionados'),
+        # Field positions
+        (r'\bLHP\b',                    'pitcher zurdo'),
+        (r'\bRHP\b',                    'pitcher diestro'),
+        (r'\bDH\b',                     'bateador designado'),
+        (r'\bSP\b',                     'pitcher abridor'),
+        (r'\bRP\b',                     'pitcher relevista'),
+        (r'\bCF\b',                     'jardín central'),
+        (r'\bLF\b',                     'jardín izquierdo'),
+        (r'\bRF\b',                     'jardín derecho'),
+        (r'\b2B\b',                     'segunda base'),
+        (r'\b1B\b',                     'primera base'),
+        (r'\bSS\b',                     'campo corto'),
+        (r'\b3B\b',                     'tercera base'),
+        (r'\bC\b(?=\s+[A-Z][a-z])',     'receptor'),   # "C J.T. Realmuto" only
+        # Stats (xERA before ERA to avoid double-match)
+        (r'\bxERA\b',                   'ERA esperado'),
+        (r'\bERA\b',                    'Promedio de carreras'),
+        (r'\bFIP\b',                    'Rendimiento real'),
+        (r'\bOPS\b',                    'Eficiencia ofensiva'),
+        (r'\bWHIP\b',                   'base-runners por entrada'),
+        (r'\bK/9\b',                    'ponches por 9 innings'),
+        (r'\bK%\b',                     'porcentaje de ponches'),
+        (r'\bBB%\b',                    'porcentaje de bases por bolas'),
+        (r'\bBABIP\b',                  'suerte en contacto'),
+        # Bet-type labels
+        (r'\(ML\)',                      '(apuesta al ganador)'),
+        (r'(?<!\w)ML(?!\s*model|\s*Model)(?!\w)',
+                                         'apuesta al ganador'),
+        (r'\bRL\b',                     'línea de carreras'),
+        (r'\bH2H\b',                    'historial directo'),
+        (r'\bCLV\b',                    'valor vs línea de cierre'),
+        (r'\bEV\b(?=\s*[:\+\-\d])',     'Valor esperado'),
+        # Action words (English fragments that slip into alerts)
+        (r'\bactivated\b',              'regresó de la'),
+        (r'\bplaced on\b',              'colocado en'),
+        (r'\bscratched\b',              'retirado del lineup'),
+        (r'\btransferred\b',            'trasladado a'),
+        (r'\boptioned\b',              'enviado a ligas menores'),
+        (r'\brecalled\b',               'llamado de ligas menores'),
+        (r'\bdesignated for assignment\b', 'designado para asignación'),
+        (r'\bday-to-day\b',             'estado: día a día'),
+        (r'\bquestionable\b',           'dudoso para jugar'),
+        (r'\bdoubtful\b',               'muy dudoso para jugar'),
+        (r'\bruled out\b',              'descartado del juego'),
+        (r'\bnot starting\b',           'no arrancará el juego'),
+        (r'\brookies?\b',               'novato'),
+        (r'\blineup\b',                 'alineación'),
+        (r'\bbullpen\b',                'bullpen (lanzadores de relevo)'),
+        (r'\bstarter\b',                'abridor'),
+        (r'\brelief(?:er)?\b',          'relevista'),
+        (r'\bpostponed\b',              'pospuesto'),
+        (r'\brain delay\b',             'retraso por lluvia'),
+    ]
+    _TERM_RULES = [(_re.compile(pat, _re.IGNORECASE), rep) for pat, rep in _raw]
+
+_build_term_rules()
+
+
+def _translate_terms(text: str) -> str:
+    """
+    Replace all English baseball abbreviations and raw terms with plain Spanish.
+    Applied automatically to every ntfy body before sending.
+    """
+    for pattern, replacement in _TERM_RULES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+# ── News impact explainer ─────────────────────────────────────────────────────
+
+def _explain_news_impact(headline: str, team: str, impact: str) -> str:
+    """
+    Generate a conversational 2–3 line Spanish explanation of a news headline
+    and its betting implication. Written as if explaining to a friend.
+    """
+    h = headline.lower()
+
+    # IL placement — player is hurt
+    if any(k in h for k in ("placed on", "lista de lesionados", "colocado en")):
+        player = _extract_player_name(headline)
+        if impact == "ALTO":
+            return (f"Un jugador clave de los {team} se lastimó y no jugará.\n"
+                    f"Esto debilita su ataque — su equipo anotará menos carreras de lo normal.\n"
+                    f"→ Considera apostar UNDER si los {team} están en tu pick de hoy.")
+        return (f"Un jugador de los {team} está en la lista de lesionados.\n"
+                f"Puede afectar su rendimiento ofensivo moderadamente.\n"
+                f"→ Revisa si el jugador era titular antes de apostar.")
+
+    # Activation — player returns from IL
+    if any(k in h for k in ("activated", "regresó", "recalled", "llamado")):
+        player = _extract_player_name(headline)
+        if impact == "ALTO":
+            return (f"Un jugador importante regresa al lineup de los {team}.\n"
+                    f"Esto fortalece su ataque — esperamos más carreras de lo usual.\n"
+                    f"→ Si tenías UNDER en los {team}, reconsidera tu apuesta.")
+        return (f"Regresa un jugador a la alineación de los {team}.\n"
+                f"Pequeño impulso ofensivo para el equipo.\n"
+                f"→ Mantén tu pick pero ajusta el análisis de pitching.")
+
+    # Scratch / not starting / ruled out
+    if any(k in h for k in ("scratch", "not start", "ruled out", "retirado",
+                             "descartado", "no arrancará", "won't start")):
+        player = _extract_player_name(headline)
+        # Check if it's a pitcher scratch (high impact)
+        if any(k in h for k in ("pitcher", "sp ", "start", "abridor")):
+            return (f"El pitcher abridor programado para {team} NO jugará hoy.\n"
+                    f"Cambio de última hora — el bullpen (relevistas) tendrá que trabajar más.\n"
+                    f"→ Un abridor débil de reemplazo puede inflar el total — recalcula el OVER/UNDER.")
+        return (f"Un jugador de los {team} fue retirado del lineup de último momento.\n"
+                f"El equipo jugará sin él — puede afectar la ofensiva.\n"
+                f"→ Verifica si era un bateador clave antes de apostar.")
+
+    # Postponement
+    if any(k in h for k in ("postponed", "pospuesto")):
+        return (f"El juego de los {team} fue cancelado por hoy.\n"
+                f"No hay partido — cancela cualquier apuesta activa en este juego.\n"
+                f"→ Las casas de apuestas devolverán el dinero automáticamente.")
+
+    # Rain delay
+    if any(k in h for k in ("rain delay", "retraso por lluvia", "weather")):
+        return (f"Hay retraso por condiciones climáticas en el juego de los {team}.\n"
+                f"Un retraso largo cansa a los pitchers y hace que usen más relevistas.\n"
+                f"→ Favorece ligeramente el OVER si el retraso supera 1 hora.")
+
+    # Trade
+    if any(k in h for k in ("traded", "trade", "acquired")):
+        return (f"Los {team} realizaron un cambio de jugadores.\n"
+                f"Un cambio puede reorganizar la alineación del equipo.\n"
+                f"→ Analiza el nuevo pickup antes de apostar en los próximos días.")
+
+    # Generic
+    return (f"Novedad importante en los {team}.\n"
+            f"Revisa la alineación oficial antes de confirmar tu apuesta.\n"
+            f"→ Espera la alineación confirmada para máxima precisión.")
+
+
+def _extract_player_name(headline: str) -> str:
+    """Best-effort player name extraction from an MLB news headline."""
+    # Common patterns: "activated OF John Smith" or "John Smith placed on"
+    patterns = [
+        _re.compile(
+            r'(?:activated|placed|transferred|recalled|optioned)\s+\w+\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+        ),
+        _re.compile(
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+(?:placed|activated|transferred|recalled)',
+        ),
+    ]
+    for p in patterns:
+        m = p.search(headline)
+        if m:
+            return m.group(1)
+    # Fallback: return first two capitalized words found
+    words = headline.split()
+    caps  = [w for w in words if w and w[0].isupper() and len(w) > 1 and w not in
+             ("Houston","Los","San","New","St.","Kansas","Tampa","San","Oakland",
+              "The","MLB","Astros","Yankees","Red","Blue","White","Black")]
+    return " ".join(caps[:2]) if len(caps) >= 2 else "El jugador"
+
+
 def ntfy_post(title, body, priority="default"):
+    # Apply full Spanish term translation before sending
+    body  = _translate_terms(body)
+    title = _translate_terms(title)
     try:
         resp = requests.post(
             f"https://ntfy.sh/{NOTIFY}",
@@ -9960,26 +10147,48 @@ def _monitor_news() -> list:
         new_items.append(item)
 
     for item in new_items:
-        impact  = item["impact"]
-        emoji   = "🚨" if impact == "ALTO" else "⚠️"
-        title   = f"{emoji} ÚLTIMA HORA — {item['source']}"
-        body    = (
-            f"{emoji} ÚLTIMA HORA — {item['source']}\n"
-            f"{'━'*30}\n"
-            f"📰 {item['headline']}\n"
-            f"⚾ Equipo: {item['team']}\n"
-            f"💥 Impacto: {impact}\n"
-        )
+        impact    = item["impact"]
+        headline  = item["headline"]
+        team      = item["team"]
+        source    = item["source"]
+
+        # Translate headline (positions, IL, etc.) to Spanish
+        headline_es = _translate_terms(headline)
+
+        # Conversational explanation based on what happened
+        explanation = _explain_news_impact(headline, team, impact)
+
         if impact == "ALTO":
-            body += "→ Re-analizando picks ahora..."
+            emoji = "🚨"
             prio  = "high"
+            imp_label = "ALTO 🔴"
+            tip_line  = "⚡ Ajusta tus picks ANTES del juego"
         elif impact == "MEDIO":
-            body += "→ Ajustando proyección ofensiva -12%"
+            emoji = "⚠️"
             prio  = "default"
+            imp_label = "MEDIO 🟡"
+            tip_line  = "📋 Considera esto en tu próximo análisis"
         else:
-            body += "→ Nota para el próximo análisis programado"
+            emoji = "ℹ️"
             prio  = "low"
-        print(f"  {emoji} NOTICIA [{impact}]: {item['headline'][:80]}")
+            imp_label = "BAJO 🟢"
+            tip_line  = "📝 Anotado para el seguimiento"
+
+        title = f"{emoji} NOTICIA IMPORTANTE — {team}"
+        body  = (
+            f"{emoji} NOTICIA IMPORTANTE\n"
+            f"{'━' * 24}\n"
+            f"📋 {headline_es}\n"
+            f"\n"
+            f"⚾ Equipo: {team}\n"
+            f"📡 Fuente: {source}\n"
+            f"💥 Impacto: {imp_label}\n"
+            f"{'━' * 24}\n"
+            f"{explanation}\n"
+            f"{'━' * 24}\n"
+            f"{tip_line}"
+        )
+        print(f"  {emoji} NOTICIA [{impact}]: {headline[:80]}")
         ntfy_post(title, body, prio)
 
     return new_items
