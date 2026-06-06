@@ -5649,20 +5649,36 @@ def _save_confirm_queue(queue: list) -> None:
         print(f"  ⚠️  confirm_queue save error: {e}")
 
 
-def _notify_simple_picks(bets: list) -> None:
-    """Send one clean ntfy alert per pick. No stakes, no portfolio, no limits."""
+def _notify_simple_picks(bets: list, alerted: dict) -> None:
+    """
+    Send one clean ntfy alert per pick.
+    alerted: shared {match_key: edge} dict — skips match if already sent this scan.
+    Uses ev_pct (always a %) over edge (which for totals is run diff, not a %).
+    """
     for b in bets:
         try:
             match = b.get("match", "?")
             team  = b.get("team", b.get("label", "?"))
-            edge  = float(b.get("edge", b.get("ev_pct", 0)))
+            # ev_pct is always a true percentage; edge for totals = run diff (not %)
+            ev_pct = float(b.get("ev_pct", 0))
+            edge_pct_raw = float(b.get("edge", 0))
+            # Use ev_pct when meaningful; fall back to edge only for ML (where it IS a %)
+            market = b.get("market_type", "h2h")
+            edge = ev_pct if ev_pct > 0 else (edge_pct_raw if market == "h2h" else 0.0)
+            # Hard filter — must beat MIN_EDGE
+            if edge < MIN_EDGE:
+                print(f"  ⏭️  {match} | {team} — edge {edge:.1f}% < {MIN_EDGE}% mín, omitido")
+                continue
+            # Dedup — skip if this match already alerted with higher/equal edge this scan
+            match_key = match.lower().strip()
+            if match_key in alerted and alerted[match_key] >= edge:
+                print(f"  ⏭️  {match} — ya alertado (edge {alerted[match_key]:.1f}% ≥ {edge:.1f}%)")
+                continue
             odds  = float(b.get("odds", 0))
             book  = b.get("bookmaker", b.get("book", "?"))
-            # strip emoji prefixes
             pick_clean = (team.replace("🔵 ", "").replace("🔴 ", "")
                               .replace("📈 ", "").replace("📉 ", "")
                               .replace("🏃 ", "").replace("🤝 ", ""))
-            # totals: add line to pick label
             side = str(b.get("side", ""))
             if side and side not in pick_clean:
                 pick_clean = f"{pick_clean} {side}"
@@ -5673,30 +5689,38 @@ def _notify_simple_picks(bets: list) -> None:
                 f"Cuota: {odds:.2f} — {book}\n"
                 f"Confianza: {conf_line}"
             )
-            priority = "high" if edge >= 5.0 else "default"
-            ntfy_post(f"🎯 {match}", body, priority)
-            print(f"  📲 Alerta enviada: {match} | {pick_clean} | Edge:{edge:.1f}%")
+            ntfy_post(f"🎯 {match}", body, "high" if edge >= 5.0 else "default")
+            alerted[match_key] = edge
+            print(f"  📲 Alerta: {match} | {pick_clean} | Edge:{edge:.1f}%")
         except Exception as e:
             print(f"  ⚠️  simple pick alert error: {e}")
 
 
-def _notify_simple_analyses(full_analyses: list) -> None:
-    """Send clean pick alert for each full-analysis game that has a qualifying pick."""
+def _notify_simple_analyses(full_analyses: list, alerted: dict) -> None:
+    """
+    Send clean pick alert for each full-analysis game with qualifying pick.
+    alerted: shared {match_key: edge} dict — skips match if already sent this scan.
+    Called BEFORE _notify_simple_picks so full-analysis EV gets priority.
+    """
     for a in full_analyses:
         try:
             candidates = a.get("candidates", [])
             if not candidates:
                 continue
-            best = max(candidates, key=lambda c: c.get("ev_pct", 0))
+            best = max(candidates, key=lambda c: float(c.get("ev_pct", 0)))
             edge = float(best.get("ev_pct", 0))
             if edge < MIN_EDGE:
                 continue
             match = a.get("match", "?")
+            match_key = match.lower().strip()
+            if match_key in alerted and alerted[match_key] >= edge:
+                print(f"  ⏭️  {match} — ya alertado (edge {alerted[match_key]:.1f}% ≥ {edge:.1f}%)")
+                continue
             label = best.get("label", "?")
             pick_clean = (label.replace("🔵 ", "").replace("🔴 ", "")
                                .replace("📈 ", "").replace("📉 ", ""))
-            odds  = float(best.get("odds", 0))
-            book  = best.get("book", "?")
+            odds = float(best.get("odds", 0))
+            book = best.get("book", "?")
             conf_line = "🟢 ALTA" if edge >= 5.0 else "🟡 MEDIA"
             body = (
                 f"Pick: {pick_clean}\n"
@@ -5704,9 +5728,9 @@ def _notify_simple_analyses(full_analyses: list) -> None:
                 f"Cuota: {odds:.2f} — {book}\n"
                 f"Confianza: {conf_line}"
             )
-            priority = "high" if edge >= 5.0 else "default"
-            ntfy_post(f"🎯 {match}", body, priority)
-            print(f"  📲 Análisis completo: {match} | {pick_clean} | Edge:{edge:.1f}%")
+            ntfy_post(f"🎯 {match}", body, "high" if edge >= 5.0 else "default")
+            alerted[match_key] = edge
+            print(f"  📲 Análisis: {match} | {pick_clean} | Edge:{edge:.1f}%")
         except Exception as e:
             print(f"  ⚠️  simple analysis alert error: {e}")
 
@@ -11411,6 +11435,7 @@ def run_scan():
     all_full_analyses = []   # parlay detector — collects across all sports
     all_steams        = []   # steam moves — collects across all sports
     all_premiums:     list = []  # Module P: PREMIUM picks (≥3 signals)
+    _scan_alerted:    dict = {}  # dedup: {match_key: edge} — one alert per match per scan
     _steam_game_ids.clear()      # reset steam registry for this scan
     now_month  = datetime.now(CDT).month
 
@@ -11542,14 +11567,12 @@ def run_scan():
                 print(f"\n  ✅ {short} — {len(bets)} value bet(s):")
                 for b in bets:
                     print(f"    {b['match']} → {b['team']} @{b['odds']} | Edge:{b['edge']}%")
-                _notify_simple_picks(bets)
                 all_bets.extend(bets)
             else:
                 print(f"  ❌ {short} — no ML value")
 
             if total_bets:
                 print(f"  🎯 {short} — {len(total_bets)} totals bet(s):")
-                _notify_simple_picks(total_bets)
                 all_totals.extend(total_bets)
             else:
                 print(f"  ❌ {short} — no totals value")
@@ -11568,8 +11591,15 @@ def run_scan():
 
             if full_analyses:
                 print(f"  🔍 {short} — {len(full_analyses)} full analysis(es)")
-                _notify_simple_analyses(full_analyses)
+                # Full analysis has the best EV — alert FIRST so dedup favors it
+                _notify_simple_analyses(full_analyses, _scan_alerted)
                 all_full_analyses.extend(full_analyses)  # parlay collector
+
+            # Quick ML/totals picks — skip any match already alerted by full analysis
+            if bets:
+                _notify_simple_picks(bets, _scan_alerted)
+            if total_bets:
+                _notify_simple_picks(total_bets, _scan_alerted)
 
         except Exception as e:
             print(f"  ⚠️  {sport_key} error (skipping): {e}")
