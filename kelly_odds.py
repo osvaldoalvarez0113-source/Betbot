@@ -4306,15 +4306,16 @@ def analyze_game_full(game, sport_key, prev_map=None):
             if is_mlb and odds > 5.0:
                 print(f"   ⚠️  MLB ODDS CAP: {lbl} @ {odds:.2f} > 5.0 — dato erróneo, omitido")
                 continue
-            ev = (true_p * odds - 1) * 100
-            r  = kelly_stake(true_p, odds)
+            true_p_capped = _cap_prob(true_p)      # enforce PROB_CAP before EV/stake
+            ev = (true_p_capped * odds - 1) * 100  # EV computed on capped probability
+            r  = kelly_stake(true_p_capped, odds)
             _all_evs.append((lbl, round(ev, 1)))
             if ev >= EV_MIN_PCT and r["stake"] > 0:
-                # Improvement 2: ML requires ≥62% probability
-                if true_p < PROB_MIN_ML:
-                    print(f"   ⏭️  {_tag}: {lbl} prob {true_p:.0%} < {PROB_MIN_ML:.0%} mín ML — omitido")
+                # Improvement 2: ML requires ≥62% probability (checked after cap)
+                if true_p_capped < PROB_MIN_ML:
+                    print(f"   ⏭️  {_tag}: {lbl} prob {true_p_capped:.0%} < {PROB_MIN_ML:.0%} mín ML — omitido")
                     continue
-                candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
+                candidates.append({"label": lbl, "true_prob": true_p_capped, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
                                    "stake": r["stake"], "kelly_pct": r["kelly_pct"],
                                    "stake_warn": r.get("stake_warn", "")})
@@ -5695,11 +5696,13 @@ def queue_for_confirmation(bets: list, sport_key: str) -> None:
             continue   # skip this pick — do NOT queue it
 
         entry = dict(b)
-        entry["_sport_key"]  = sport_key
-        entry["_queued_at"]  = now
-        entry["_status"]     = "pending"
+        entry["_sport_key"]      = sport_key
+        entry["_queued_at"]      = now
+        entry["_status"]         = "pending"
+        entry["suggested_stake"] = stake   # keep suggestion for when user confirms
+        entry["stake"]           = 0.0     # $0 until user manually confirms via "aposté"
         queue.append(entry)
-        _daily_exposure += stake
+        _daily_exposure += stake   # count toward cap — prevents double-queueing same pick
         queued_count    += 1
 
     if queued_count:
@@ -5711,11 +5714,17 @@ def queue_for_confirmation(bets: list, sport_key: str) -> None:
 def _confirm_bet(entry: dict) -> None:
     """
     Promote one queued bet entry into bets_log.csv and pending_bets.json.
-    Called when user confirms via ntfy.
+    Called ONLY when user confirms via ntfy ("aposté").
+    stake was set to $0 at queue time — restore suggested_stake here.
     """
     sport_key = entry.pop("_sport_key", "")
     entry.pop("_queued_at", None)
     entry.pop("_status", None)
+
+    # Restore the Kelly-computed stake from when the pick was originally found
+    # (entry["stake"] was zeroed at queue time; suggested_stake holds the real amount)
+    if "suggested_stake" in entry:
+        entry["stake"] = entry.pop("suggested_stake")
 
     # Write to bets_log.csv (the permanent record)
     try:
@@ -5915,9 +5924,23 @@ def _poll_ntfy_confirmations() -> None:
             if not text:
                 continue
 
+            # ── Guard: skip bot's own alert messages ───────────────────────
+            # Bot alerts are long (>80 chars) and contain instruction phrases
+            # like "responde 'aposté' para registrar" or "sugerido".
+            # User commands are always short bare words ("aposté", "cancelé").
+            if len(text) > 80 or "responde" in text or "sugerido" in text:
+                continue
+
+            # Helper: keyword must START the message (not be embedded in it)
+            def _starts_with_cmd(txt, keywords):
+                return any(
+                    txt == k or txt.startswith(k + " ") or txt.startswith(k + "\n")
+                    for k in keywords
+                )
+
             # ── confirmation commands ──────────────────────────────────────
-            if any(k in text for k in ("aposté todas", "confirm all",
-                                        "aposte todas", "confirmar todas")):
+            if _starts_with_cmd(text, ("aposté todas", "confirm all",
+                                       "aposte todas", "confirmar todas")):
                 n = _confirm_all_pending()
                 if n:
                     ntfy_post(
@@ -5928,30 +5951,30 @@ def _poll_ntfy_confirmations() -> None:
                     )
                 break
 
-            if any(k in text for k in ("aposté", "aposte", "bet placed",
-                                        "confirmar", "confirmed")):
+            if _starts_with_cmd(text, ("aposté", "aposte", "bet placed",
+                                       "confirmar", "confirmed")):
                 # Extract optional match/team hint after the command keyword
                 hint = ""
                 for kw in ("aposté", "aposte", "bet placed", "confirmar", "confirmed"):
-                    if kw in text:
-                        hint = text.split(kw, 1)[1].strip()
+                    if text.startswith(kw):
+                        hint = text[len(kw):].strip()
                         break
                 _confirm_next_bet(match_hint=hint)
                 break
 
             # ── cancellation commands ──────────────────────────────────────
-            if any(k in text for k in ("cancelé", "cancele", "cancel",
-                                        "no aposté", "no aposte")):
+            if _starts_with_cmd(text, ("cancelé", "cancele", "cancel",
+                                       "no aposté", "no aposte")):
                 hint = ""
                 for kw in ("cancelé", "cancele", "cancel", "no aposté", "no aposte"):
-                    if kw in text:
-                        hint = text.split(kw, 1)[1].strip()
+                    if text.startswith(kw):
+                        hint = text[len(kw):].strip()
                         break
                 _cancel_next_bet(match_hint=hint)
                 break
 
             # ── list commands ──────────────────────────────────────────────
-            if any(k in text for k in ("pendientes", "pending", "picks")):
+            if _starts_with_cmd(text, ("pendientes", "pending", "picks")):
                 _list_pending_confirm()
                 break
 
@@ -9020,12 +9043,13 @@ def _card_analyze_game(game: dict, sport_key: str) -> dict:
     def _check_ev(p, odds, lbl):
         nonlocal best_ev, best_label, best_odds, best_stake
         if odds and odds > 1.0:
-            ev = (p * odds - 1) * 100
+            p_eff = _cap_prob(p)               # enforce PROB_CAP before any calculation
+            ev = (p_eff * odds - 1) * 100      # EV computed on capped probability
             if ev > best_ev:
                 best_ev    = round(ev, 1)
                 best_label = lbl
                 best_odds  = odds
-                r          = kelly_stake(p, odds)
+                r          = kelly_stake(p_eff, odds)
                 best_stake = r["stake"]
 
     if is_mlb:
@@ -9848,8 +9872,21 @@ def detect_and_notify_parlays(all_analyses: list):
     Thresholds: each leg EV ≥ 8%, prob ≥ 60%, safe book, same bet type,
     different games, no TBD/contradiction; parlay EV > 15%.
     """
-    eligible = []
+    today_date = datetime.now(ET).date()
+    eligible   = []
     for a in all_analyses:
+        # Only include TODAY's games in parlays — never use yesterday's or future games
+        commence = a.get("commence_time", "") or a.get("time", "")
+        if commence:
+            try:
+                gdate = (datetime.fromisoformat(commence.replace("Z", "+00:00"))
+                         .astimezone(ET).date())
+                if gdate != today_date:
+                    print(f"  ⏭️  Parlay: omitiendo juego de otra fecha "
+                          f"({gdate}) — {a.get('match','?')}")
+                    continue
+            except Exception:
+                pass
         eligible.extend(_extract_parlay_candidates(a))
 
     if len(eligible) < 2:
