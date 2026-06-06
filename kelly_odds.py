@@ -11117,6 +11117,11 @@ def _check_cross_game_correlations(all_full_analyses: list):
             ace_pitchers.append(f"{pa} ({a_era:.2f})")
 
     if len(ace_pitchers) >= 3:
+        today     = datetime.now(CDT).strftime("%Y-%m-%d")
+        corr_key  = f"corr_ace_day_{today}"
+        if not _should_alert(corr_key):
+            print(f"  🔗 Correlación ace-day ya alertada hoy — omitida (dedup)")
+            return
         aces_str = "\n   ".join(ace_pitchers[:6])
         msg = (
             f"🔗 CORRELACIÓN: DÍA DE ASES\n"
