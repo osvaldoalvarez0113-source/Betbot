@@ -1906,6 +1906,300 @@ def pitcher_run_adjustment(home_era, away_era):
             adj += 0.2
     return round(adj, 1)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ELITE SOURCE 1 — BASEBALL SAVANT / STATCAST
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_statcast_pitcher_cache: dict = {}   # date → {name_key → metrics dict}
+_statcast_batter_cache:  dict = {}   # date → {name_key → metrics dict}
+
+def _safe_float(val) -> "float | None":
+    """Convert a CSV string value to float; return None if blank or non-numeric."""
+    try:
+        v = str(val).strip()
+        return float(v) if v not in ("", "null", "None", "N/A", "-") else None
+    except Exception:
+        return None
+
+def _statcast_name_key(full_name: str) -> str:
+    """'Jacob deGrom' → 'degrom_jacob' for Savant lookup."""
+    parts = full_name.strip().lower().split()
+    return f"{parts[-1]}_{parts[0]}" if len(parts) >= 2 else full_name.lower()
+
+def _fetch_statcast_all(player_type: str = "pitcher") -> dict:
+    """
+    Download Baseball Savant leaderboard CSV once per calendar day.
+    player_type: "pitcher" or "batter"
+    Returns {name_key → metrics_dict}.  Returns {} silently on any failure.
+    """
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    cache = _statcast_pitcher_cache if player_type == "pitcher" else _statcast_batter_cache
+    if today in cache:
+        return cache[today]
+
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={MLB_YEAR}&type={player_type}&min=1&pos=p"
+        f"&player_type={player_type}&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=25,
+                         headers={"User-Agent": "Mozilla/5.0 (compatible; BetBot/1.0)"})
+        if r.status_code != 200:
+            print(f"  ⚠️  Statcast {player_type}: HTTP {r.status_code}")
+            cache[today] = {}
+            return {}
+
+        import csv, io
+        reader = csv.DictReader(io.StringIO(r.text))
+        result = {}
+        for row in reader:
+            first = (row.get("first_name") or "").strip().lower()
+            last  = (row.get("last_name")  or "").strip().lower()
+            if not first or not last:
+                continue
+            key = f"{last}_{first}"
+            if player_type == "pitcher":
+                result[key] = {
+                    "xera":         _safe_float(row.get("p_era")   or row.get("xera")
+                                               or row.get("est_era")),
+                    "whiff_pct":    _safe_float(row.get("whiff_percent")),
+                    "hard_hit_pct": _safe_float(row.get("hard_hit_percent")),
+                    "barrel_pct":   _safe_float(row.get("barrel_batted_rate")
+                                               or row.get("barrel_percent")),
+                    "chase_pct":    _safe_float(row.get("oz_swing_percent")
+                                               or row.get("chase_percent")),
+                }
+            else:
+                result[key] = {
+                    "xba":          _safe_float(row.get("xba")),
+                    "xslg":         _safe_float(row.get("xslg")),
+                    "hard_hit_pct": _safe_float(row.get("hard_hit_percent")),
+                    "barrel_pct":   _safe_float(row.get("barrel_batted_rate")
+                                               or row.get("barrel_percent")),
+                }
+        cache[today] = result
+        print(f"  🔬 Statcast {player_type}s cargados: {len(result)} jugadores")
+        return result
+    except Exception as _e:
+        print(f"  ⚠️  Statcast {player_type} fetch error: {_e}")
+        cache[today] = {}
+        return {}
+
+def fetch_statcast_pitcher(pitcher_name: str) -> "dict | None":
+    """
+    Return Statcast metrics dict for a pitcher (by display name), or None.
+    Keys: xera, whiff_pct, hard_hit_pct, barrel_pct, chase_pct
+    Falls back to last-name partial match if full-name lookup misses.
+    """
+    if not pitcher_name or pitcher_name in ("TBD", "Unknown", ""):
+        return None
+    data = _fetch_statcast_all("pitcher")
+    if not data:
+        return None
+    key  = _statcast_name_key(pitcher_name)
+    hit  = data.get(key)
+    if not hit:
+        last = pitcher_name.strip().lower().split()[-1]
+        for k, v in data.items():
+            if k.startswith(last + "_"):
+                hit = v
+                break
+    return hit if hit else None
+
+def _statcast_alert_block(name: str, sc: "dict | None", era: float) -> str:
+    """
+    Format the 🔬 Statcast block for a pitcher.
+    Returns empty string if no statcast data.
+    """
+    if not sc:
+        return ""
+    lines = []
+    xera = sc.get("xera")
+    if xera is not None:
+        diff  = era - xera
+        trend = ("mejor que ERA — infravalorado ✅" if diff > 0.30
+                 else "peor que ERA — ha tenido suerte ⚠️" if diff < -0.30
+                 else "alineado con ERA")
+        lines.append(f"   xERA: {xera:.2f} ({trend})")
+    whiff = sc.get("whiff_pct")
+    if whiff is not None:
+        lbl = ("dominante 🔥" if whiff > 30 else "sólido" if whiff > 22 else "bajo ⚠️")
+        lines.append(f"   Whiff%: {whiff:.1f}% ({lbl})")
+    hh = sc.get("hard_hit_pct")
+    if hh is not None:
+        lbl = ("controlado ✅" if hh < 32 else "alto ⚠️" if hh > 40 else "normal")
+        lines.append(f"   Hard hit%: {hh:.1f}% ({lbl})")
+    barrel = sc.get("barrel_pct")
+    if barrel is not None:
+        lines.append(f"   Barrel%: {barrel:.1f}%")
+    if not lines:
+        return ""
+    return f"🔬 Statcast {name}:\n" + "\n".join(lines) + "\n"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ELITE SOURCE 2 — PINNACLE MARKET REFERENCE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _extract_pinnacle_odds(game: dict) -> "dict | None":
+    """
+    Extract Pinnacle h2h moneyline odds from a game bookmakers array.
+    Returns {"home": price, "away": price} or None if Pinnacle absent.
+    """
+    home = game.get("home_team", "")
+    away = game.get("away_team", "")
+    for bk in game.get("bookmakers", []):
+        if "pinnacle" in bk.get("title", "").lower():
+            for m in bk.get("markets", []):
+                if m.get("key") == "h2h":
+                    pin_h = pin_a = None
+                    for o in m.get("outcomes", []):
+                        if o["name"] == home:
+                            pin_h = o["price"]
+                        elif o["name"] == away:
+                            pin_a = o["price"]
+                    if pin_h is not None and pin_a is not None:
+                        return {"home": pin_h, "away": pin_a}
+    return None
+
+def _pinnacle_analysis(
+    pick_team: str,
+    home: str,
+    model_prob: float,
+    pin_odds: "dict | None",
+) -> "tuple[str, str, str]":
+    """
+    Compare model side + probability to Pinnacle implied.
+    Returns (verdict, alert_line, conf_modifier):
+      verdict       : "strong" | "confirm" | "against" | "none"
+      alert_line    : formatted string for alert body
+      conf_modifier : "ALTA" | "MEDIA" | "BAJA" | ""
+    """
+    if pin_odds is None:
+        return "none", "", ""
+
+    raw_h  = 1.0 / max(pin_odds["home"], 1.001)
+    raw_a  = 1.0 / max(pin_odds["away"], 1.001)
+    total  = raw_h + raw_a
+    pin_ph = raw_h / total
+    pin_pa = raw_a / total
+
+    is_home        = (pick_team == home)
+    pin_prob       = pin_ph if is_home else pin_pa
+    model_fav_home = model_prob > 0.50
+    pin_fav_home   = pin_ph   > 0.50
+    same_side      = (model_fav_home == pin_fav_home)
+
+    if not same_side:
+        return (
+            "against",
+            f"📌 Pinnacle DIVERGE — su lado: {'local' if pin_fav_home else 'visitante'} "
+            f"({round(pin_prob*100,1)}% implícita) ⚠️ bajar confianza",
+            "BAJA",
+        )
+    diff = abs(model_prob - pin_prob)
+    if diff <= 0.05:
+        return (
+            "strong",
+            f"📌 Pinnacle confirma: {round(pin_prob*100,1)}% implícita "
+            f"→ Bovada puede tener línea blanda ✅",
+            "ALTA",
+        )
+    return (
+        "confirm",
+        f"📌 Pinnacle acuerda lado: {round(pin_prob*100,1)}% implícita "
+        f"(modelo: {round(model_prob*100,1)}%)",
+        "MEDIA",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ELITE SOURCE 3 — UNDERSTAT xG (SOCCER)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_understat_cache: dict = {}   # f"{team}|{date}" → dict or None
+
+_UNDERSTAT_SLUGS = {
+    "Brazil": "Brazil", "France": "France", "Germany": "Germany",
+    "Spain": "Spain", "England": "England", "Argentina": "Argentina",
+    "Portugal": "Portugal", "Netherlands": "Netherlands",
+    "Belgium": "Belgium", "Italy": "Italy", "Mexico": "Mexico",
+    "United States": "USA", "USA": "USA", "Uruguay": "Uruguay",
+    "Colombia": "Colombia", "Chile": "Chile", "Ecuador": "Ecuador",
+    "Peru": "Peru", "Paraguay": "Paraguay", "Japan": "Japan",
+    "South Korea": "South Korea", "Australia": "Australia",
+    "Saudi Arabia": "Saudi Arabia", "Morocco": "Morocco",
+    "Senegal": "Senegal", "Nigeria": "Nigeria", "Ghana": "Ghana",
+    "Canada": "Canada", "Costa Rica": "Costa Rica",
+    "Panama": "Panama", "Croatia": "Croatia", "Denmark": "Denmark",
+    "Switzerland": "Switzerland", "Poland": "Poland",
+    "Austria": "Austria", "Turkey": "Turkey", "Serbia": "Serbia",
+    "Ukraine": "Ukraine", "Scotland": "Scotland", "Wales": "Wales",
+}
+
+def fetch_understat_xg(team_name: str) -> "dict | None":
+    """
+    Scrape xG data for a national team from understat.com.
+    Tries 2026 first, falls back to 2025 qualifying season.
+    Returns {"xg_for": float, "xg_against": float, "matches": int,
+             "raw_goals_for": float, "raw_goals_against": float}
+    or None on any failure.  Caches per team per day.
+    """
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    ck    = f"{team_name}|{today}"
+    if ck in _understat_cache:
+        return _understat_cache[ck]
+
+    slug = _UNDERSTAT_SLUGS.get(team_name, team_name.replace(" ", "_"))
+
+    def _try_year(year: int) -> "dict | None":
+        url = f"https://understat.com/team/{slug}/{year}"
+        try:
+            r = requests.get(
+                url, timeout=14,
+                headers={"User-Agent": "Mozilla/5.0 (compatible; BetBot/1.0)"},
+            )
+            if r.status_code != 200:
+                return None
+            import re
+            m = re.search(
+                r"var\s+datesData\s*=\s*JSON\.parse\('(.*?)'\)",
+                r.text, re.DOTALL
+            )
+            if not m:
+                return None
+            raw     = m.group(1)
+            decoded = raw.replace("\\'", "'").encode("utf-8").decode("unicode_escape")
+            games   = json.loads(decoded)
+            if not games:
+                return None
+            recent = games[-5:] if len(games) >= 5 else games
+            xgf    = [float(g.get("xG",  0) or 0) for g in recent]
+            xga    = [float(g.get("xGA", 0) or 0) for g in recent]
+            gf     = [float(g.get("scored",   0) or 0) for g in recent]
+            ga     = [float(g.get("missed",   0) or 0) for g in recent]
+            return {
+                "xg_for":           round(sum(xgf) / len(xgf), 2),
+                "xg_against":       round(sum(xga) / len(xga), 2),
+                "raw_goals_for":    round(sum(gf)  / len(gf),  2),
+                "raw_goals_against":round(sum(ga)  / len(ga),  2),
+                "matches":          len(recent),
+                "season":           year,
+            }
+        except Exception as _e:
+            print(f"  ⚠️  understat [{team_name}] {year}: {_e}")
+            return None
+
+    result = _try_year(MLB_YEAR) or _try_year(MLB_YEAR - 1)
+    _understat_cache[ck] = result
+    if result:
+        print(f"  📊 xG [{team_name}] xGF={result['xg_for']} "
+              f"xGA={result['xg_against']} ({result['matches']}p "
+              f"season={result['season']})")
+    return result
+
+
 # ── MODULE 8B: FIP · Handedness · L/R matchup · H2H ──────────────────────────
 _fip_cache_d:  dict = {}
 _hand_cache_d: dict = {}
@@ -3294,6 +3588,11 @@ def _data_completeness_score(context: dict, sport: str,
         elif context.get("temp_label"):
             score += 3           # was 5
         # NOTE: umpire, lineup_data, h2h_data are OPTIONAL and no longer affect score
+        # ── Elite sources bonus points ────────────────────────────────────────
+        if context.get("statcast_home") or context.get("statcast_away"):
+            score += 15          # Statcast: xERA, Whiff%, Hard hit% available
+        if context.get("pinnacle_odds"):
+            score += 10          # Pinnacle: sharpest market reference available
     else:
         form_h = str(context.get("form_home", "") or "")
         form_a = str(context.get("form_away", "") or "")
@@ -3314,6 +3613,11 @@ def _data_completeness_score(context: dict, sport: str,
             score += 10
         if context.get("wc_standings"):
             score += 10
+        # ── Elite sources bonus points ────────────────────────────────────────
+        if context.get("xg_home") or context.get("xg_away"):
+            score += 10          # Understat xG: accurate expected goals data
+        if context.get("pinnacle_odds"):
+            score += 10          # Pinnacle: sharpest market reference available
     return min(score, 100)
 
 
@@ -3396,6 +3700,20 @@ def analyze_game_full(game, sport_key, prev_map=None):
         # Warn when at least one pitcher is unconfirmed
         tbd_note = ("⚠️ Pitcher no confirmado" if "TBD" in (h_pname, a_pname) else "")
         pitch_adj = pitcher_run_adjustment(h_era, a_era)
+
+        # ── Elite Source 1: Baseball Savant / Statcast ────────────────────────
+        h_statcast = fetch_statcast_pitcher(h_pname)
+        a_statcast = fetch_statcast_pitcher(a_pname)
+        # Use xERA instead of ERA when available — more predictive than ERA alone
+        h_era_eff = (h_statcast["xera"] if h_statcast and h_statcast.get("xera") is not None
+                     else h_era)
+        a_era_eff = (a_statcast["xera"] if a_statcast and a_statcast.get("xera") is not None
+                     else a_era)
+        if h_statcast or a_statcast:
+            # Recalculate pitch_adj using effective ERA (xERA beats raw ERA)
+            pitch_adj = pitcher_run_adjustment(h_era_eff, a_era_eff)
+            print(f"   🔬 Statcast: {h_pname} xERA={h_era_eff:.2f} | "
+                  f"{a_pname} xERA={a_era_eff:.2f}")
 
         park_city      = MLB_PARK_CITIES.get(home)
         wind           = fetch_wind(park_city[1], park_city[2]) if park_city else None
@@ -3775,9 +4093,18 @@ def analyze_game_full(game, sport_key, prev_map=None):
         home_exp = max(0.1, home_exp + t_adj / 2)
         away_exp = max(0.1, away_exp + t_adj / 2)
 
+        # ── Elite Source 2: Pinnacle Market Reference ─────────────────────────
+        pin_data = _extract_pinnacle_odds(game)
+
+        # Build pitcher display label — prefer xERA label when Statcast available
+        _h_era_label = (f"xERA {h_era_eff:.2f}" if h_statcast and h_statcast.get("xera") is not None
+                        else f"ERA {h_era:.2f}")
+        _a_era_label = (f"xERA {a_era_eff:.2f}" if a_statcast and a_statcast.get("xera") is not None
+                        else f"ERA {a_era:.2f}")
+
         context = {
-            "pitcher_home":  f"{h_pname} (ERA {h_era:.2f})",
-            "pitcher_away":  f"{a_pname} (ERA {a_era:.2f})",
+            "pitcher_home":  f"{h_pname} ({_h_era_label})",
+            "pitcher_away":  f"{a_pname} ({_a_era_label})",
             "rs_home": f"{h_stats['rs_pg']:.1f}", "ra_home": f"{h_stats['ra_pg']:.1f}",
             "rs_away": f"{a_stats['rs_pg']:.1f}", "ra_away": f"{a_stats['ra_pg']:.1f}",
             "park_factor":   park,
@@ -3815,6 +4142,13 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 "reasoning":     _pitch_reason,
                 "contradiction": _contradiction,
             },
+            # ── Elite Source 1: Statcast ──────────────────────────────────────
+            "statcast_home":  h_statcast,   # dict or None
+            "statcast_away":  a_statcast,   # dict or None
+            "era_eff_home":   h_era_eff,    # xERA if available else ERA
+            "era_eff_away":   a_era_eff,
+            # ── Elite Source 2: Pinnacle Market Reference ─────────────────────
+            "pinnacle_odds":  pin_data,     # {"home": price, "away": price} or None
         }
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
@@ -3832,6 +4166,19 @@ def analyze_game_full(game, sport_key, prev_map=None):
 
         blend_h = (0.6 * form_h["goals_for"] + 0.4 * elo_base_h) if form_h else elo_base_h
         blend_a = (0.6 * form_a["goals_for"] + 0.4 * elo_base_a) if form_a else elo_base_a
+
+        # ── Elite Source 3: Understat xG — refine blend with qualifying xG ───
+        xg_home_data = xg_away_data = None
+        try:
+            xg_home_data = fetch_understat_xg(home)
+            xg_away_data = fetch_understat_xg(away)
+            if xg_home_data and xg_away_data:
+                # Weight: 40% xG (qualifying), 60% form/ELO blend
+                blend_h = max(0.1, 0.6 * blend_h + 0.4 * xg_home_data["xg_for"])
+                blend_a = max(0.1, 0.6 * blend_a + 0.4 * xg_away_data["xg_for"])
+                print(f"   📊 xG blend: {home}={blend_h:.2f} {away}={blend_a:.2f}")
+        except Exception:
+            xg_home_data = xg_away_data = None
 
         p_win, p_draw, p_loss = poisson_match_probs(blend_h, blend_a)
 
@@ -4128,6 +4475,11 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 "reasoning":     _soc_reason,
                 "contradiction": _contradiction_s,
             },
+            # ── Elite Source 3: Understat xG ─────────────────────────────────
+            "xg_home":       xg_home_data,   # dict or None
+            "xg_away":       xg_away_data,
+            # ── Elite Source 2: Pinnacle Market Reference ─────────────────────
+            "pinnacle_odds": _extract_pinnacle_odds(game),
         }
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
@@ -4317,6 +4669,13 @@ def notify_game_analysis(analyses, sport_key):
                     f"   FIP (rendimiento real): {fip_h:.2f} — {_era_label(fip_h)}\n"
                     + _fip_luck(er_h, fip_h)
                 )
+            # ── Elite Source 1: Statcast block — home pitcher ────────────────
+            sc_h = ctx.get("statcast_home")
+            sc_a = ctx.get("statcast_away")
+            er_eff_h = ctx.get("era_eff_home", er_h)
+            er_eff_a = ctx.get("era_eff_away", er_a)
+            ctx_lines += _statcast_alert_block(pn_h, sc_h, er_h)
+
             # Away pitcher block
             a_hand_txt = f" ({_hand_es(hnd_a)})" if _hand_es(hnd_a) else ""
             ctx_lines += (
@@ -4328,6 +4687,26 @@ def notify_game_analysis(analyses, sport_key):
                     f"   FIP (rendimiento real): {fip_a:.2f} — {_era_label(fip_a)}\n"
                     + _fip_luck(er_a, fip_a)
                 )
+            # ── Elite Source 1: Statcast block — away pitcher ────────────────
+            ctx_lines += _statcast_alert_block(pn_a, sc_a, er_a)
+
+            # ── Elite Source 2: Pinnacle market reference block ──────────────
+            pin_odds = ctx.get("pinnacle_odds")
+            if pin_odds:
+                pin_h_dec = pin_odds["home"]
+                pin_a_dec = pin_odds["away"]
+                # No-vig implied probabilities
+                raw_h_p = 1.0 / max(pin_h_dec, 1.001)
+                raw_a_p = 1.0 / max(pin_a_dec, 1.001)
+                tot_p   = raw_h_p + raw_a_p
+                pin_imp_h = round(raw_h_p / tot_p * 100, 1)
+                pin_imp_a = round(raw_a_p / tot_p * 100, 1)
+                ctx_lines += (
+                    f"📌 Referencia Pinnacle:\n"
+                    f"   {home_es}: {pin_h_dec:+.0f} ({pin_imp_h}% implícita)\n"
+                    f"   {away_es}: {pin_a_dec:+.0f} ({pin_imp_a}% implícita)\n"
+                )
+
             # Runs scored / allowed
             ctx_lines += (
                 f"⚾ {home_es} — Carreras anotadas: {ctx['rs_home']} por juego\n"
@@ -4537,6 +4916,54 @@ def notify_game_analysis(analyses, sport_key):
                     f"   ⚽ Anota {sf_a['gf_pg']} goles por partido\n"
                     f"   🛡️ Recibe {sf_a['ga_pg']} goles por partido\n"
                 )
+            # ── Elite Source 3: Understat xG block ──────────────────────────
+            xg_h = ctx.get("xg_home")
+            xg_a = ctx.get("xg_away")
+            if xg_h or xg_a:
+                ctx_lines += "📊 xG últimos 5 partidos (Understat):\n"
+                if xg_h:
+                    xgf = xg_h["xg_for"]
+                    xga = xg_h["xg_against"]
+                    rgf = xg_h.get("raw_goals_for", xgf)
+                    diff_label_h = (
+                        "⬇️ por encima de su rendimiento real" if rgf > xgf + 0.3
+                        else "⬆️ por debajo — mejorará" if rgf < xgf - 0.3
+                        else "alineado con xG"
+                    )
+                    ctx_lines += (
+                        f"   {home_es} — xG favor: {xgf}/partido | "
+                        f"xG contra: {xga}/partido\n"
+                        f"   → {diff_label_h}\n"
+                    )
+                if xg_a:
+                    xgf = xg_a["xg_for"]
+                    xga = xg_a["xg_against"]
+                    rgf = xg_a.get("raw_goals_for", xgf)
+                    diff_label_a = (
+                        "⬇️ por encima de su rendimiento real" if rgf > xgf + 0.3
+                        else "⬆️ por debajo — mejorará" if rgf < xgf - 0.3
+                        else "alineado con xG"
+                    )
+                    ctx_lines += (
+                        f"   {away_es} — xG favor: {xgf}/partido | "
+                        f"xG contra: {xga}/partido\n"
+                        f"   → {diff_label_a}\n"
+                    )
+
+            # ── Elite Source 2: Pinnacle reference block — soccer ────────────
+            pin_soc = ctx.get("pinnacle_odds")
+            if pin_soc:
+                raw_h_s = 1.0 / max(pin_soc["home"], 1.001)
+                raw_a_s = 1.0 / max(pin_soc["away"], 1.001)
+                tot_s   = raw_h_s + raw_a_s
+                ctx_lines += (
+                    f"📌 Referencia Pinnacle:\n"
+                    f"   {home_es}: {pin_soc['home']:+.0f} "
+                    f"({round(raw_h_s/tot_s*100,1)}% implícita)\n"
+                    f"   {away_es}: {pin_soc['away']:+.0f} "
+                    f"({round(raw_a_s/tot_s*100,1)}% implícita)\n"
+                )
+
             # Soccer S2: referee
             ref = ctx.get("referee")
             if ref and ref.get("name"):
