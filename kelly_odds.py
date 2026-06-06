@@ -228,6 +228,7 @@ last_night_summary: date = date(2000, 1, 1)  # 11 PM nightly summary tracker
 last_mlb_card:     date = date(2000, 1, 1)  # 2 PM ET MLB daily card
 last_soccer_card:  date = date(2000, 1, 1)  # 10 AM ET soccer daily card
 last_backtest_report: date = date(2000, 1, 1)  # Sunday 10 AM ET backtest
+_kelly_monthly_mult: float = 1.0  # Improvement 4: monthly ROI-based Kelly multiplier
 _steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
@@ -339,7 +340,7 @@ def kelly_stake(prob, fair_odd):
         return {"stake": 0, "edge": 0, "has_value": False, "kelly_pct": 0}
     k     = max(0.0, (b * prob - (1 - prob)) / b)
     edge  = prob - 1.0 / fair_odd
-    stake = BANKROLL * min(k * FRACTION, 0.05) * _bankroll_mult
+    stake = BANKROLL * min(k * FRACTION, 0.05) * _bankroll_mult * _kelly_monthly_mult
     return {
         "stake":     round(stake, 2),
         "edge":      round(edge * 100, 2),
@@ -351,6 +352,63 @@ def confidence_level(edge_pct):
     if edge_pct >= 5.0: return "HIGH"
     if edge_pct >= 3.0: return "MEDIUM"
     return "LOW"
+
+
+def _update_monthly_kelly_mult():
+    """
+    Improvement 4: Read backtest_log.csv and compute the current month's Kelly
+    multiplier based on actual ROI performance.
+      ROI > +5%  → multiply stakes × 1.1  (model running hot)
+      ROI  0-5%  → multiplier = 1.0       (normal)
+      ROI < 0%   → multiply stakes × 0.75 (model running cold) + ntfy warning
+    Requires ≥10 bets in the current month before adjusting.
+    """
+    global _kelly_monthly_mult
+    try:
+        if not os.path.isfile("backtest_log.csv"):
+            return
+        import csv as _csv
+        cur_month = datetime.now(ET).strftime("%Y-%m")
+        wins = losses = 0
+        pnl_sum = 0.0
+        with open("backtest_log.csv", "r", newline="", encoding="utf-8") as _f:
+            for row in _csv.DictReader(_f):
+                if not row.get("date", "").startswith(cur_month):
+                    continue
+                result = row.get("result", "")
+                if result == "WIN":
+                    wins += 1
+                elif result == "LOSS":
+                    losses += 1
+                try:
+                    pnl_sum += float(row.get("pnl", 0) or 0)
+                except Exception:
+                    pass
+        total_bets = wins + losses
+        if total_bets < 10:
+            print(f"  ℹ️  Kelly mensual: solo {total_bets} apuestas en {cur_month} — sin ajuste")
+            return
+        roi = pnl_sum / total_bets * 100   # assumes $1 flat stake per bet
+        if roi > 5.0:
+            _kelly_monthly_mult = 1.1
+            print(f"  📈 ROI mensual +{roi:.1f}% > objetivo 5% → Kelly × 1.10")
+        elif roi < 0.0:
+            _kelly_monthly_mult = 0.75
+            msg = (
+                f"⚠️ Mes negativo — ROI {roi:+.1f}% en {cur_month} "
+                f"({wins}W-{losses}L)\n"
+                "Reduciendo stakes automáticamente (Kelly × 0.75)"
+            )
+            print(f"  {msg}")
+            try:
+                ntfy_post("⚠️ Stakes Reducidos", msg, "high")
+            except Exception:
+                pass
+        else:
+            _kelly_monthly_mult = 1.0
+            print(f"  ✅ ROI mensual {roi:+.1f}% — Kelly normal (× 1.0)")
+    except Exception as _e:
+        print(f"  ⚠️  _update_monthly_kelly_mult: {_e}")
 
 def ntfy_post(title, body, priority="default"):
     try:
@@ -1639,20 +1697,22 @@ def notify_arbitrage(arbs):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Park factors for known MLB parks (home team name → multiplier)
+# Calibrated from 2026 backtesting hit rates — high values favor OVER, low values favor UNDER.
+# Parks NOT listed default to 1.00 (neutral).
 MLB_PARK_FACTORS = {
-    "Colorado Rockies":     1.15,
-    "Cincinnati Reds":      1.08,
-    "Boston Red Sox":       1.05,
-    "New York Yankees":     1.04,
-    "Chicago Cubs":         1.02,
-    "Texas Rangers":        1.02,
-    "Philadelphia Phillies": 1.01,
-    "Baltimore Orioles":    1.01,
-    "San Francisco Giants": 0.90,
-    "Los Angeles Dodgers":  0.93,
-    "Oakland Athletics":    0.95,
-    "Seattle Mariners":     0.96,
-    "Miami Marlins":        0.97,
+    # High-scoring parks (favor OVER)
+    "Colorado Rockies":      1.35,   # Coors Field — backtesting: 68% hit rate
+    "Texas Rangers":         1.18,   # Globe Life Field
+    "Philadelphia Phillies": 1.15,   # Citizens Bank Park
+    "Boston Red Sox":        1.12,   # Fenway Park
+    "Cincinnati Reds":       1.12,   # Great American Ball Park
+    "New York Yankees":      1.10,   # Yankee Stadium
+    # Pitcher-friendly parks (favor UNDER)
+    "San Francisco Giants":  0.82,   # Oracle Park — backtesting: 36.4% hit rate (avoid)
+    "San Diego Padres":      0.85,   # Petco Park
+    "Los Angeles Dodgers":   0.87,   # Dodger Stadium
+    "Tampa Bay Rays":        0.88,   # Tropicana Field
+    "Seattle Mariners":      0.88,   # T-Mobile Park
 }
 
 # ── Park tendency: additive run adjustments (+ = OVER, - = UNDER) ─────────────
@@ -3622,8 +3682,13 @@ def _data_completeness_score(context: dict, sport: str,
     return min(score, 100)
 
 
-EV_MIN_PCT   = 3.0   # minimum EV% to include a bet in Full Game Analysis
-PROB_MIN     = 0.50  # minimum true probability to include a bet in Full Game Analysis
+EV_MIN_PCT       = 3.0   # minimum EV% to include a bet in Full Game Analysis
+PROB_MIN         = 0.50  # global fallback minimum true probability
+# Improvement 2: per-type confidence thresholds (backtesting-calibrated)
+PROB_MIN_TOTALS  = 0.58  # Over/Under — 58% minimum
+PROB_MIN_ML      = 0.62  # Moneyline — 62% minimum
+PROB_MIN_LIVE    = 0.65  # Live betting — 65% minimum (lines move fast)
+PROB_MIN_PREMIUM = 0.70  # Premium alerts — 70% minimum
 _RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
 
 def analyze_game_full(game, sport_key, prev_map=None):
@@ -3892,6 +3957,10 @@ def analyze_game_full(game, sport_key, prev_map=None):
             r  = kelly_stake(true_p, odds)
             _all_evs.append((lbl, round(ev, 1)))
             if ev >= EV_MIN_PCT and r["stake"] > 0:
+                # Improvement 2: ML requires ≥62% probability
+                if true_p < PROB_MIN_ML:
+                    print(f"   ⏭️  {_tag}: {lbl} prob {true_p:.0%} < {PROB_MIN_ML:.0%} mín ML — omitido")
+                    continue
                 candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
                                    "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
@@ -3980,20 +4049,59 @@ def analyze_game_full(game, sport_key, prev_map=None):
             )
             # ──────────────────────────────────────────────────────────────
 
+            # ── Improvement 1: Oracle Park confidence penalty ──────────────
+            _oracle_park = (home == "San Francisco Giants")
+            if _oracle_park:
+                _pitch_notes.append(
+                    "⚠️ Oracle Park: modelo históricamente impreciso (36% hit rate).\n"
+                    "   Confianza reducida — se requiere prob ≥62% para alertar."
+                )
+            # ── Improvement 3: UNDER bias — within 0.3 of line → prefer UNDER
+            _near_line = abs(adj_total - book_line) <= 0.3
+            # OVER confirmation: Statcast data present OR both pitchers weak ERA>4.50 OR strong edge
+            _over_confirmed = (
+                bool(h_statcast or a_statcast)              or
+                (h_era_eff > 4.50 and a_era_eff > 4.50)    or
+                _over_edge > 1.0
+            )
+
             for side_label, is_over, p, odds in [
                 (f"📈 OVER {book_line} carreras",  True,
                  poisson_ou_prob(adj_total, book_line, True),  over_odds),
                 (f"📉 UNDER {book_line} carreras", False,
                  poisson_ou_prob(adj_total, book_line, False), under_odds),
             ]:
-                # Rule 1: skip OVER when projected edge is below the dominant-pitcher threshold
+                # Rule 1: skip OVER below dominant-pitcher edge threshold
                 if is_over and _over_min_edge > 0 and _over_edge < _over_min_edge:
                     continue
-                ev = (p * odds - 1) * 100
-                r  = kelly_stake(p, odds)
+                # Improvement 3a: near-line projection → force UNDER
+                if is_over and _near_line:
+                    print(f"   ⏭️  {_tag}: OVER omitido — "
+                          f"proyección {adj_total:.1f} ≈ línea {book_line:.1f} → UNDER preferido")
+                    continue
+                # Improvement 3b: OVER needs Statcast / weak ERA / strong edge confirmation
+                if is_over and not _over_confirmed:
+                    print(f"   ⏭️  {_tag}: OVER sin confirmación externa "
+                          f"(Statcast/ERA>4.50/edge>1.0) — omitido")
+                    continue
+                # Improvement 2: confidence filter — Oracle Park uses ML threshold
+                _prob_floor = PROB_MIN_ML if _oracle_park else PROB_MIN_TOTALS
+                if p < _prob_floor:
+                    _side_n = "OVER" if is_over else "UNDER"
+                    print(f"   ⏭️  {_tag}: {_side_n} prob {p:.0%} < {_prob_floor:.0%} mín — omitido")
+                    continue
+                # Improvement 3c: UNDER gets +3% probability boost (more reliable historically)
+                p_adj = min(0.95, p + 0.03) if not is_over else p
+                if not is_over:
+                    _pitch_notes.append("📊 Modelo prefiere UNDER (más confiable históricamente)")
+                # Improvement 4: blend model probability 70% + historical hit rate 30%
+                _hist_rate = 0.526 if not is_over else 0.527
+                p_kelly = round(p_adj * 0.7 + _hist_rate * 0.3, 4)
+                ev = (p_kelly * odds - 1) * 100
+                r  = kelly_stake(p_kelly, odds)
                 _all_evs.append((side_label, round(ev, 1)))
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
-                    candidates.append({"label": side_label, "true_prob": p, "odds": odds,
+                    candidates.append({"label": side_label, "true_prob": p_adj, "odds": odds,
                                        "book": bk_name, "ev_pct": round(ev, 1),
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
 
@@ -4360,8 +4468,13 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 (f"📉 UNDER {book_line} goles", False,
                  poisson_ou_prob(exp_total, book_line, False), under_odds),
             ]:
-                # Rule 1: skip OVER when projected edge is below defense threshold
+                # Rule 1: skip OVER below defense threshold
                 if is_over and _over_min_edge_s > 0 and _over_edge_s < _over_min_edge_s:
+                    continue
+                # Improvement 2: confidence filter for soccer totals — 58% minimum
+                if p < PROB_MIN_TOTALS:
+                    _side_n = "OVER" if is_over else "UNDER"
+                    print(f"   ⏭️  {_tag}: {_side_n} goles prob {p:.0%} < {PROB_MIN_TOTALS:.0%} mín — omitido")
                     continue
                 ev = (p * odds - 1) * 100
                 r  = kelly_stake(p, odds)
@@ -9779,6 +9892,10 @@ if __name__ == "__main__":
         _check_pinnacle_availability()   # Module 11: verify Pinnacle in Odds API plan
     except Exception as _pe:
         print(f"  ⚠️  Pinnacle check skipped: {_pe}")
+    try:
+        _update_monthly_kelly_mult()     # Improvement 4: set Kelly multiplier from backtest CSV
+    except Exception as _me:
+        print(f"  ⚠️  Monthly Kelly mult skipped: {_me}")
 
     while True:
         try:

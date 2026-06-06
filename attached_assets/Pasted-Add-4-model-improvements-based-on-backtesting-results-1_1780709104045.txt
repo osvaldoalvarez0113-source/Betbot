@@ -1,0 +1,137 @@
+Add 4 model improvements based on
+backtesting results:
+
+━━━━━━━━━━━━━━━━━━━━
+1. STADIUM CALIBRATION WITH REAL DATA
+━━━━━━━━━━━━━━━━━━━━
+Update park factors using actual
+backtesting hit rates:
+
+HIGH SCORING parks (favor OVER):
+Coors Field (COL): factor 1.35
+  (backtesting: 68% hit rate)
+Globe Life Field (TEX): factor 1.18
+Citizens Bank Park (PHI): factor 1.15
+Fenway Park (BOS): factor 1.12
+Yankee Stadium (NYY): factor 1.10
+Great American Ball Park (CIN): 1.12
+
+PITCHER FRIENDLY parks (favor UNDER):
+Oracle Park (SF): factor 0.82
+  (backtesting: 36.4% hit rate → avoid)
+Petco Park (SD): factor 0.85
+Dodger Stadium (LAD): factor 0.87
+Tropicana Field (TB): factor 0.88
+T-Mobile Park (SEA): factor 0.88
+
+NEUTRAL parks: factor 1.00
+All others not listed above.
+
+Special rule for Oracle Park:
+If game at Oracle Park →
+reduce confidence by one tier
+(ALTA → MEDIA, MEDIA → BAJA)
+Backtesting shows our model
+consistently wrong there.
+
+━━━━━━━━━━━━━━━━━━━━
+2. CONFIDENCE FILTER
+━━━━━━━━━━━━━━━━━━━━
+Only send alerts when model
+probability meets minimum threshold:
+
+For TOTALS (Over/Under):
+- Minimum: 58% probability
+- Below 58% → skip pick
+
+For MONEYLINE:
+- Minimum: 62% probability
+- Below 62% → skip pick
+
+For LIVE BETTING:
+- Minimum: 65% probability
+- Higher bar because lines move fast
+
+For PREMIUM alerts:
+- Minimum: 70% probability
+
+Show in logs why picks are rejected:
+"⏭️ Skipped [game]: prob 54% < 58% min"
+
+This reduces volume but increases
+quality. Better to bet 5 times
+and win 4 than bet 20 and win 11.
+
+━━━━━━━━━━━━━━━━━━━━
+3. UNDER BIAS
+━━━━━━━━━━━━━━━━━━━━
+Backtesting confirms UNDER is more
+reliable than OVER (52.6% vs OVER).
+
+Apply UNDER preference:
+- When model projects EXACTLY on
+  the line (within 0.3 runs) →
+  default to UNDER not OVER
+
+- UNDER picks get +3% confidence boost
+  in quality score
+
+- OVER picks require extra confirmation:
+  Either Statcast supports it OR
+  Pinnacle agrees OR
+  Both pitchers ERA > 4.50
+
+- Show in alert:
+  "📊 Modelo prefiere UNDER
+   (más confiable históricamente)"
+
+━━━━━━━━━━━━━━━━━━━━
+4. KELLY OPTIMIZED WITH HIT RATE
+━━━━━━━━━━━━━━━━━━━━
+Current Kelly uses theoretical
+probability. Update with real
+backtesting hit rate:
+
+New Kelly formula:
+true_prob = (model_prob × 0.7) + 
+            (historical_hit_rate × 0.3)
+
+Where historical_hit_rate:
+- UNDER: 0.526 (from backtesting)
+- OVER: 0.527 (from backtesting)
+- MLB totals overall: 0.527
+
+This makes stakes more conservative
+and realistic based on actual results.
+
+Monthly trend adjustment:
+If backtesting shows model performs
+better in certain months → adjust
+Kelly multiplier:
+- High accuracy month: × 1.1
+- Low accuracy month: × 0.9
+
+Also add ROI target:
+Target ROI: 5% per month
+If current month ROI > 5% → 
+  increase Kelly slightly (+10%)
+If current month ROI < 0% →
+  decrease Kelly (-25%)
+  Send warning: "⚠️ Mes negativo —
+  reduciendo stakes automáticamente"
+
+━━━━━━━━━━━━━━━━━━━━
+COMBINED EFFECT TARGET:
+━━━━━━━━━━━━━━━━━━━━
+Current: 52.7% hit rate, +2.1% ROI
+Target:  55.0% hit rate, +5.0% ROI
+
+Achieve by:
+- Higher confidence threshold → 
+  fewer but better picks
+- Stadium calibration →
+  avoid bad parks (Giants)
+- UNDER bias →
+  more reliable picks
+- Better Kelly →
+  protect bankroll in bad months
