@@ -22,7 +22,7 @@ except ImportError:
 API_KEY           = os.environ.get("ODDS_API_KEY",       "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY",  "")
 CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
-BANKROLL = 500
+BANKROLL = 1000
 FRACTION = 0.25
 MIN_EDGE  = 2.0
 MIN_STAKE            = 10.00  # never alert if Kelly stake < $10
