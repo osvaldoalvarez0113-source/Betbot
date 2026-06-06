@@ -3913,6 +3913,37 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 away_exp = max(0.1, away_exp - 0.5)
         # ──────────────────────────────────────────────────────────────────
 
+        # Level 2B: Pitcher fatigue adjustment (MLB only)
+        if is_mlb:
+            try:
+                _h_fat = _fetch_pitcher_fatigue_score(p_data.get("home_id"), h_pname)
+                _a_fat = _fetch_pitcher_fatigue_score(p_data.get("away_id"), a_pname)
+                if _h_fat and _h_fat["run_adj"] != 0:
+                    home_exp = max(0.1, home_exp + _h_fat["run_adj"] / 2)
+                    away_exp = max(0.1, away_exp + _h_fat["run_adj"] / 2)
+                    if _h_fat["note"]:
+                        print(f"   {_h_fat['note'].splitlines()[0]}")
+                if _a_fat and _a_fat["run_adj"] != 0:
+                    home_exp = max(0.1, home_exp + _a_fat["run_adj"] / 2)
+                    away_exp = max(0.1, away_exp + _a_fat["run_adj"] / 2)
+                    if _a_fat["note"]:
+                        print(f"   {_a_fat['note'].splitlines()[0]}")
+            except Exception:
+                pass
+
+        # Level 2C: Travel fatigue adjustment (MLB only)
+        if is_mlb:
+            try:
+                _t_h, _t_a, _t_note = _travel_fatigue_adj(home, away)
+                if _t_h != 0:
+                    home_exp = max(0.1, home_exp + _t_h)
+                if _t_a != 0:
+                    away_exp = max(0.1, away_exp + _t_a)
+                if _t_note:
+                    print(f"   {_t_note}")
+            except Exception:
+                pass
+
         _pyth_p = pythagorean_win_prob(home_exp, away_exp)
         _elo_p  = elo_win_prob(home, away)
         # Blend 60% Pythagorean + 40% ELO so league-average fallback never gives 50/50
@@ -5208,6 +5239,27 @@ def notify_game_analysis(analyses, sport_key):
             f"{_DIV2}"
         )
 
+        # Level 2A: player props (pitcher strikeouts)
+        if is_mlb:
+            try:
+                _game_ev_id = a.get("game_id", "")
+                if _game_ev_id:
+                    _props = _fetch_player_props(_game_ev_id)
+                    _props_blk = _format_props_alert(_props, pn_h, pn_a, er_h, er_a)
+                    if _props_blk:
+                        body += f"\n{_DIV}\n{_props_blk}"
+            except Exception:
+                pass
+
+        # Level 3B: bet timing optimizer
+        try:
+            _best_type = best.get("market_type", "totals")
+            _timing_ln = _bet_timing_advice(_best_type, a.get("time", ""))
+            if _timing_ln:
+                body += f"\n{_timing_ln}"
+        except Exception:
+            pass
+
         # Strip decorative emojis from title
         clean = best_clean
         title = f"🔍 {match_es} | Mejor: {clean} +{a['best_ev']}%"
@@ -5459,7 +5511,7 @@ def get_odds(sport_key):
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": API_KEY, "regions": "us,uk,eu",
+            params={"apiKey": API_KEY, "regions": "us,us2,eu,uk,au",
                     "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
@@ -7593,6 +7645,14 @@ def send_weekly_summary():
                     )
         except Exception as _err_e:
             print(f"  ⚠️  Error log weekly section failed: {_err_e}")
+
+        # Level 3C: inject CLV weekly summary
+        try:
+            _clv_sec = _weekly_clv_summary()
+            if _clv_sec:
+                body += f"\n{_clv_sec}"
+        except Exception as _ce3:
+            pass
 
         ntfy_post("📊 RESUMEN SEMANAL", body, "default")
         print("  📊 Resumen semanal ntfy enviado")
@@ -9925,6 +9985,470 @@ def _monitor_news() -> list:
     return new_items
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 2A — PLAYER PROPS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_props_cache: dict = {}   # event_id → parsed props dict
+
+def _fetch_player_props(event_id: str) -> dict:
+    """Fetch pitcher strikeout + batter props from Odds API for a specific game event."""
+    if not API_KEY or not event_id:
+        return {}
+    ck = f"props_{event_id}"
+    if ck in _props_cache:
+        return _props_cache[ck]
+    try:
+        url = (f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{event_id}/odds"
+               f"?apiKey={API_KEY}&regions=us,us2,eu&oddsFormat=decimal"
+               f"&markets=pitcher_strikeouts,batter_hits,batter_home_runs")
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return {}
+        data   = r.json()
+        result = {}
+        for bk in data.get("bookmakers", []):
+            for mkt in bk.get("markets", []):
+                mkt_key = mkt["key"]
+                for oc in mkt.get("outcomes", []):
+                    name = oc.get("description", "") or oc.get("name", "")
+                    pt   = oc.get("point")
+                    side = oc.get("name", "Over") if oc.get("name") in ("Over","Under") else "Over"
+                    prc  = float(oc.get("price", 0))
+                    pk   = f"{name}|{mkt_key}"
+                    result.setdefault(pk, {})[side] = {"point": pt, "price": prc}
+        _props_cache[ck] = result
+        return result
+    except Exception as e:
+        print(f"  ⚠️  Props [{event_id[:8]}]: {e}")
+        return {}
+
+def _format_props_alert(props: dict, h_pname: str, a_pname: str,
+                         h_era: float, a_era: float) -> str:
+    """Scan strikeout props for value picks. Returns formatted alert block (max 2 props)."""
+    lines = []
+    for prop_key, sides in props.items():
+        if "pitcher_strikeouts" not in prop_key:
+            continue
+        name  = prop_key.split("|")[0]
+        over  = sides.get("Over", {})
+        under = sides.get("Under", {})
+        k_line = over.get("point")
+        if not k_line:
+            continue
+        k_line       = float(k_line)
+        over_price   = float(over.get("price", 2.0))
+        # Determine which pitcher ERA to use
+        is_home_p = h_pname and h_pname.split()[-1].lower() in name.lower()
+        era       = h_era if is_home_p else a_era
+        # Strikeout pitcher heuristic: low ERA → likely K pitcher → OVER value
+        if era < 3.50 and k_line <= 7.5 and over_price >= 1.80:
+            model_k_prob = 0.62 if era < 2.80 else 0.57
+            ev_est       = (model_k_prob * over_price - 1) * 100
+            if ev_est > 6:
+                lines.append(
+                    f"⚾ PROP DESTACADO:\n"
+                    f"   {name} strikeouts OVER {k_line}\n"
+                    f"   ERA: {era:.2f} (pitcher de ponches) | @ {over_price:.2f}\n"
+                    f"   → EV estimado: +{ev_est:.0f}%"
+                )
+    return "\n".join(lines[:2])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 2B — PITCHER FATIGUE MODEL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_fatigue_cache: dict = {}
+
+def _fetch_pitcher_fatigue_score(pitcher_id, pitcher_name: str) -> "dict | None":
+    """
+    Compute fatigue score (0-100) from last 5 starts' pitch counts.
+    High fatigue (≥70) → +0.7 runs. Low fatigue (≤30) → -0.3 runs.
+    Returns dict: {score, run_adj, label, note, pitch_counts} or None.
+    """
+    if not pitcher_id:
+        return None
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck    = f"fatigue_{pitcher_id}_{today}"
+    if ck in _fatigue_cache:
+        return _fatigue_cache[ck]
+    try:
+        data   = _mlb_rest(f"/people/{pitcher_id}/stats", {
+            "stats": "gameLog", "group": "pitching",
+            "season": MLB_YEAR, "limit": 5,
+        })
+        splits = (data.get("stats", [{}])[0].get("splits", [])
+                  if data and data.get("stats") else [])
+        if not splits:
+            return None
+        pitch_counts = []
+        days_rests   = []
+        for sp in splits[-5:]:
+            stat  = sp.get("stat", {})
+            np_v  = stat.get("numberOfPitches") or stat.get("pitchesThrown", "0")
+            try:
+                pitch_counts.append(int(np_v or 0))
+            except Exception:
+                pitch_counts.append(0)
+            # rest days between starts
+            gdate = sp.get("date") or sp.get("game", {}).get("officialDate", "")
+            if gdate:
+                days_rests.append(gdate)
+
+        if not pitch_counts:
+            return None
+
+        last = pitch_counts[-1]
+        avg  = sum(pitch_counts) / len(pitch_counts)
+
+        # Calculate fatigue score
+        score = 30  # neutral baseline
+        if last >= 110:   score += 40
+        elif last >= 100: score += 20
+        elif last <= 85:  score -= 20
+        if avg >= 105:    score += 20
+        elif avg >= 95:   score += 10
+        elif avg <= 85:   score -= 15
+        # Days rest from last start
+        if len(days_rests) >= 2:
+            try:
+                d1 = datetime.strptime(days_rests[-1], "%Y-%m-%d")
+                d2 = datetime.strptime(days_rests[-2], "%Y-%m-%d")
+                rest = abs((d1 - d2).days)
+                if rest <= 4:   score += 15
+                elif rest >= 6: score -= 10
+            except Exception:
+                pass
+        score = max(0, min(100, score))
+
+        if score >= 70:
+            run_adj = +0.7
+            label   = "ALTA ⚠️"
+            cnt_str = ", ".join(str(p) for p in pitch_counts)
+            note    = (f"😓 Fatiga {pitcher_name}: Carga {label}\n"
+                       f"   Últimas salidas: {cnt_str} pitches\n"
+                       f"   → Puede salir temprano (+0.7 runs)")
+        elif score <= 30:
+            run_adj = -0.3
+            label   = "BAJA ✅"
+            cnt_str = ", ".join(str(p) for p in pitch_counts)
+            note    = (f"💪 Fatiga {pitcher_name}: Carga {label}\n"
+                       f"   Últimas salidas: {cnt_str} pitches\n"
+                       f"   → Rendimiento óptimo (-0.3 runs)")
+        else:
+            run_adj = 0.0
+            label   = "NORMAL"
+            note    = ""
+
+        result = {"score": score, "run_adj": run_adj, "label": label,
+                  "note": note, "pitch_counts": pitch_counts}
+        _fatigue_cache[ck] = result
+        return result
+    except Exception as e:
+        print(f"  ⚠️  Fatigue [{pitcher_name}]: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 2C — TRAVEL FATIGUE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_travel_cache: dict = {}
+# Approximate standard-time UTC offsets for MLB cities
+_CITY_TIMEZONE = {
+    "New York": -5, "Boston": -5, "Philadelphia": -5, "Baltimore": -5,
+    "Washington": -5, "Miami": -5, "Atlanta": -5, "Toronto": -5,
+    "Pittsburgh": -5, "Cincinnati": -5, "Cleveland": -5, "Detroit": -5,
+    "Chicago": -6, "Milwaukee": -6, "Minneapolis": -6, "Kansas City": -6,
+    "Houston": -6, "Dallas": -6, "St. Louis": -6,
+    "Denver": -7, "Phoenix": -7, "Salt Lake City": -7,
+    "Seattle": -8, "Portland": -8, "Oakland": -8, "San Francisco": -8,
+    "Los Angeles": -8, "San Diego": -8, "Anaheim": -8, "Las Vegas": -8,
+}
+
+def _travel_fatigue_adj(home: str, away: str) -> "tuple[float, float, str]":
+    """
+    Check where each team played yesterday vs. where they play today.
+    Returns (home_adj, away_adj, note_str).
+    Adj is additive to home_exp / away_exp (negative = fatigue).
+    """
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck    = f"travel_{home}_{away}_{today}"
+    if ck in _travel_cache:
+        return _travel_cache[ck]
+    yesterday = (datetime.now(CDT) - timedelta(days=1)).strftime("%Y-%m-%d")
+    h_city    = (MLB_PARK_CITIES.get(home, (None,))[0] or "")
+    notes     = []
+    h_adj = a_adj = 0.0
+
+    for team, is_home in [(home, True), (away, False)]:
+        try:
+            tid = _team_id(team)
+            if not tid:
+                continue
+            data = _mlb_rest("/schedule", {
+                "teamId": tid, "season": MLB_YEAR, "gameType": "R",
+                "startDate": yesterday, "endDate": yesterday, "hydrate": "venue",
+            })
+            g_list = (data.get("dates", [{}])[0].get("games", [])
+                      if data.get("dates") else [])
+            if not g_list:
+                continue
+            venue_city = (g_list[0].get("venue", {})
+                          .get("location", {}).get("city", "") or "")
+            curr_city  = h_city if is_home else h_city  # both play in home city today
+            if not venue_city or not curr_city or venue_city == curr_city:
+                continue
+            tz_from = _CITY_TIMEZONE.get(venue_city, -6)
+            tz_to   = _CITY_TIMEZONE.get(curr_city,  -6)
+            tz_diff = abs(tz_to - tz_from)
+            if tz_diff >= 3:
+                adj = -0.5
+                notes.append(f"✈️ {team.split()[-1]}: {venue_city}→{curr_city} "
+                              f"({tz_diff} zonas) → -5% prob")
+            elif tz_diff >= 2:
+                adj = -0.25
+                notes.append(f"✈️ {team.split()[-1]}: cruzó {tz_diff} zonas")
+            elif tz_diff == 1:
+                adj = -0.1
+                notes.append(f"✈️ {team.split()[-1]}: cruzó 1 zona horaria")
+            else:
+                continue
+            if is_home: h_adj += adj
+            else:       a_adj += adj
+        except Exception:
+            pass
+
+    result = (h_adj, a_adj, "\n".join(notes))
+    _travel_cache[ck] = result
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 3A — PORTFOLIO OPTIMIZATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _portfolio_optimize(all_picks: list) -> str:
+    """
+    Given all picks from a scan, cap at 3 picks and compute 60/25/15 budget allocation.
+    Returns a formatted portfolio string for printing/ntfy. Empty string if no picks.
+    """
+    if not all_picks:
+        return ""
+    sorted_picks = sorted(
+        all_picks,
+        key=lambda x: float(x.get("ev_pct", 0) or x.get("ev", 0) or 0),
+        reverse=True,
+    )
+    top      = sorted_picks[:3]
+    budget   = BANKROLL * 0.15   # max 15% of bankroll daily
+    alloc    = [0.60, 0.25, 0.15]
+    lines    = [
+        "💼 PORTAFOLIO HOY:",
+        f"Presupuesto diario: ${budget:.2f} (15% bankroll)",
+        "─" * 28,
+    ]
+    total_exp = 0.0
+    for i, (pick, pct) in enumerate(zip(top, alloc)):
+        amt  = round(budget * pct, 2)
+        team = pick.get("team", pick.get("label", pick.get("match", "?")))
+        ev   = float(pick.get("ev_pct", 0) or pick.get("ev", 0) or 0)
+        exp  = round(amt * ev / 100, 2)
+        total_exp += exp
+        rank = ["1️⃣", "2️⃣", "3️⃣"][i]
+        lines.append(f" {rank} ${amt:.2f} ({int(pct*100)}%) — {team[:30]} EV:{ev:+.1f}%")
+    lines += ["─" * 28, f"Ganancia esperada: +${total_exp:.2f}"]
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 3B — BET TIMING OPTIMIZER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _bet_timing_advice(pick_type: str, commence_time_str: str) -> str:
+    """Return timing window advice line for an alert. Empty string if unavailable."""
+    try:
+        game_et = datetime.fromisoformat(
+            commence_time_str.replace("Z", "+00:00")
+        ).astimezone(ET)
+        game_str = game_et.strftime("%I:%M %p ET")
+    except Exception:
+        game_str = "?"
+
+    if pick_type in ("totals", "total", "over", "under"):
+        window  = "2–4h antes"
+        reason  = "Pitchers confirmados, clima definido"
+        try:
+            from datetime import timezone as _tz
+            open_t  = (game_et - timedelta(hours=4)).strftime("%I:%M %p")
+            close_t = (game_et - timedelta(hours=2)).strftime("%I:%M %p")
+            window  = f"{open_t}–{close_t} ET"
+        except Exception:
+            pass
+    elif pick_type in ("ml", "moneyline"):
+        window  = "Apertura de línea (AM)"
+        reason  = "Sharp money la mueve rápido"
+    elif pick_type == "live":
+        window  = "Inning 3+"
+        reason  = "Pitchers mostrando forma real"
+    elif pick_type == "steam":
+        window  = "AHORA (máx 5 min)"
+        reason  = "Las líneas se mueven muy rápido"
+    else:
+        return ""
+    return (f"⏰ Timing óptimo: {window} | Juego: {game_str}\n"
+            f"   Por qué: {reason}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 3C — CLV WEEKLY SUMMARY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _weekly_clv_summary() -> str:
+    """Read clv_log.csv and return a weekly CLV analysis block for Sunday report."""
+    if not os.path.isfile(CLV_LOG_FILE):
+        return ""
+    try:
+        import csv as _csv
+        week_ago  = (datetime.now(ET) - timedelta(days=7)).strftime("%Y-%m-%d")
+        clv_vals  = []
+        best = worst = None
+        with open(CLV_LOG_FILE, "r", newline="", encoding="utf-8") as _f:
+            for row in _csv.DictReader(_f):
+                if row.get("clv_time", "") < week_ago:
+                    continue
+                try:
+                    cv = float(row.get("clv") or 0)
+                    clv_vals.append(cv)
+                    match = row.get("match", "?")
+                    if best  is None or cv > best[1]:   best  = (match, cv)
+                    if worst is None or cv < worst[1]:  worst = (match, cv)
+                except Exception:
+                    pass
+        if not clv_vals:
+            return ""
+        avg_clv = sum(clv_vals) / len(clv_vals)
+        pos_pct = sum(1 for c in clv_vals if c > 0) / len(clv_vals) * 100
+        verdict = ("Modelo tiene edge real 💎" if avg_clv > 0
+                   else "⚠️ Apostando en mal momento → revisar timing")
+        lines = [
+            "━" * 30,
+            "📊 CLOSING LINE VALUE (semana):",
+            f"   CLV promedio: {avg_clv:+.2f}%  {'✅' if avg_clv > 0 else '❌'}",
+            f"   Picks que ganaron al cierre: {pos_pct:.0f}%",
+        ]
+        if best:  lines.append(f"   Mejor: {best[0][:30]} ({best[1]:+.2f}%)")
+        if worst: lines.append(f"   Peor:  {worst[0][:30]} ({worst[1]:+.2f}%)")
+        lines.append(f"   → {verdict}")
+        if avg_clv < 0:
+            lines.append("   → Cambiar timing (apostar más cerca del juego)")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"   ⚠️  CLV summary error: {e}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 4B — FUTURES & SPECIAL PROPS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_last_futures_check: date = date(2000, 1, 1)
+
+def _fetch_futures(sport_key: str) -> list:
+    """Fetch outrights/futures from Odds API."""
+    if not API_KEY:
+        return []
+    try:
+        r = requests.get(
+            f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
+            params={"apiKey": API_KEY, "regions": "us,eu",
+                    "markets": "outrights", "oddsFormat": "decimal"},
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else []
+    except Exception:
+        return []
+
+def _analyze_and_alert_futures():
+    """
+    Check MLB + World Cup futures for ELO-model edge vs. implied probability.
+    Sends ntfy alert if EV > 5% for any team.
+    Runs daily at most once (guarded by _last_futures_check).
+    """
+    global _last_futures_check
+    today = datetime.now(ET).date()
+    if today <= _last_futures_check:
+        return
+    _last_futures_check = today
+    alerts = []
+    for sport_key, label in [("baseball_mlb", "MLB"), ("soccer_fifa_world_cup", "Mundial")]:
+        if not is_in_season(sport_key):
+            continue
+        for game in _fetch_futures(sport_key)[:20]:
+            for bk in game.get("bookmakers", [])[:1]:
+                for mkt in bk.get("markets", []):
+                    if mkt.get("key") != "outrights":
+                        continue
+                    for oc in mkt.get("outcomes", []):
+                        team   = oc.get("name", "")
+                        price  = float(oc.get("price", 1.0) or 1.0)
+                        impl_p = 1.0 / price if price > 1 else 0
+                        # Use ELO win probability as our model estimate
+                        try:
+                            elo_p = elo_win_prob(team, "field") if "mlb" in sport_key else impl_p * 1.08
+                        except Exception:
+                            elo_p = impl_p * 1.05
+                        ev = (elo_p * price - 1) * 100
+                        if ev > 5.0:
+                            poten = round((price - 1) * 30, 2)
+                            alerts.append(
+                                f"🏆 {label}: {team}\n"
+                                f"   Modelo: {elo_p:.0%}  |  Implícito: {impl_p:.0%}\n"
+                                f"   Edge: +{ev:.1f}% EV\n"
+                                f"   💰 $30 → ganancia potencial: ${poten}"
+                            )
+    if alerts:
+        ntfy_post("🏆 Futuros con Valor", "\n\n".join(alerts[:4]), "default")
+        print(f"  🏆 Futuros: {len(alerts)} oportunidad(es) enviada(s)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEVEL 4C — CROSS-GAME CORRELATIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _check_cross_game_correlations(all_full_analyses: list):
+    """
+    Check for cross-game patterns that affect all MLB picks the same day.
+    - Ace day (3+ starters ERA < 3.0) → UNDER tendency
+    - Runs at end of run_scan after all analyses.
+    """
+    if not all_full_analyses:
+        return
+    ace_pitchers = []
+    for fa in all_full_analyses:
+        ctx   = fa.get("context", {})
+        h_era = float(ctx.get("era_home", 9.0) or 9.0)
+        a_era = float(ctx.get("era_away", 9.0) or 9.0)
+        ph    = ctx.get("pname_home", "")
+        pa    = ctx.get("pname_away", "")
+        if h_era < 3.0 and ph:
+            ace_pitchers.append(f"{ph} ({h_era:.2f})")
+        if a_era < 3.0 and pa:
+            ace_pitchers.append(f"{pa} ({a_era:.2f})")
+
+    if len(ace_pitchers) >= 3:
+        aces_str = "\n   ".join(ace_pitchers[:6])
+        msg = (
+            f"🔗 CORRELACIÓN: DÍA DE ASES\n"
+            f"{len(ace_pitchers)} pitchers élite lanzando hoy:\n"
+            f"   {aces_str}\n"
+            f"→ Históricamente ≥68% Under en días así\n"
+            f"→ Priorizar UNDER en todos los picks de hoy"
+        )
+        print(f"  🔗 Correlación: {len(ace_pitchers)} aces hoy → alerta enviada")
+        ntfy_post("🔗 Correlación: Día de Ases", msg, "default")
+
+
 def run_scan():
     global daily_bets, lineup_scan_counter
     prev_map  = load_previous_odds()
@@ -10108,6 +10632,35 @@ def run_scan():
 
     prev_map.update(new_map)
     save_previous_odds(prev_map)
+
+    # Level 1B: persist line history to disk
+    try:
+        _save_line_history()
+    except Exception:
+        pass
+
+    # Level 3A: portfolio optimization — combine all picks and show budget
+    try:
+        _all_scan_picks = list(all_bets) + list(all_totals)
+        if _all_scan_picks:
+            _port = _portfolio_optimize(_all_scan_picks)
+            if _port:
+                print(f"\n{_port}")
+                ntfy_post("💼 Portafolio del Día", _port, "default")
+    except Exception as _poe:
+        print(f"  ⚠️  Portfolio error: {_poe}")
+
+    # Level 4B: futures value check (runs once per day)
+    try:
+        _analyze_and_alert_futures()
+    except Exception as _fbe:
+        print(f"  ⚠️  Futures check error: {_fbe}")
+
+    # Level 4C: cross-game correlations — ace day, weather patterns
+    try:
+        _check_cross_game_correlations(all_full_analyses)
+    except Exception as _cce:
+        print(f"  ⚠️  Correlations check error: {_cce}")
 
     if all_bets:
         notify_bets(all_bets)
