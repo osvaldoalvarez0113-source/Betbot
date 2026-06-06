@@ -3585,10 +3585,12 @@ def analyze_totals(games, sport_key):
             _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
             _tcr  = (_tc_claude.get("razonamiento", "") or "")[:80]
             print(f"   🤖 Claude: {_tcc} | apostar:{_tcap} | \"{_tcr}\"")
-        if (_tc_claude
-                and not _tc_claude.get("apostar", True)
-                and _tc_claude.get("confianza") == "BAJA"):
-            print(f"   ❌ RECHAZADO — Claude veta {bet_side} {book_line}")
+        if _tc_claude and (
+                not _tc_claude.get("apostar", True)
+                or _tc_claude.get("confianza") == "BAJA"):
+            _why = (f"apostar={_tc_claude.get('apostar')}, "
+                    f"confianza={_tc_claude.get('confianza')}")
+            print(f"   ❌ RECHAZADO — Claude veta {bet_side} {book_line} ({_why})")
             continue
         if _tc_claude and _tc_claude.get("apostar", True):
             print(f"   ✅ TOTALS PICK: {bet_side} {book_line}  edge={edge_val:.1f}")
@@ -4455,9 +4457,11 @@ def analyze_game_full(game, sport_key, prev_map=None):
                 if not is_over:
                     _pitch_notes.append("📊 Modelo prefiere UNDER (más confiable históricamente)")
                 # Improvement 4: blend model probability 70% + historical hit rate 30%
+                # p_kelly used ONLY for Kelly stake sizing (conservative bet sizing)
+                # EV uses p_adj (true model probability) per formula: EV = (true_prob × odds) - 1
                 _hist_rate = 0.526 if not is_over else 0.527
                 p_kelly = round(p_adj * 0.7 + _hist_rate * 0.3, 4)
-                ev = (p_kelly * odds - 1) * 100
+                ev = (p_adj * odds - 1) * 100   # EV = (true_prob × decimal_odds) - 1
                 r  = kelly_stake(p_kelly, odds)
                 _all_evs.append((side_label, round(ev, 1)))
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
@@ -5034,14 +5038,15 @@ def analyze_game_full(game, sport_key, prev_map=None):
     else:
         print(f"   🤖 Claude: no disponible (sin API key o error)")
 
-    # Soft veto: Claude says BAJA confidence + don't bet → drop that candidate
-    if (_claude_result_g
-            and not _claude_result_g.get("apostar", True)
-            and _claude_result_g.get("confianza") == "BAJA"):
-        top3 = top3[1:]
-        if not top3:
-            print(f"   ❌ RECHAZADO — Claude vetó todos los picks (confianza BAJA)")
-            return None
+    # Hard veto: Claude says apostar=False OR confianza=BAJA → block immediately
+    # Guard must fire BEFORE any pick is assigned or returned
+    if _claude_result_g and (
+            not _claude_result_g.get("apostar", True)
+            or _claude_result_g.get("confianza") == "BAJA"):
+        _veto_why = (f"apostar={_claude_result_g.get('apostar')}, "
+                     f"confianza={_claude_result_g.get('confianza')}")
+        print(f"   ❌ RECHAZADO — Claude vetó el partido ({_veto_why}) → sin pick")
+        return None
 
     # Feature 7: cap confidence at MEDIA when data is partial (score 50–79)
     if 50 <= _dqs < 80 and _claude_result_g:
