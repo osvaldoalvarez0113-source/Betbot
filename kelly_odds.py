@@ -1669,59 +1669,137 @@ MLB_PARK_TEND: "dict[str, tuple]" = {
     "Seattle Mariners":     ("T-Mobile Park",              -0.4, False),
 }
 
-_team_run_cache: dict = {}   # team_name -> {"rs_pg": float, "ra_pg": float}
+_team_run_cache: dict = {}   # "{team}|{date}" -> {"rs_pg": float, "ra_pg": float}
+
+# ── Persistent disk cache (survives Railway restarts) ─────────────────────────
+_STATS_CACHE_FILE = "stats_cache.json"
+_stats_disk_cache: dict = {}   # flat dict — keys like "run|{team}|{date}" or "splits|{team}|{date}"
+
+def _load_stats_disk_cache():
+    """Load stats cache from disk into memory. Called once at startup."""
+    global _stats_disk_cache
+    try:
+        if os.path.exists(_STATS_CACHE_FILE):
+            with open(_STATS_CACHE_FILE, "r") as _f:
+                raw = json.load(_f)
+            # Prune entries older than today to avoid stale data
+            today = datetime.now(ET).strftime("%Y-%m-%d")
+            _stats_disk_cache = {k: v for k, v in raw.items() if today in k}
+            print(f"  💾 Stats disk cache loaded — {len(_stats_disk_cache)} entry(ies)")
+    except Exception as _e:
+        print(f"  ⚠️  Stats disk cache load error: {_e}")
+        _stats_disk_cache = {}
+
+def _save_stats_disk_cache():
+    """Flush in-memory stats cache to disk (fast, called after each successful fetch)."""
+    try:
+        with open(_STATS_CACHE_FILE, "w") as _f:
+            json.dump(_stats_disk_cache, _f)
+    except Exception as _e:
+        print(f"  ⚠️  Stats disk cache save error: {_e}")
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def fetch_team_run_stats(team_name):
-    """RS/RA per game for an MLB team. Cached for session."""
-    if team_name in _team_run_cache:
-        return _team_run_cache[team_name]
-    try:
-        if HAS_STATSAPI:
-            teams = statsapi.lookup_team(team_name)
-            if not teams:
+    """
+    RS/RA per game for an MLB team.
+    Cache: in-memory (date-keyed) + disk file for cross-restart persistence.
+    Retry: up to 3 attempts with 2s delay before giving up.
+    """
+    today  = datetime.now(ET).strftime("%Y-%m-%d")
+    ck     = f"{team_name}|{today}"
+    dk     = f"run|{ck}"
+
+    # 1. In-memory cache
+    if ck in _team_run_cache:
+        return _team_run_cache[ck]
+
+    # 2. Disk cache (survives restarts — same-day entries only)
+    if dk in _stats_disk_cache:
+        v = _stats_disk_cache[dk]
+        _team_run_cache[ck] = v
+        return v
+
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            # ── Team ID lookup ─────────────────────────────────────────────
+            if HAS_STATSAPI:
+                teams = statsapi.lookup_team(team_name)
+                if not teams:
+                    print(f"  ⚠️  fetch_team_run_stats [{team_name}]: "
+                          f"equipo no encontrado en statsapi")
+                    _team_run_cache[ck] = None
+                    return None
+                tid = teams[0]["id"]
+            else:
+                data  = _mlb_rest("/teams", {"sportId": 1, "season": MLB_YEAR})
+                match = next(
+                    (t for t in data.get("teams", [])
+                     if team_name.lower() in t.get("name", "").lower()), None)
+                if not match:
+                    print(f"  ⚠️  fetch_team_run_stats [{team_name}]: "
+                          f"equipo no encontrado en REST /teams")
+                    _team_run_cache[ck] = None
+                    return None
+                tid = match["id"]
+
+            # ── Hitting + pitching stats ───────────────────────────────────
+            hit = _mlb_rest(f"/teams/{tid}/stats",
+                            {"stats": "season", "group": "hitting", "season": MLB_YEAR})
+            pit = _mlb_rest(f"/teams/{tid}/stats",
+                            {"stats": "season", "group": "pitching", "season": MLB_YEAR})
+
+            h_stat = (hit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
+            p_stat = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
+
+            # Prefer runsPerGame field; fall back to runs/gamesPlayed
+            gp_h = max(float(h_stat.get("gamesPlayed", 0) or 0), 1)
+            if "runsPerGame" in h_stat and float(h_stat["runsPerGame"] or 0) > 0:
+                rs_pg = round(float(h_stat["runsPerGame"]), 2)
+            elif float(h_stat.get("runs", 0) or 0) > 0:
+                rs_pg = round(float(h_stat["runs"]) / gp_h, 2)
+            else:
+                print(f"  ⚠️  fetch_team_run_stats [{team_name}] intento {attempt}/3: "
+                      f"runsPerGame=0 y runs=0 — gamesPlayed={h_stat.get('gamesPlayed')} "
+                      f"(API puede no haber cargado estadísticas aún)")
+                if attempt < 3:
+                    time.sleep(2)
+                    continue
+                _team_run_cache[ck] = None
                 return None
-            tid = teams[0]["id"]
-        else:
-            data = _mlb_rest("/teams", {"sportId": 1, "season": MLB_YEAR})
-            match = next(
-                (t for t in data.get("teams", [])
-                 if team_name.lower() in t.get("name", "").lower()),
-                None,
-            )
-            if not match:
+
+            games_p = max(float(p_stat.get("gamesPlayed", 0) or 0), 1)
+            ra_raw  = float(p_stat.get("runsAllowed", 0) or 0)
+            if ra_raw == 0:
+                print(f"  ⚠️  fetch_team_run_stats [{team_name}] intento {attempt}/3: "
+                      f"runsAllowed=0 — gamesPlayed={p_stat.get('gamesPlayed')} "
+                      f"(pitcher stats no cargadas)")
+                if attempt < 3:
+                    time.sleep(2)
+                    continue
+                _team_run_cache[ck] = None
                 return None
-            tid = match["id"]
 
-        hit = _mlb_rest(f"/teams/{tid}/stats",
-                        {"stats": "season", "group": "hitting", "season": MLB_YEAR})
-        pit = _mlb_rest(f"/teams/{tid}/stats",
-                        {"stats": "season", "group": "pitching", "season": MLB_YEAR})
+            ra_pg  = round(ra_raw / games_p, 2)
+            result = {"rs_pg": rs_pg, "ra_pg": ra_pg}
+            _team_run_cache[ck] = result
+            _stats_disk_cache[dk] = result
+            _save_stats_disk_cache()
+            print(f"  📊 [{team_name}] RS={rs_pg} RA={ra_pg}/juego ✅")
+            return result
 
-        h_stat = (hit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
-        p_stat = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
+        except Exception as _e:
+            last_err = _e
+            print(f"  ⚠️  fetch_team_run_stats [{team_name}] intento {attempt}/3: "
+                  f"{type(_e).__name__}: {_e}")
+            if attempt < 3:
+                time.sleep(2)
 
-        # Prefer runsPerGame; fall back to runs/gamesPlayed
-        gp_h = max(float(h_stat.get("gamesPlayed", 0) or 0), 1)
-        if "runsPerGame" in h_stat and float(h_stat["runsPerGame"] or 0) > 0:
-            rs_pg = round(float(h_stat["runsPerGame"]), 2)
-        elif float(h_stat.get("runs", 0) or 0) > 0:
-            rs_pg = round(float(h_stat["runs"]) / gp_h, 2)
-        else:
-            _team_run_cache[team_name] = None
-            return None
-
-        games_p = max(float(p_stat.get("gamesPlayed", 0) or 0), 1)
-        ra_raw  = float(p_stat.get("runsAllowed", 0) or 0)
-        if ra_raw == 0:
-            _team_run_cache[team_name] = None
-            return None
-        ra_pg = round(ra_raw / games_p, 2)
-
-        result = {"rs_pg": rs_pg, "ra_pg": ra_pg}
-        _team_run_cache[team_name] = result
-        return result
-    except Exception:
-        return None
+    print(f"  ❌ fetch_team_run_stats [{team_name}] — 3 intentos fallidos. "
+          f"Último error: {last_err}. Usando fallback 4.5")
+    _team_run_cache[ck] = None
+    return None
 
 # ── IMPROVEMENT 1: MLB STARTING PITCHER ERA ───────────────────────────────────
 
@@ -3272,12 +3350,24 @@ def analyze_game_full(game, sport_key, prev_map=None):
         a_stats = fetch_team_run_stats(away)
         # Run stats are OPTIONAL — fall back to league average so the game still runs
         LEAGUE_AVG = 4.5
-        if h_stats is None:
-            print(f"   ⚠️ Sin stats de carreras ({home}) — usando promedio liga ({LEAGUE_AVG})")
+        _h_fallback = h_stats is None
+        _a_fallback = a_stats is None
+        if _h_fallback:
+            print(f"   ⚠️ Sin stats de carreras ({home}) — API falló tras 3 intentos, "
+                  f"usando promedio liga. Notificación mostrará: dato no disponible")
             h_stats = {"rs_pg": LEAGUE_AVG, "ra_pg": LEAGUE_AVG}
-        if a_stats is None:
-            print(f"   ⚠️ Sin stats de carreras ({away}) — usando promedio liga ({LEAGUE_AVG})")
+        if _a_fallback:
+            print(f"   ⚠️ Sin stats de carreras ({away}) — API falló tras 3 intentos, "
+                  f"usando promedio liga. Notificación mostrará: dato no disponible")
             a_stats = {"rs_pg": LEAGUE_AVG, "ra_pg": LEAGUE_AVG}
+        # Flag for downstream alert formatting
+        _stats_fallback_note = ""
+        if _h_fallback or _a_fallback:
+            missing = []
+            if _h_fallback: missing.append(home)
+            if _a_fallback: missing.append(away)
+            _stats_fallback_note = ("⚠️ Carreras: dato no disponible "
+                                    f"({', '.join(missing)}) — usando promedio liga")
 
         park       = MLB_PARK_FACTORS.get(home, 1.0)
         home_exp   = h_stats["rs_pg"] * (a_stats["ra_pg"] / LEAGUE_AVG) * park
@@ -3692,7 +3782,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
             "pform_h":       pform_h,   # MLB A1
             "pform_a":       pform_a,   # MLB A1
             "umpire":        umpire,    # MLB A2
-            "tbd_note":      tbd_note,  # Fix 5
+            "tbd_note":         tbd_note,           # Fix 5
+            "stats_fallback":   _stats_fallback_note,  # set when 4.5 default used
             "pname_home":    h_pname,   # raw pitcher name
             "pname_away":    a_pname,   # raw pitcher name
             "era_home":      h_era,     # raw ERA float
@@ -4332,6 +4423,9 @@ def notify_game_analysis(analyses, sport_key):
             # TBD pitcher
             if ctx.get("tbd_note"):
                 ctx_lines += f"{ctx['tbd_note']}\n"
+            # Stats fallback warning — shown when 4.5 default was used
+            if ctx.get("stats_fallback"):
+                ctx_lines += f"{ctx['stats_fallback']}\n"
             # Temperature / wind
             if ctx.get("temp_label"):
                 ctx_lines += f"{ctx['temp_label']}\n"
@@ -5348,116 +5442,148 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
     Primary:  /teams/{tid}/stats?stats=homeAndAway  (fast, single call)
     Fallback: compute from /schedule linescore data (slower but always works)
     Returns {home_rs, home_ra, home_wpct, away_rs, away_ra, away_wpct} or None.
-    Cached per team per calendar day.
+    Cache: in-memory (date-keyed) + disk file for cross-restart persistence.
+    Retry: up to 3 attempts with 2s delay.
     """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     ck    = f"{team_name}|{today}"
+    dk    = f"splits|{ck}"
+
+    # 1. In-memory cache
     if ck in _splits_cache:
         return _splits_cache[ck]
 
-    try:
-        tid = _team_id(team_name)
-        if tid is None:
-            print(f"  ⚠️  _team_id not found for '{team_name}'")
-            _splits_cache[ck] = None
-            return None
+    # 2. Disk cache (same-day, survives Railway restarts)
+    if dk in _stats_disk_cache:
+        v = _stats_disk_cache[dk]
+        _splits_cache[ck] = v
+        return v
 
-        # ── Hitting stats → runs scored ───────────────────────────────────────
-        hit_data = _mlb_rest(f"/teams/{tid}/stats", {
-            "stats": "homeAndAway", "group": "hitting",
-            "season": MLB_YEAR, "sportId": 1,
-        })
-        hit_splits = (hit_data.get("stats", [{}])[0].get("splits", [])
-                      if hit_data and hit_data.get("stats") else [])
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            tid = _team_id(team_name)
+            if tid is None:
+                print(f"  ⚠️  fetch_mlb_home_away_splits [{team_name}]: "
+                      f"_team_id no encontrado — verifica _MLB_TEAM_IDS")
+                _splits_cache[ck] = None
+                return None
 
-        # ── Pitching stats → runs allowed ─────────────────────────────────────
-        pit_data = _mlb_rest(f"/teams/{tid}/stats", {
-            "stats": "homeAndAway", "group": "pitching",
-            "season": MLB_YEAR, "sportId": 1,
-        })
-        pit_splits = (pit_data.get("stats", [{}])[0].get("splits", [])
-                      if pit_data and pit_data.get("stats") else [])
+            # ── Hitting stats → runs scored ───────────────────────────────
+            hit_data = _mlb_rest(f"/teams/{tid}/stats", {
+                "stats": "homeAndAway", "group": "hitting",
+                "season": MLB_YEAR, "sportId": 1,
+            })
+            hit_splits = (hit_data.get("stats", [{}])[0].get("splits", [])
+                          if hit_data and hit_data.get("stats") else [])
 
-        # ── Debug: log what the API actually returned ─────────────────────────
-        if not hit_splits and not pit_splits:
-            hit_keys = list((hit_data or {}).keys())
-            pit_keys = list((pit_data or {}).keys())
-            print(f"  ⚠️  homeAndAway splits empty [{team_name}] "
-                  f"hit_keys={hit_keys} pit_keys={pit_keys}")
-            # Fallback: compute from schedule
-            result = _splits_from_schedule(tid, team_name)
-            _splits_cache[ck] = result
-            return result
-        else:
-            # Sample first split to show structure
+            # ── Pitching stats → runs allowed ─────────────────────────────
+            pit_data = _mlb_rest(f"/teams/{tid}/stats", {
+                "stats": "homeAndAway", "group": "pitching",
+                "season": MLB_YEAR, "sportId": 1,
+            })
+            pit_splits = (pit_data.get("stats", [{}])[0].get("splits", [])
+                          if pit_data and pit_data.get("stats") else [])
+
+            # ── Log raw API response ───────────────────────────────────────
+            if not hit_splits and not pit_splits:
+                hit_keys = list((hit_data or {}).keys())
+                pit_keys = list((pit_data or {}).keys())
+                print(f"  ⚠️  homeAndAway splits vacíos [{team_name}] "
+                      f"intento {attempt}/3 — "
+                      f"hit_keys={hit_keys} pit_keys={pit_keys} "
+                      f"tid={tid} season={MLB_YEAR}")
+                if attempt < 3:
+                    time.sleep(2)
+                    continue
+                # All retries exhausted → try schedule-based fallback
+                print(f"  🔄 [{team_name}] usando _splits_from_schedule como último recurso")
+                result = _splits_from_schedule(tid, team_name)
+                _splits_cache[ck] = result
+                if result:
+                    _stats_disk_cache[dk] = result
+                    _save_stats_disk_cache()
+                return result
+
             sample = hit_splits[0] if hit_splits else pit_splits[0]
             sample_keys = {k: str(v)[:40] for k, v in sample.items()
                            if k in ("split", "isHome", "stat")}
             print(f"  📊 homeAndAway [{team_name}] splits={len(hit_splits)} "
                   f"sample={sample_keys}")
 
-        result: dict = {}
+            result: dict = {}
 
-        def _is_home(s: dict) -> "bool | None":
-            """Detect home/away from split dict — handles both API formats."""
-            # Format A: {"split": {"code": "H"}} or {"split": {"code": "A"}}
-            code = s.get("split", {}).get("code", "")
-            if code in ("H", "A"):
-                return code == "H"
-            # Format B: {"isHome": true/false}
-            is_home = s.get("isHome")
-            if is_home is not None:
-                return bool(is_home)
-            # Format C: split description
-            desc = s.get("split", {}).get("description", "").lower()
-            if "home" in desc:
-                return True
-            if "away" in desc or "road" in desc:
-                return False
-            return None
+            def _is_home(s: dict) -> "bool | None":
+                code = s.get("split", {}).get("code", "")
+                if code in ("H", "A"):
+                    return code == "H"
+                is_home_flag = s.get("isHome")
+                if is_home_flag is not None:
+                    return bool(is_home_flag)
+                desc = s.get("split", {}).get("description", "").lower()
+                if "home" in desc:
+                    return True
+                if "away" in desc or "road" in desc:
+                    return False
+                return None
 
-        for s in hit_splits:
-            home = _is_home(s)
-            if home is None:
-                continue
-            stat = s.get("stat", {})
-            gp   = max(float(stat.get("gamesPlayed", 0) or 0), 1)
-            runs = float(stat.get("runs", 0) or 0)
-            wins = float(stat.get("wins", 0) or 0)
-            loss = float(stat.get("losses", 0) or 0)
-            wl   = wins + loss
-            wpct = round(wins / wl, 3) if wl > 0 else 0.500
-            if home:
-                result["home_rs"]   = round(runs / gp, 2)
-                result["home_wpct"] = wpct
-            else:
-                result["away_rs"]   = round(runs / gp, 2)
-                result["away_wpct"] = wpct
+            for s in hit_splits:
+                hf = _is_home(s)
+                if hf is None:
+                    continue
+                stat = s.get("stat", {})
+                gp   = max(float(stat.get("gamesPlayed", 0) or 0), 1)
+                runs = float(stat.get("runs", 0) or 0)
+                wins = float(stat.get("wins", 0) or 0)
+                loss = float(stat.get("losses", 0) or 0)
+                wl   = wins + loss
+                wpct = round(wins / wl, 3) if wl > 0 else 0.500
+                if hf:
+                    result["home_rs"]   = round(runs / gp, 2)
+                    result["home_wpct"] = wpct
+                else:
+                    result["away_rs"]   = round(runs / gp, 2)
+                    result["away_wpct"] = wpct
 
-        for s in pit_splits:
-            home = _is_home(s)
-            if home is None:
-                continue
-            stat = s.get("stat", {})
-            gp   = max(float(stat.get("gamesPlayed", 0) or 0), 1)
-            ra   = float(stat.get("runs", 0) or 0)
-            if home:
-                result["home_ra"] = round(ra / gp, 2)
-            else:
-                result["away_ra"] = round(ra / gp, 2)
+            for s in pit_splits:
+                hf = _is_home(s)
+                if hf is None:
+                    continue
+                stat = s.get("stat", {})
+                gp   = max(float(stat.get("gamesPlayed", 0) or 0), 1)
+                ra   = float(stat.get("runs", 0) or 0)
+                if hf:
+                    result["home_ra"] = round(ra / gp, 2)
+                else:
+                    result["away_ra"] = round(ra / gp, 2)
 
-        # Only return if we got at least one real stat
-        required = {"home_rs", "home_ra", "home_wpct", "away_rs", "away_ra", "away_wpct"}
-        if not required.issubset(result.keys()):
-            _splits_cache[ck] = None
-            return None
+            required = {"home_rs", "home_ra", "home_wpct", "away_rs", "away_ra", "away_wpct"}
+            if not required.issubset(result.keys()):
+                missing = required - result.keys()
+                print(f"  ⚠️  homeAndAway [{team_name}] intento {attempt}/3: "
+                      f"faltan campos: {missing} — splits={len(hit_splits)}")
+                if attempt < 3:
+                    time.sleep(2)
+                    continue
+                _splits_cache[ck] = None
+                return None
 
-        _splits_cache[ck] = result
-        return result
+            _splits_cache[ck] = result
+            _stats_disk_cache[dk] = result
+            _save_stats_disk_cache()
+            return result
 
-    except Exception:
-        _splits_cache[ck] = None
-        return None
+        except Exception as _e:
+            last_err = _e
+            print(f"  ⚠️  fetch_mlb_home_away_splits [{team_name}] intento {attempt}/3: "
+                  f"{type(_e).__name__}: {_e}")
+            if attempt < 3:
+                time.sleep(2)
+
+    print(f"  ❌ fetch_mlb_home_away_splits [{team_name}] — 3 intentos fallidos. "
+          f"Último error: {last_err}")
+    _splits_cache[ck] = None
+    return None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANALYSIS IMPROVEMENTS — MLB & SOCCER (7 new data modules)
@@ -9020,6 +9146,7 @@ if __name__ == "__main__":
         print("⚠️  MLB-statsapi not found — install via: pip install MLB-statsapi")
     print("🤖 BetBot Pro — starting...")
     scan = 1
+    _load_stats_disk_cache()  # load persistent stats cache (survives Railway restarts)
     compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
 
     while True:
