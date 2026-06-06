@@ -22,6 +22,8 @@ except ImportError:
 API_KEY           = os.environ.get("ODDS_API_KEY",       "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY",  "")
 CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO       = os.environ.get("GITHUB_REPO",  "osvaldoalvarez0113-source/Betbot")
 BANKROLL = 1000
 FRACTION = 0.25
 MIN_EDGE  = 2.0
@@ -5647,29 +5649,117 @@ def _save_confirm_queue(queue: list) -> None:
         print(f"  ⚠️  confirm_queue save error: {e}")
 
 
+def _github_pull_daily_exposure() -> dict | None:
+    """
+    Fetch daily_exposure.json from GitHub via REST API.
+    Returns parsed dict or None on any error.
+    Railway filesystem is ephemeral — GitHub is the durable backup.
+    """
+    if not GITHUB_TOKEN:
+        return None
+    try:
+        import urllib.request as _ur, base64 as _b64
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DAILY_EXPOSURE_FILE}"
+        req = _ur.Request(url, headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+        })
+        with _ur.urlopen(req, timeout=8) as r:
+            info = json.loads(r.read())
+        return json.loads(_b64.b64decode(info["content"]).decode())
+    except Exception:
+        return None
+
+
+def _github_push_daily_exposure() -> None:
+    """
+    Push daily_exposure.json to GitHub.
+    Called once per scan (not per pick) — keeps Railway redeploys in sync.
+    Silently skips if GITHUB_TOKEN not set.
+    """
+    if not GITHUB_TOKEN:
+        return
+    try:
+        import urllib.request as _ur, base64 as _b64
+        payload_bytes = json.dumps({
+            "date":     _daily_exposure_date.isoformat(),
+            "exposure": round(_daily_exposure, 2),
+        }).encode()
+        api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{DAILY_EXPOSURE_FILE}"
+        hdrs = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept":        "application/vnd.github.v3+json",
+            "Content-Type":  "application/json",
+        }
+        # Get current SHA (needed for update; omit for new file)
+        sha = None
+        try:
+            r0 = _ur.Request(api, headers=hdrs)
+            with _ur.urlopen(r0, timeout=8) as r:
+                sha = json.loads(r.read()).get("sha")
+        except Exception:
+            pass
+        body = {
+            "message": f"bot: update daily_exposure {_daily_exposure_date.isoformat()} ${_daily_exposure:.2f}",
+            "content": _b64.b64encode(payload_bytes).decode(),
+        }
+        if sha:
+            body["sha"] = sha
+        req = _ur.Request(api, data=json.dumps(body).encode(), headers=hdrs, method="PUT")
+        with _ur.urlopen(req, timeout=10):
+            pass
+        print(f"  ☁️  Exposición diaria sincronizada a GitHub: ${_daily_exposure:.2f}")
+    except Exception as e:
+        print(f"  ⚠️  GitHub daily_exposure push error: {e}")
+
+
 def _load_daily_exposure() -> tuple:
     """
     Read daily_exposure.json on startup.
     Returns (exposure_float, date_obj).
-    If file missing, unreadable, or dated before today → returns (0.0, today).
+    Priority: local file → GitHub backup → $0 fresh start.
+    If date != today → returns (0.0, today) regardless of source.
     """
     today = datetime.now(CDT).date()
+
+    def _parse(data: dict):
+        saved_date = date.fromisoformat(data["date"])
+        if saved_date == today:
+            return float(data.get("exposure", 0.0)), saved_date
+        return None
+
+    # 1. Try local file (fast — present if same container is still running)
     try:
         if os.path.exists(DAILY_EXPOSURE_FILE):
             with open(DAILY_EXPOSURE_FILE) as f:
-                data = json.load(f)
-            saved_date = date.fromisoformat(data["date"])
-            if saved_date == today:
-                exposure = float(data.get("exposure", 0.0))
-                print(f"  💾 Exposición diaria restaurada: ${exposure:.2f} (fecha: {saved_date})")
-                return exposure, saved_date
+                result = _parse(json.load(f))
+            if result:
+                print(f"  💾 Exposición diaria restaurada (local): ${result[0]:.2f}")
+                return result
     except Exception as e:
-        print(f"  ⚠️  daily_exposure load error: {e}")
+        print(f"  ⚠️  daily_exposure local load error: {e}")
+
+    # 2. Fall back to GitHub (survives Railway redeploys)
+    gh_data = _github_pull_daily_exposure()
+    if gh_data:
+        result = _parse(gh_data)
+        if result:
+            print(f"  ☁️  Exposición diaria restaurada (GitHub): ${result[0]:.2f}")
+            # Write to local so subsequent reads skip the network call
+            try:
+                with open(DAILY_EXPOSURE_FILE, "w") as f:
+                    json.dump(gh_data, f)
+            except Exception:
+                pass
+            return result
+
+    print(f"  💾 Exposición diaria: $0.00 (día nuevo o primera ejecución)")
     return 0.0, today
 
 
 def _save_daily_exposure() -> None:
-    """Persist current _daily_exposure and date to disk so redeploys don't reset it."""
+    """Write daily_exposure.json to local disk (fast — called per pick).
+    GitHub sync happens once per scan via _github_push_daily_exposure()."""
     try:
         with open(DAILY_EXPOSURE_FILE, "w") as f:
             json.dump({
@@ -11477,6 +11567,12 @@ def run_scan():
         detect_and_notify_parlays(all_full_analyses)
     except Exception as _pe:
         print(f"  ⚠️  Parlay detector error: {_pe}")
+
+    # Sync daily exposure to GitHub once per scan (survives Railway redeploys)
+    try:
+        _github_push_daily_exposure()
+    except Exception as _ghe:
+        print(f"  ⚠️  GitHub exposure sync error: {_ghe}")
 
     # Live betting scan — runs after pre-game analysis each cycle
     try:
