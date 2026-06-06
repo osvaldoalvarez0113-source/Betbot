@@ -598,6 +598,23 @@ def _extract_player_name(headline: str) -> str:
     return " ".join(caps[:2]) if len(caps) >= 2 else "El jugador"
 
 
+def _two_layer_body(layer1: str, layer2: str) -> str:
+    """
+    Combine a quick-summary layer and a full-analysis layer into one ntfy body.
+
+    Layer 1: short actionable block (match · time · bet · action button).
+    Layer 2: detailed Spanish analysis with no abbreviations.
+    """
+    div = "━" * 24
+    return (
+        f"{layer1.rstrip()}\n"
+        f"{div}\n"
+        f"📊 ANÁLISIS COMPLETO:\n"
+        f"{layer2.rstrip()}\n"
+        f"{div}"
+    )
+
+
 def ntfy_post(title, body, priority="default"):
     # Apply full Spanish term translation before sending
     body  = _translate_terms(body)
@@ -1846,39 +1863,43 @@ def notify_arbitrage(arbs):
             total_stake = round(arb["stake_a"] + arb["stake_b"] + arb["stake_c"], 2)
             has_risky   = any(_is_risky_book(b) for b in [arb["book_a"], arb["book_b"], arb["book_c"]])
             risky_note  = "⚠️ Una casa de apuestas es riesgosa — apuesta sólo en las marcadas ✅ si es posible\n" if has_risky else ""
-            body = (
-                f"{emoji} {match}\n"
+            l1 = (
+                f"🎯 {match}\n"
+                f"⏰ {gt} ET\n"
                 f"💰 Ganancia garantizada: ${profit} ({pct}%)\n"
-                f"{_DIV}\n"
+                f"🟢 APOSTAR LAS 3 PIERNAS — sin riesgo"
+            )
+            l2 = (
+                f"Apuesta en 3 casas distintas para garantizar ganancia:\n"
                 f"🔵 ${arb['stake_a']:>8} → {arb['team_a']} @ {arb['odds_a']} — {arb['book_a']} {tag_a}\n"
                 f"🤝 ${arb['stake_b']:>8} → Empate @ {arb['odds_b']} — {arb['book_b']} {tag_b}\n"
                 f"🔴 ${arb['stake_c']:>8} → {arb['team_c']} @ {arb['odds_c']} — {arb['book_c']} {tag_c}\n"
-                f"{_DIV}\n"
-                f"💵 Total apostado: ${total_stake}\n"
-                f"⏰ {gt}\n"
+                f"💵 Total apostado: ${total_stake} | Ganancia: ${profit}\n"
                 f"{arb_timing_note}"
                 f"{risky_note}"
-                f"{verdict}\n"
-                f"{_DIV2}"
+                f"{verdict}"
             )
+            body = _two_layer_body(l1, l2)
         else:
             total_stake = round(arb["stake_a"] + arb["stake_b"], 2)
             has_risky   = any(_is_risky_book(b) for b in [arb["book_a"], arb["book_b"]])
             risky_note  = "⚠️ Una casa de apuestas es riesgosa — apuesta sólo en las marcadas ✅ si es posible\n" if has_risky else ""
-            body = (
-                f"{emoji} {match}\n"
+            l1 = (
+                f"🎯 {match}\n"
+                f"⏰ {gt} ET\n"
                 f"💰 Ganancia garantizada: ${profit} ({pct}%)\n"
-                f"{_DIV}\n"
+                f"🟢 APOSTAR LAS 2 PIERNAS — sin riesgo"
+            )
+            l2 = (
+                f"Apuesta en 2 casas distintas para garantizar ganancia:\n"
                 f"🔵 ${arb['stake_a']:>8} → {arb['team_a']} @ {arb['odds_a']} — {arb['book_a']} {tag_a}\n"
                 f"🔴 ${arb['stake_b']:>8} → {arb['team_b']} @ {arb['odds_b']} — {arb['book_b']} {tag_b}\n"
-                f"{_DIV}\n"
-                f"💵 Total apostado: ${total_stake}\n"
-                f"⏰ {gt}\n"
+                f"💵 Total apostado: ${total_stake} | Ganancia: ${profit}\n"
                 f"{arb_timing_note}"
                 f"{risky_note}"
-                f"{verdict}\n"
-                f"{_DIV2}"
+                f"{verdict}"
             )
+            body = _two_layer_body(l1, l2)
 
         ntfy_post(f"⚡ ARB | {match} | +${profit}", body, "urgent")
         print(f"  💰 ARB: {match} — ${profit} profit ({pct}%)")
@@ -3564,29 +3585,28 @@ def notify_totals(total_bets):
                 adj_block += f"{_DIV2}\n"
 
             _claude_tot_blk = _claude_block(b.get("claude_intel"))
-            body = (
-                f"{emoji} {b['match']}\n"
-                f"⏰ Hoy {gt}\n"
-                f"{_DIV}\n"
-                f"🎯 APUESTA: {side} {line} carreras (Total)\n\n"
-                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn_tot}\n"
-                f"{_DIV}\n"
-                f"📊 POR QUÉ:\n"
-                f"Modelo base:      {base_p} carreras\n"
+            l1 = (
+                f"🎯 {_es(home)} vs {_es(away)}\n"
+                f"⏰ Hoy {gt} ET\n"
+                f"APUESTA: {side} {line} carreras @ {b['odds']} — {b['bookmaker']}\n"
+                f"{action}"
+            )
+            l2 = (
+                f"Nuestro modelo proyecta {b['our_line']} carreras totales.\n"
+                f"La casa de apuestas pone {line} — hay {b['edge']} carreras de ventaja.\n"
+                f"\n"
                 f"{adj_block}"
-                f"Total proyectado: {b['our_line']} carreras\n"
-                f"La casa de apuestas pone: {line} carreras\n"
-                f"Edge:             {b['edge']} carreras ✅\n\n"
-                f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} (ERA {ph_era:.2f})\n"
-                f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} (ERA {pa_era:.2f})\n"
+                f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} "
+                f"(promedio de carreras: {ph_era:.2f})\n"
+                f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} "
+                f"(promedio de carreras: {pa_era:.2f})\n"
                 f"{wind_line}"
                 f"{_claude_tot_blk}"
-                f"{_DIV}\n"
-                f"{action}\n"
-                + ("✅ Datos verificados\n" if b.get("data_verified", True)
+                + ("" if b.get("data_verified", True)
                    else "⚠️ Verificar antes de apostar — algunos datos sin confirmar\n")
-                + f"{_DIV2}"
+                + f"{bk_warn_tot}"
             )
+            body = _two_layer_body(l1, l2)
             match_es_tot = f"{_es(home)} vs {_es(away)}"
             title    = f"⚾ TOTAL | {side} {line} | {match_es_tot}"
             priority = "high" if is_high else "default"
@@ -3637,25 +3657,22 @@ def notify_totals(total_bets):
                 soc_adj_block = f"\n{_DIV2}\n" + "\n".join(soc_adj_parts) + f"\n{_DIV2}"
 
             match_es_tot = f"{_es(home)} vs {_es(away)}"
-            body = (
-                f"{emoji} {match_es_tot}\n"
-                f"⏰ Hoy {gt}\n"
-                f"{_DIV}\n"
-                f"🎯 APUESTA: {side} {line} {unit} (Total)\n\n"
-                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn_tot}\n"
-                f"{_DIV}\n"
-                f"📊 POR QUÉ:\n"
-                f"Modelo proyecta: {b['our_line']} {unit}\n"
-                f"La casa de apuestas pone: {line} {unit}\n"
-                f"Diferencia:      {b['edge']} {unit} de edge"
-                f"{soc_adj_block}\n"
-                + (f"\n{form_block}\n" if form_block else "")
-                + f"{_DIV}\n"
-                f"{action}\n"
-                + ("✅ Datos verificados\n" if b.get("data_verified", True)
-                   else "⚠️ Verificar antes de apostar — algunos datos sin confirmar\n")
-                + f"{_DIV2}"
+            l1 = (
+                f"🎯 {match_es_tot}\n"
+                f"⏰ Hoy {gt} ET\n"
+                f"APUESTA: {side} {line} {unit} @ {b['odds']} — {b['bookmaker']}\n"
+                f"{action}"
             )
+            l2 = (
+                f"Nuestro modelo proyecta {b['our_line']} {unit} totales.\n"
+                f"La casa de apuestas pone {line} — ventaja de {b['edge']} {unit}.\n"
+                f"{soc_adj_block}\n"
+                + (f"{form_block}\n" if form_block else "")
+                + ("" if b.get("data_verified", True)
+                   else "⚠️ Verificar antes de apostar — algunos datos sin confirmar\n")
+                + f"{bk_warn_tot}"
+            )
+            body     = _two_layer_body(l1, l2)
             title    = f"{emoji} TOTAL | {side} {line} | {match_es_tot}"
             priority = "high" if is_high else "default"
 
@@ -5824,17 +5841,19 @@ def notify_sharp_money(sharp_moves):
                 f"📉 Línea {m['direction']} {m['pct']}% sin divergencia pública clara\n"
             )
 
-        body = (
-            f"{emoji} {m['match']}\n"
-            f"{_DIV}\n"
-            f"📌 Pick: {team} @ {m['odds_now']}\n"
-            f"📊 Línea: {m['odds_prev']} → {m['odds_now']} ({arrow}{m['pct']}%)\n"
-            f"{context_lines}"
-            f"⭐ ACCIÓN: Apostar {team} en la mejor casa de apuestas disponible\n"
-            f"{_DIV3}\n"
-            f"🟢 CONFIANZA: ALTA — apostar\n"
-            f"{_DIV2}"
+        l1 = (
+            f"🎯 {m['match']}\n"
+            f"APUESTA: {team} @ {m['odds_now']}\n"
+            f"🟢 APOSTAR — dinero inteligente confirmado"
         )
+        l2 = (
+            f"La línea de {team} se movió {m['pct']}%: "
+            f"{m['odds_prev']} → {m['odds_now']} {arrow}\n"
+            f"Esto indica que apostadores profesionales (sharps) "
+            f"están poniendo dinero fuerte en este equipo.\n"
+            f"{context_lines}"
+        )
+        body = _two_layer_body(l1, l2)
         ntfy_post(f"⚡ SHARP | {team} | {m['match']}", body, "high")
         print(f"  ⚡ Sharp: {team} en {m['match']} ({m['pct']}% movimiento)")
 
@@ -8143,26 +8162,26 @@ def notify_bets(new_bets):
             half_stake = round(b["stake"] / 2, 2)
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
-            body = (
-                f"⚾ {match_es}\n"
-                f"⏰ Hoy {gt}\n"
-                f"{_DIV}\n"
-                f"🎯 APUESTA: {team_es} GANA (ML)\n\n"
-                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn}\n"
-                f"{_DIV}\n"
-                f"{top3_blk}"
-                f"📊 POR QUÉ:\n"
-                f"Modelo           → {elo_p}% de ganar\n"
-                f"Casa de apuestas → {impl_pct}% implícito\n"
-                f"Edge:     {b['edge']}%\n\n"
-                f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} (ERA {ph_era:.2f})\n"
-                f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} (ERA {pa_era:.2f})\n"
-                f"{_DIV}\n"
-                f"{action}\n"
-                f"{_DIV2}"
+            l1 = (
+                f"🎯 {match_es}\n"
+                f"⏰ Hoy {gt} ET\n"
+                f"APUESTA: {team_es} GANA @ {b['odds']} — {b['bookmaker']}\n"
+                f"{action}"
             )
+            l2 = (
+                f"Nuestro modelo dice {team_es} tiene {elo_p}% de probabilidad de ganar.\n"
+                f"La casa de apuestas implica solo {impl_pct}% — hay {b['edge']}% de ventaja.\n"
+                f"\n"
+                f"🔵 Pitcher local:  {ph_name} — {_era_label(ph_era)} "
+                f"(promedio de carreras: {ph_era:.2f})\n"
+                f"🔴 Pitcher visita: {pa_name} — {_era_label(pa_era)} "
+                f"(promedio de carreras: {pa_era:.2f})\n"
+                f"{top3_blk}"
+                f"{bk_warn}"
+            )
+            body     = _two_layer_body(l1, l2)
             priority = "urgent" if is_high else "high"
-            title    = f"⚾ ML | {team_es} | {match_es}"
+            title    = f"⚾ GANADOR | {team_es} | {match_es}"
         else:
             # ── Soccer / other sports ─────────────────────────────────────
             impl_pct   = round(100 / b["odds"], 1) if b["odds"] else 0
@@ -8170,22 +8189,21 @@ def notify_bets(new_bets):
             half_stake = round(b["stake"] / 2, 2)
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
-            body = (
-                f"{emoji} {match_es}\n"
-                f"⏰ Hoy {gt}\n"
-                f"{_DIV}\n"
-                f"🎯 APUESTA: {team_es} GANA (ML)\n\n"
-                f"💰 ${b['stake']} @ {b['odds']} — {b['bookmaker']}{bk_warn}\n"
-                f"{_DIV}\n"
-                f"{top3_blk}"
-                f"📊 POR QUÉ:\n"
-                f"Nuestro modelo: {elo_p}% | Casa de apuestas: {impl_pct}% → Edge {b['edge']}%\n"
-                f"{_DIV}\n"
-                f"{action}\n"
-                f"{_DIV2}"
+            l1 = (
+                f"🎯 {match_es}\n"
+                f"⏰ Hoy {gt} ET\n"
+                f"APUESTA: {team_es} GANA @ {b['odds']} — {b['bookmaker']}\n"
+                f"{action}"
             )
+            l2 = (
+                f"Nuestro modelo: {elo_p}% de ganar.\n"
+                f"La casa de apuestas dice {impl_pct}% — ventaja de {b['edge']}%.\n"
+                f"{top3_blk}"
+                f"{bk_warn}"
+            )
+            body     = _two_layer_body(l1, l2)
             priority = "urgent" if b["edge"] >= 5.0 else ("high" if b["edge"] >= 3 else "default")
-            title    = f"{emoji} ML | {team_es} | {match_es}"
+            title    = f"{emoji} GANADOR | {team_es} | {match_es}"
 
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
@@ -8461,22 +8479,20 @@ def notify_premium_bet(bet: dict):
         else ""
     )
 
-    body = (
-        f"💎 PICK PREMIUM | {_es(team)}"
-        f" {'ML' if mtype != 'totals' else side}\n"
-        f"{_DIV}\n"
-        f"{emoji} {_es(home_s)} vs {_es(away_s)}\n"
-        f"⏰ Hoy {gt}\n"
-        f"{_DIV}\n"
-        f"🎯 {apuesta_line}\n"
-        f"💰 ${stake:.2f} @ {odds} — {book}\n"
-        f"   (stake aumentado por señales múltiples)\n"
-        f"{_DIV}\n"
-        f"✅ Señales confirmadas ({len(signals)}/8):\n"
-        f"{sig_lines}\n"
-        f"{_DIV}\n"
-        f"🟢 CONFIANZA MÁXIMA — apostar{low_warn}"
+    l1 = (
+        f"🎯 {emoji} {_es(home_s)} vs {_es(away_s)}\n"
+        f"⏰ Hoy {gt} ET\n"
+        f"{apuesta_line} @ {odds} — {book}\n"
+        f"🟢 APOSTAR: ${stake:.2f}  (stake aumentado — señales múltiples)"
     )
+    l2 = (
+        f"Este es un pick de máxima confianza: {len(signals)} de 8 señales alineadas.\n"
+        f"\n"
+        f"✅ Señales confirmadas:\n"
+        f"{sig_lines}"
+        f"{low_warn}"
+    )
+    body  = _two_layer_body(l1, l2)
     title = f"💎 PREMIUM | {_es(team)} | ${stake:.2f} @ {odds}"
     ntfy_post(title, body, "urgent")
     print(f"  💎 PREMIUM: {match} → {_es(team)} ({len(signals)}/8 señales)")
@@ -9223,23 +9239,22 @@ def notify_steam_moves(steam_list: list):
             badge    = "🚂 STEAM FUERTE — 5+ casas confirman"
             action   = "🟢 APOSTAR — línea seguirá cayendo"
 
-        body = (
-            f"⚾ {s['match']}\n"
-            f"{_DIV}\n"
-            f"📉 Línea cayó: {s['odds_from']:.2f} → {s['odds_to']:.2f} ▼  "
-            f"(−{avg_move:.1f}% promedio)\n"
-            f"   {n_books} casas simultáneas en < 10 min\n"
-            f"   🇺🇸 US ({n_us}): {us_names or 'N/A'}\n"
-            f"   📋 Todas: {all_names}\n"
-            f"\n"
-            f"{badge}\n"
-            f"💎 Dinero serio entrando en {_es(s['team'])}\n"
-            f"⭐ ACCIÓN: {_es(s['team'])} ML ahora\n"
-            f"💰 {s['odds_to']:.2f} — mejor precio actual\n"
-            f"{_DIV3}\n"
-            f"{action}\n"
-            f"{_DIV2}"
+        l1 = (
+            f"🎯 {s['match']}\n"
+            f"APUESTA: {_es(s['team'])} GANA @ {s['odds_to']:.2f}\n"
+            f"{action}"
         )
+        l2 = (
+            f"La cuota de {_es(s['team'])} cayó de {s['odds_from']:.2f} "
+            f"a {s['odds_to']:.2f} (−{avg_move:.1f}%) en menos de 10 minutos.\n"
+            f"{n_books} casas de apuestas la bajaron al mismo tiempo — "
+            f"señal de dinero institucional fuerte.\n"
+            f"🇺🇸 Casas de EE.UU. ({n_us}): {us_names or 'N/A'}\n"
+            f"📋 Todas las casas: {all_names}\n"
+            f"\n"
+            f"{badge}"
+        )
+        body = _two_layer_body(l1, l2)
         ntfy_post(title, body, priority)
         badge_sym = "💎" if is_premium else "🚂"
         print(f"  {badge_sym} Steam: {s['team']} en {s['match']} "
