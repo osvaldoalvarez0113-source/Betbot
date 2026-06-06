@@ -5,6 +5,14 @@ Modules: Morning Report | Lineup Monitor | Math Models | Sharp Radar | Arb Scann
 import requests, time, csv, os, json, math
 from datetime import datetime, date, timedelta
 import pytz
+try:
+    from paquete_avanzado import registrar_pick, clv_tracker, run_modulos_avanzados
+    HAS_PAQUETE_AVANZADO = True
+except ImportError:
+    HAS_PAQUETE_AVANZADO = False
+    def registrar_pick(*_a, **_kw): return None
+    def run_modulos_avanzados(*_a, **_kw): pass
+    clv_tracker = None
 
 try:
     import statsapi
@@ -3651,6 +3659,20 @@ def notify_totals(total_bets, alerted=None):
         if alerted is not None and match_key_tot in alerted:
             print(f"  ⏭️  Totals {b.get('match','')} — ya alertado este scan")
             continue
+        if HAS_PAQUETE_AVANZADO:
+            try:
+                registrar_pick(
+                    game_pk  = b.get("game_id", b["match"]),
+                    equipo_h = home,
+                    equipo_a = away,
+                    pick_tipo= b.get("team", "OVER"),
+                    linea    = float(b.get("side", 0)),
+                    cuota    = b.get("odds", 1.0),
+                    stake    = b.get("stake", 0),
+                    libro    = b.get("bookmaker", "Bovada"),
+                )
+            except Exception as _rpe:
+                print(f"  ⚠️  registrar_pick error (totals): {_rpe}")
         key = f"{b['game_id']}|totals|{b['team']}"
 
         sport   = b.get("sport", "")
@@ -8986,6 +9008,21 @@ def notify_bets(new_bets, alerted=None):
         if alerted is not None and match_key_bet in alerted:
             print(f"  ⏭️  {match_key_bet} — ya alertado este scan (notify_bets)")
             continue
+        if HAS_PAQUETE_AVANZADO:
+            try:
+                _pk_tipo = "ML_HOME" if b.get("team", "") == home else "ML_AWAY"
+                registrar_pick(
+                    game_pk  = b.get("game_id", b["match"]),
+                    equipo_h = home,
+                    equipo_a = away,
+                    pick_tipo= _pk_tipo,
+                    linea    = 0.0,
+                    cuota    = b.get("odds", 1.0),
+                    stake    = b.get("stake", 0),
+                    libro    = b.get("bookmaker", "Bovada"),
+                )
+            except Exception as _rpe:
+                print(f"  ⚠️  registrar_pick error (bets): {_rpe}")
         sport   = b.get("sport", "")
         emoji   = _sport_emoji(sport)
         gt      = _fmt_smart_gt(b.get("time", ""))
@@ -11772,6 +11809,17 @@ def run_scan():
     if lineup_scan_counter >= 3:
         check_lineup_changes()
         lineup_scan_counter = 0
+
+    # Módulos Avanzados — auto-resultados, CLV, contrarian (al final de cada scan)
+    if HAS_PAQUETE_AVANZADO:
+        try:
+            _avz_sport = next(
+                (sk for sk in SPORT_KEYS if "mlb" in sk.lower()),
+                "baseball_mlb"
+            )
+            run_modulos_avanzados(_avz_sport)
+        except Exception as _mae:
+            print(f"  ⚠️  Módulos avanzados error: {_mae}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
