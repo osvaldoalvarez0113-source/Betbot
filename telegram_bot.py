@@ -33,6 +33,16 @@ CHATID_FILE      = "telegram_chat_id.txt"
 TRACKER_FILE     = "paper_trades.json"
 CLV_FILE         = "clv_tracker.json"
 
+# ── Diagnóstico al cargar el módulo ────────────────────────────
+if TELEGRAM_TOKEN:
+    print(f"  [telegram_bot] ✅ TELEGRAM_TOKEN configurado (termina en ...{TELEGRAM_TOKEN[-6:]})")
+else:
+    print("  [telegram_bot] ❌ TELEGRAM_TOKEN NO configurado — agrega la variable en Railway")
+if TELEGRAM_CHAT_ID:
+    print(f"  [telegram_bot] ✅ TELEGRAM_CHAT_ID: {TELEGRAM_CHAT_ID}")
+else:
+    print("  [telegram_bot] ⚠️  TELEGRAM_CHAT_ID no configurado — envía /start al bot para registrarte")
+
 _authorized_ids: set = set()
 _analyze_fn          = None
 _get_odds_fn         = None
