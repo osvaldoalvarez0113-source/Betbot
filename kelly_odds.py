@@ -8267,6 +8267,551 @@ def detect_and_notify_parlays(all_analyses: list):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MODULE: LIVE BETTING  (MLB + Soccer World Cup)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_LIVE_MIN_EDGE       = 5.0   # higher bar than pre-game 3%
+_LIVE_MAX_INNING     = 6     # skip games entering 7th inning or later
+_LIVE_MAX_SOCCER_MIN = 75    # skip games at or past 75th minute
+_live_alerted: set   = set() # session-level dedup (resets on Railway restart)
+
+
+def _fetch_mlb_live_games() -> list:
+    """Return all in-progress MLB games today with linescore hydration."""
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    url   = (f"https://statsapi.mlb.com/api/v1/schedule"
+             f"?sportId=1&date={today}&hydrate=linescore")
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as _e:
+        print(f"  ⚠️  Live MLB schedule fetch: {_e}")
+        return []
+    live = []
+    for date_entry in data.get("dates", []):
+        for g in date_entry.get("games", []):
+            if g.get("status", {}).get("abstractGameState") == "Live":
+                live.append(g)
+    return live
+
+
+def _fetch_mlb_game_live_feed(game_pk: int) -> dict:
+    """Fetch live game feed for pitch count + pitcher stats."""
+    url = (f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
+           f"?fields=liveData,linescore,defense,pitcher,boxscore,teams,"
+           f"pitchers,players,stats,pitching,numberOfPitches,earnedRuns,"
+           f"inningsPitched,person,fullName")
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return {}
+
+
+def _parse_mlb_live_state(g: dict, feed: dict) -> dict:
+    """Extract live state fields from schedule game dict + live feed dict."""
+    ls           = g.get("linescore", {})
+    teams        = g.get("teams", {})
+    home         = teams.get("home", {}).get("team", {}).get("name", "?")
+    away         = teams.get("away", {}).get("team", {}).get("name", "?")
+    home_runs    = ls.get("teams", {}).get("home", {}).get("runs", 0) or 0
+    away_runs    = ls.get("teams", {}).get("away", {}).get("runs", 0) or 0
+    inning       = ls.get("currentInning", 0) or 0
+    inning_state = ls.get("inningState", "Top")   # "Top" or "Bottom"
+
+    pitcher_name    = "?"
+    pitches_thrown  = 0
+    innings_pitched = 0.0
+    pitcher_runs    = 0
+
+    if feed:
+        box = feed.get("liveData", {}).get("boxscore", {})
+        if box:
+            # Top of inning → home team is pitching; Bottom → away
+            pitching_side = "home" if inning_state == "Top" else "away"
+            team_box      = box.get("teams", {}).get(pitching_side, {})
+            pitchers_list = team_box.get("pitchers", [])
+            players_info  = team_box.get("players", {})
+            if pitchers_list:
+                cur_pid    = pitchers_list[-1]
+                player_key = f"ID{cur_pid}"
+                player     = players_info.get(player_key, {})
+                p_stats    = player.get("stats", {}).get("pitching", {})
+                pitches_thrown  = p_stats.get("numberOfPitches", 0) or 0
+                pitcher_runs    = p_stats.get("earnedRuns",      0) or 0
+                ip_raw          = p_stats.get("inningsPitched",  "0.0")
+                try:
+                    innings_pitched = float(ip_raw)
+                except Exception:
+                    innings_pitched = 0.0
+                pitcher_name = (player.get("person", {}).get("fullName")
+                                or pitcher_name)
+
+    return {
+        "game_pk":       g.get("gamePk"),
+        "home":          home,
+        "away":          away,
+        "home_runs":     home_runs,
+        "away_runs":     away_runs,
+        "total_runs":    home_runs + away_runs,
+        "inning":        inning,
+        "inning_state":  inning_state,
+        "pitcher_name":  pitcher_name,
+        "pitches_thrown": pitches_thrown,
+        "innings_pitched": innings_pitched,
+        "pitcher_runs":  pitcher_runs,
+    }
+
+
+def _match_odds_game(home: str, away: str, odds_games: list):
+    """Fuzzy-match a live game to an Odds-API game dict by team name."""
+    home_l = home.lower()
+    away_l = away.lower()
+    for og in odds_games:
+        oh = og.get("home_team", "").lower()
+        oa = og.get("away_team", "").lower()
+        h_ok = any(w in oh for w in home_l.split() if len(w) > 3) or \
+               any(w in home_l for w in oh.split() if len(w) > 3)
+        a_ok = any(w in oa for w in away_l.split() if len(w) > 3) or \
+               any(w in away_l for w in oa.split() if len(w) > 3)
+        if h_ok and a_ok:
+            return og
+    return None
+
+
+def _analyze_live_mlb(state: dict, odds_games: list):
+    """
+    Apply 4 live MLB rules. Returns alert dict or None.
+      Rule 1: Early innings (1-3), score 0-0 → UNDER still has value
+      Rule 2: Starter struggling (40+ pitches in ≤2 inn) → OVER (bullpen)
+      Rule 3: Dominant starter (0 ER, <30 pitches, 3+ inn) → UNDER
+      Rule 4: Score changed significantly → recalculate OVER/UNDER
+    """
+    inning = state["inning"]
+    if inning < 1 or inning > _LIVE_MAX_INNING:
+        return None
+
+    total_runs = state["total_runs"]
+    pitches    = state["pitches_thrown"]
+    innings_p  = state["innings_pitched"]
+    p_runs     = state["pitcher_runs"]
+
+    og = _match_odds_game(state["home"], state["away"], odds_games)
+    if not og:
+        return None
+    totals = get_book_total(og)
+    if not totals:
+        return None
+    live_line, live_over_odds, live_under_odds, best_book = totals
+
+    # Innings remaining: count as half-inning fractions
+    remaining = max(0.5, 9 - inning + (1 if state["inning_state"] == "Top" else 0.5))
+    runs_to_line = round(live_line - total_runs, 1)
+
+    alert_label = alert_prob = alert_odds = None
+    alert_note  = ""
+    rule_fired  = ""
+
+    # ── Rule 1: Early (1-3 inn), 0-0 → UNDER ────────────────────────────
+    if inning <= 3 and total_runs == 0 and live_under_odds:
+        exp_rem    = 0.80 * remaining
+        prob_under = poisson_ou_prob(exp_rem, runs_to_line - 0.5, False)
+        ev = (prob_under * live_under_odds - 1) * 100
+        if ev >= _LIVE_MIN_EDGE:
+            alert_label = f"UNDER {live_line}"
+            alert_prob  = prob_under
+            alert_odds  = live_under_odds
+            alert_note  = f"🔵 Juego 0-0 en {inning}° inn — pitchers controlando"
+            rule_fired  = "early_scoreless"
+
+    # ── Rule 2: Starter struggling (40+ pitches, ≤2 inn) → OVER ─────────
+    if not alert_label and pitches >= 40 and innings_p <= 2.0 \
+            and inning <= 3 and live_over_odds:
+        exp_rem   = 1.30 * remaining
+        prob_over = poisson_ou_prob(exp_rem, runs_to_line - 0.5, True)
+        ev = (prob_over * live_over_odds - 1) * 100
+        if ev >= _LIVE_MIN_EDGE:
+            alert_label = f"OVER {live_line}"
+            alert_prob  = prob_over
+            alert_odds  = live_over_odds
+            alert_note  = (f"🔴 {state['pitcher_name']}: {pitches} pitches "
+                           f"en {innings_p:.1f} inn — bullpen pronto")
+            rule_fired  = "starter_struggling"
+
+    # ── Rule 3: Dominant starter (0 ER, <30 pitches, 3+ inn) → UNDER ────
+    if not alert_label and p_runs == 0 and pitches < 30 \
+            and innings_p >= 3.0 and live_under_odds:
+        exp_rem    = 0.65 * remaining
+        prob_under = poisson_ou_prob(exp_rem, runs_to_line - 0.5, False)
+        ev = (prob_under * live_under_odds - 1) * 100
+        if ev >= _LIVE_MIN_EDGE:
+            alert_label = f"UNDER {live_line}"
+            alert_prob  = prob_under
+            alert_odds  = live_under_odds
+            alert_note  = (f"🔵 {state['pitcher_name']}: {pitches} pitches "
+                           f"| 0 carreras — dominando")
+            rule_fired  = "dominant_starter"
+
+    # ── Rule 4: Score changed (2+ runs) — recalculate OVER/UNDER ─────────
+    if not alert_label and total_runs >= 2 and inning <= 5:
+        exp_rem = 0.90 * remaining
+        p_over  = poisson_ou_prob(exp_rem, runs_to_line - 0.5, True)
+        p_under = poisson_ou_prob(exp_rem, runs_to_line - 0.5, False)
+        if p_over >= p_under and live_over_odds:
+            ev = (p_over * live_over_odds - 1) * 100
+            if ev >= _LIVE_MIN_EDGE:
+                alert_label = f"OVER {live_line}"
+                alert_prob  = p_over
+                alert_odds  = live_over_odds
+                alert_note  = f"🟡 {total_runs} carreras anotadas — OVER sigue vivo"
+                rule_fired  = "score_update"
+        elif p_under > p_over and live_under_odds:
+            ev = (p_under * live_under_odds - 1) * 100
+            if ev >= _LIVE_MIN_EDGE:
+                alert_label = f"UNDER {live_line}"
+                alert_prob  = p_under
+                alert_odds  = live_under_odds
+                alert_note  = f"🟡 {total_runs} carreras anotadas — UNDER sigue vivo"
+                rule_fired  = "score_update"
+
+    if not alert_label:
+        return None
+
+    ev_final = round((alert_prob * alert_odds - 1) * 100, 1)
+    stake    = max(15.0, min(50.0,
+                  round(kelly_stake(alert_prob, alert_odds)["stake"], 0)))
+
+    return {
+        "sport":        "MLB",
+        "home":         state["home"],
+        "away":         state["away"],
+        "home_runs":    state["home_runs"],
+        "away_runs":    state["away_runs"],
+        "total_runs":   total_runs,
+        "inning":       inning,
+        "inning_state": state["inning_state"],
+        "label":        alert_label,
+        "prob":         alert_prob,
+        "odds":         alert_odds,
+        "ev":           ev_final,
+        "note":         alert_note,
+        "rule":         rule_fired,
+        "line":         live_line,
+        "stake":        stake,
+        "book":         best_book,
+        "pitcher":      state["pitcher_name"],
+        "pitches":      pitches,
+        "runs_to_line": runs_to_line,
+        "remaining":    remaining,
+    }
+
+
+def _send_live_mlb_alert(a: dict):
+    """Format and fire a live MLB ntfy alert (priority=urgent)."""
+    inn_ord = {1:"1er",2:"2do",3:"3er",4:"4to",5:"5to",6:"6to"}
+    inn_str = inn_ord.get(a["inning"], f"{a['inning']}°")
+
+    h_r, a_r = a["home_runs"], a["away_runs"]
+    if h_r > a_r:
+        score_str = f"{h_r}-{a_r} {_es(a['home'])}"
+    elif a_r > h_r:
+        score_str = f"{a_r}-{h_r} {_es(a['away'])}"
+    else:
+        score_str = f"{h_r}-{a_r}"
+
+    body = (
+        f"⏱️ {inn_str} inning | {score_str}\n"
+        f"{'━'*26}\n"
+        f"🎯 APUESTA EN VIVO:\n"
+        f"{a['label']} (quedan ~{a['remaining']:.0f} inn)\n"
+        f"Carreras actuales: {a['total_runs']}\n"
+        f"Necesita: {a['runs_to_line']:.1f}+ más para OVER\n"
+        f"\n"
+        f"{a['note']}\n"
+        f"\n"
+        f"💰 ${a['stake']:.0f} @ {a['odds']:.2f} — {a['book'].title()}\n"
+        f"EV estimado: +{a['ev']:.1f}%\n"
+        f"{'━'*26}\n"
+        f"🟢 APOSTAR AHORA — ventana corta\n"
+        f"⚡ APOSTAR EN 5 MIN MAX"
+    )
+    title = f"⚡ LIVE MLB | {_es(a['away'])} vs {_es(a['home'])} | {a['label']}"
+    print(f"\n  ⚡ LIVE MLB — {a['away']} vs {a['home']} | {a['label']} "
+          f"| EV +{a['ev']:.1f}% | {inn_str} inn.")
+    ntfy_post(title, body, priority="urgent")
+
+
+# ── Soccer Live (World Cup via ESPN public API) ──────────────────────────────
+
+def _fetch_soccer_live_games() -> list:
+    """Fetch in-progress FIFA World Cup games from the ESPN public scoreboard."""
+    url = ("https://site.api.espn.com/apis/site/v2/sports/soccer"
+           "/fifa.world/scoreboard")
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        events = resp.json().get("events", [])
+    except Exception as _e:
+        print(f"  ⚠️  Live soccer fetch: {_e}")
+        return []
+
+    live = []
+    for ev in events:
+        st = ev.get("status", {})
+        if st.get("type", {}).get("state") != "in":
+            continue
+        comps  = ev.get("competitions", [{}])[0]
+        clist  = comps.get("competitors", [])
+        home_c = next((c for c in clist if c.get("homeAway") == "home"), {})
+        away_c = next((c for c in clist if c.get("homeAway") == "away"), {})
+
+        clock = st.get("displayClock", "0:00")
+        try:
+            minute = int(clock.split(":")[0])
+        except Exception:
+            minute = 0
+
+        # Red cards (ESPN event type id "5")
+        details = comps.get("details", [])
+        home_id = home_c.get("id", "")
+        away_id = away_c.get("id", "")
+        red_h = sum(1 for d in details
+                    if d.get("type", {}).get("id") == "5"
+                    and d.get("team", {}).get("id") == home_id)
+        red_a = sum(1 for d in details
+                    if d.get("type", {}).get("id") == "5"
+                    and d.get("team", {}).get("id") == away_id)
+
+        try:
+            home_score = int(home_c.get("score", 0))
+            away_score = int(away_c.get("score", 0))
+        except Exception:
+            home_score = away_score = 0
+
+        live.append({
+            "home":       home_c.get("team", {}).get("displayName", "?"),
+            "away":       away_c.get("team", {}).get("displayName", "?"),
+            "home_score": home_score,
+            "away_score": away_score,
+            "minute":     minute,
+            "red_h":      red_h,
+            "red_a":      red_a,
+        })
+    return live
+
+
+def _analyze_live_soccer(state: dict, odds_games: list):
+    """
+    Apply 3 soccer live rules. Returns alert dict or None.
+      Rule 1: 0-0 after 30 min → UNDER 2.5 value
+      Rule 2: 1-0 or 0-1 by 70 min → ML comeback for trailing team
+      Rule 3: Red card → UNDER value increases (10 vs 11)
+    """
+    minute = state["minute"]
+    if minute < 1 or minute >= _LIVE_MAX_SOCCER_MIN:
+        return None
+
+    home_score  = state["home_score"]
+    away_score  = state["away_score"]
+    total_score = home_score + away_score
+    remaining   = max(5, 90 - minute)
+
+    og = _match_odds_game(state["home"], state["away"], odds_games)
+    if not og:
+        return None
+
+    totals   = get_book_total(og)
+    h2h_odds = _extract_h2h_best(og)
+    og_home  = og.get("home_team", state["home"])
+    og_away  = og.get("away_team", state["away"])
+
+    live_line = live_over_odds = live_under_odds = None
+    if totals:
+        live_line, live_over_odds, live_under_odds, _ = totals
+
+    ml_home = h2h_odds.get(og_home, (None,))[0]
+    ml_away = h2h_odds.get(og_away, (None,))[0]
+
+    alert_label = alert_prob = alert_odds = None
+    alert_note  = ""
+    rule_fired  = ""
+
+    # ── Rule 1: 0-0 after 30 min → UNDER ─────────────────────────────────
+    if total_score == 0 and minute >= 30 and live_line and live_under_odds:
+        exp_goals  = 1.10 * (remaining / 60.0)
+        prob_under = poisson_ou_prob(exp_goals, live_line, False)
+        ev = (prob_under * live_under_odds - 1) * 100
+        if ev >= _LIVE_MIN_EDGE:
+            alert_label = f"UNDER {live_line}"
+            alert_prob  = prob_under
+            alert_odds  = live_under_odds
+            alert_note  = f"🔵 0-0 tras {minute}' — UNDER sube de valor"
+            rule_fired  = "scoreless_30"
+
+    # ── Rule 2: One goal (1-0), trailing team comeback ────────────────────
+    if not alert_label and total_score == 1 and minute <= 70:
+        trailing_home = away_score > home_score
+        comeback_name = state["home"] if trailing_home else state["away"]
+        comeback_odds = ml_home if trailing_home else ml_away
+        if comeback_odds and comeback_odds > 1.5:
+            frac_rem  = remaining / 90.0
+            prob_back = 0.25 * frac_rem
+            ev = (prob_back * comeback_odds - 1) * 100
+            if ev >= _LIVE_MIN_EDGE:
+                alert_label = f"{comeback_name} ML (remontada)"
+                alert_prob  = prob_back
+                alert_odds  = comeback_odds
+                alert_note  = (f"🟡 {comeback_name} perdiendo 1-0 en {minute}' "
+                               f"— ventana abierta")
+                rule_fired  = "comeback"
+
+    # ── Rule 3: Red card → UNDER increases ───────────────────────────────
+    if not alert_label and (state["red_h"] > 0 or state["red_a"] > 0) \
+            and live_line and live_under_odds:
+        exp_goals  = 0.80 * (remaining / 60.0)
+        prob_under = poisson_ou_prob(exp_goals, live_line - total_score, False)
+        ev = (prob_under * live_under_odds - 1) * 100
+        if ev >= _LIVE_MIN_EDGE:
+            rc_side = "local" if state["red_h"] > 0 else "visitante"
+            alert_label = f"UNDER {live_line}"
+            alert_prob  = prob_under
+            alert_odds  = live_under_odds
+            alert_note  = (f"🟥 Tarjeta roja ({rc_side}) en {minute}' "
+                           f"— 10 vs 11, UNDER sube de valor")
+            rule_fired  = "red_card"
+
+    if not alert_label:
+        return None
+
+    ev_final = round((alert_prob * alert_odds - 1) * 100, 1)
+    stake    = max(10.0, min(30.0,
+                  round(kelly_stake(alert_prob, alert_odds)["stake"], 0)))
+
+    return {
+        "sport":      "SOCCER",
+        "home":       state["home"],
+        "away":       state["away"],
+        "home_score": home_score,
+        "away_score": away_score,
+        "minute":     minute,
+        "label":      alert_label,
+        "prob":       alert_prob,
+        "odds":       alert_odds,
+        "ev":         ev_final,
+        "note":       alert_note,
+        "rule":       rule_fired,
+        "stake":      stake,
+    }
+
+
+def _send_live_soccer_alert(a: dict):
+    """Format and fire a live soccer ntfy alert (priority=urgent)."""
+    score_str = f"{a['away_score']}-{a['home_score']}"
+    body = (
+        f"⏱️ Minuto {a['minute']}' | {_es(a['away'])} {score_str} {_es(a['home'])}\n"
+        f"{'━'*26}\n"
+        f"🎯 APUESTA EN VIVO:\n"
+        f"{a['label']}\n"
+        f"\n"
+        f"{a['note']}\n"
+        f"\n"
+        f"💰 ${a['stake']:.0f} @ {a['odds']:.2f} | EV +{a['ev']:.1f}%\n"
+        f"{'━'*26}\n"
+        f"🟢 APOSTAR AHORA — ventana corta\n"
+        f"⚡ APOSTAR EN 5 MIN MAX"
+    )
+    title = (f"⚡ LIVE ⚽ | {_es(a['away'])} vs {_es(a['home'])} "
+             f"| {a['label']}")
+    print(f"\n  ⚡ LIVE SOC — {a['away']} vs {a['home']} | {a['label']} "
+          f"| EV +{a['ev']:.1f}% | {a['minute']}'")
+    ntfy_post(title, body, priority="urgent")
+
+
+def run_live_scan(pre_game_matches: set, odds_by_sport: dict):
+    """
+    Called each scan cycle after pre-game analysis finishes.
+    Fetches in-progress MLB and WC soccer games, applies live rules,
+    and fires urgent ntfy alerts for qualifying opportunities.
+
+    pre_game_matches : set of "home|away" strings alerted pre-game this scan.
+    odds_by_sport    : {sport_key: [game_dicts]} from the current scan.
+    """
+    print("\n  ⚡ Live scan iniciando...")
+
+    # ── MLB ────────────────────────────────────────────────────────────────
+    live_mlb = _fetch_mlb_live_games()
+    if not live_mlb:
+        print("  — Sin juegos MLB en vivo")
+    else:
+        mlb_odds = odds_by_sport.get("baseball_mlb", [])
+        print(f"  ⚡ {len(live_mlb)} juego(s) MLB en vivo")
+        for g in live_mlb:
+            game_pk = g.get("gamePk")
+            try:
+                feed  = _fetch_mlb_game_live_feed(game_pk)
+                state = _parse_mlb_live_state(g, feed)
+
+                if state["inning"] > _LIVE_MAX_INNING:
+                    print(f"  ⏭  {state['away']} vs {state['home']} "
+                          f"— {state['inning']}° inn (muy tarde, >6)")
+                    continue
+
+                # Skip game if we already sent a pre-game alert for it today
+                home_key = state["home"].split()[-1].lower()
+                if any(home_key in pm.lower() for pm in pre_game_matches):
+                    print(f"  ⏭  {state['away']} vs {state['home']} "
+                          f"— ya analizado en pre-game hoy")
+                    continue
+
+                alert = _analyze_live_mlb(state, mlb_odds)
+                if not alert:
+                    print(f"  — {state['away']} vs {state['home']} "
+                          f"| {state['inning']}° inn "
+                          f"| {state['total_runs']} carreras — sin valor")
+                    continue
+
+                live_key = f"live_mlb_{game_pk}_{alert['rule']}"
+                if live_key in _live_alerted:
+                    continue
+                _live_alerted.add(live_key)
+                _send_live_mlb_alert(alert)
+
+            except Exception as _le:
+                print(f"  ⚠️  Live MLB {game_pk}: {_le}")
+
+    # ── Soccer (World Cup only) ────────────────────────────────────────────
+    soccer_odds = odds_by_sport.get("soccer_fifa_world_cup", [])
+    if soccer_odds and is_in_season("soccer_fifa_world_cup"):
+        live_soc = _fetch_soccer_live_games()
+        if live_soc:
+            print(f"  ⚡ {len(live_soc)} partido(s) WC en vivo")
+            for state in live_soc:
+                try:
+                    if state["minute"] >= _LIVE_MAX_SOCCER_MIN:
+                        print(f"  ⏭  {state['away']} vs {state['home']} "
+                              f"— {state['minute']}' (muy tarde, >75)")
+                        continue
+
+                    alert = _analyze_live_soccer(state, soccer_odds)
+                    if not alert:
+                        continue
+
+                    live_key = (f"live_soc_{state['home']}_{state['away']}"
+                                f"_{alert['rule']}")
+                    if live_key in _live_alerted:
+                        continue
+                    _live_alerted.add(live_key)
+                    _send_live_soccer_alert(alert)
+
+                except Exception as _le:
+                    print(f"  ⚠️  Live soccer {state.get('home','?')}: {_le}")
+
+    print("  ⚡ Live scan completo.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CORE — MAIN SCAN
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -8434,6 +8979,18 @@ def run_scan():
         detect_and_notify_parlays(all_full_analyses)
     except Exception as _pe:
         print(f"  ⚠️  Parlay detector error: {_pe}")
+
+    # Live betting scan — runs after pre-game analysis each cycle
+    try:
+        _pre_matches = set()
+        for _fa in all_full_analyses:
+            _m = _fa.get("match", "")
+            if " vs " in _m:
+                _h, _a = _m.split(" vs ", 1)
+                _pre_matches.add(f"{_h.strip()}|{_a.strip()}")
+        run_live_scan(_pre_matches, current_games_by_sport)
+    except Exception as _lse:
+        print(f"  ⚠️  Live scan error: {_lse}")
 
     # Module P: PREMIUM alerts — sent once after all sports are collected
     for pb in all_premiums:
