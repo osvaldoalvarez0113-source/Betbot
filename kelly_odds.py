@@ -227,6 +227,7 @@ _bankroll_paused: bool  = False  # True when bankroll < $400 → halt betting
 last_night_summary: date = date(2000, 1, 1)  # 11 PM nightly summary tracker
 last_mlb_card:     date = date(2000, 1, 1)  # 2 PM ET MLB daily card
 last_soccer_card:  date = date(2000, 1, 1)  # 10 AM ET soccer daily card
+last_backtest_report: date = date(2000, 1, 1)  # Sunday 10 AM ET backtest
 _steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
@@ -7481,6 +7482,107 @@ def send_weekly_summary():
     except Exception as e:
         print(f"  ⚠️  send_weekly_summary error: {e}")
 
+
+# ── Module 11: Pinnacle availability check ────────────────────────────────────
+
+def _check_pinnacle_availability():
+    """
+    Tests whether our Odds API plan includes Pinnacle odds.
+    Runs at bot startup. Prints result to Railway logs and sends one ntfy.
+    """
+    if not API_KEY:
+        print("  ⚠️  ODDS_API_KEY no configurada — no se puede verificar Pinnacle")
+        return
+
+    results = []
+    for sport, label in [
+        ("baseball_mlb",          "MLB"),
+        ("soccer_fifa_world_cup", "Soccer FIFA WC"),
+    ]:
+        url = (
+            f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
+            f"?apiKey={API_KEY}&regions=us,eu&bookmakers=pinnacle&markets=h2h"
+        )
+        try:
+            r    = requests.get(url, timeout=12)
+            data = r.json() if r.status_code == 200 else []
+            found = False
+            sample = ""
+            for game in data[:3]:
+                for bk in game.get("bookmakers", []):
+                    if "pinnacle" in bk.get("title", "").lower():
+                        found = True
+                        h2h = next(
+                            (m for m in bk.get("markets", []) if m["key"] == "h2h"),
+                            None,
+                        )
+                        if h2h and h2h.get("outcomes"):
+                            o = h2h["outcomes"]
+                            sample = (
+                                f"{o[0]['name']} {o[0]['price']:+.0f} | "
+                                f"{o[1]['name']} {o[1]['price']:+.0f}"
+                            )
+                        break
+                if found:
+                    break
+
+            if found:
+                print(f"  ✅ Pinnacle disponible [{label}]: {sample}")
+                results.append(f"✅ {label}: Pinnacle disponible\n   {sample}")
+            else:
+                bk_names = list({
+                    b.get("title", "?")
+                    for g in data[:3]
+                    for b in g.get("bookmakers", [])
+                })
+                print(f"  ❌ Pinnacle NO disponible [{label}] en plan actual")
+                if bk_names:
+                    print(f"     Bookmakers recibidos: {', '.join(bk_names[:8])}")
+                results.append(
+                    f"❌ {label}: Pinnacle no disponible en plan actual\n"
+                    f"   Bookmakers recibidos: {', '.join(bk_names[:5]) or 'ninguno'}"
+                )
+        except Exception as e:
+            print(f"  ⚠️  Pinnacle check [{label}]: {e}")
+            results.append(f"⚠️ {label}: error de conexión — {e}")
+
+    note = (
+        "\n\nSi no disponible → se requiere upgrade del plan Odds API\n"
+        "para acceder a Pinnacle (plan Pro/Business).\n"
+        "Mientras tanto, el bot omite el bloque 📌 Pinnacle Reference."
+    )
+    body = "VERIFICACIÓN PINNACLE AL INICIO:\n\n" + "\n".join(results) + note
+    ntfy_post("🔍 Pinnacle API Check", body, "low")
+
+
+# ── Module 12: Weekly backtesting (Sunday 10 AM ET) ──────────────────────────
+
+def run_weekly_backtest():
+    """
+    Run the backtesting engine for the current MLB season (April 1 → today).
+    Imports backtest.py (must be in same directory as kelly_odds.py).
+    Results saved to backtest_log.csv and sent via ntfy.
+    """
+    try:
+        import importlib.util, os
+        bt_path = os.path.join(os.path.dirname(__file__), "backtest.py")
+        if not os.path.isfile(bt_path):
+            print("  ⚠️  backtest.py no encontrado — saltando backtest semanal")
+            return
+        spec = importlib.util.spec_from_file_location("backtest", bt_path)
+        bt   = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bt)
+        start = f"{bt.MLB_YEAR}-04-01"
+        end   = datetime.now(ET).strftime("%Y-%m-%d")
+        print(f"\n📊 Iniciando backtest semanal {start} → {end}...")
+        metrics = bt.run_backtest(start_date=start, end_date=end)
+        if metrics:
+            print(f"  ✅ Backtest completado — hit rate {metrics.get('hit_rate','?')}%  "
+                  f"ROI {metrics.get('roi','?'):+}%")
+    except Exception as e:
+        print(f"  ⚠️  run_weekly_backtest error: {e}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE — ANALYSIS & NOTIFICATIONS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -9673,6 +9775,10 @@ if __name__ == "__main__":
     scan = 1
     _load_stats_disk_cache()  # load persistent stats cache (survives Railway restarts)
     compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
+    try:
+        _check_pinnacle_availability()   # Module 11: verify Pinnacle in Odds API plan
+    except Exception as _pe:
+        print(f"  ⚠️  Pinnacle check skipped: {_pe}")
 
     while True:
         try:
@@ -9703,6 +9809,14 @@ if __name__ == "__main__":
                     last_weekly_report = now_et.date()
                 except Exception as e:
                     print(f"  ⚠️  Weekly summary error: {e}")
+
+            # Backtest every Sunday at 10 AM ET — Module 12
+            if now_et.weekday() == 6 and now_et.hour == 10 and last_backtest_report < now_et.date():
+                try:
+                    run_weekly_backtest()
+                    last_backtest_report = now_et.date()
+                except Exception as e:
+                    print(f"  ⚠️  Backtest error: {e}")
 
             # MLB Daily Card at 2:00 PM ET (once per day)
             if now_et.hour == 14 and now_et.minute < 10 and last_mlb_card < now_et.date():
