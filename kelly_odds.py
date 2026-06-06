@@ -885,8 +885,15 @@ def poisson_match_probs(avg_goals_home, avg_goals_away, max_goals=8):
     return p_win/total, p_draw/total, p_loss/total
 
 def pythagorean_win_prob(rs, ra, exp=1.83):
-    """MLB Pythagorean expectation."""
-    if rs + ra == 0: return 0.5
+    """
+    MLB Pythagorean expectation.
+    Returns 0.5 when rs or ra is None or both are 0 (data unavailable).
+    """
+    if rs is None or ra is None:
+        return 0.5
+    rs, ra = float(rs), float(ra)
+    if rs + ra == 0:
+        return 0.5
     return (rs ** exp) / ((rs ** exp) + (ra ** exp))
 
 def poisson_ou_prob(expected_total, book_line, bet_over):
@@ -1041,8 +1048,14 @@ def fetch_pitcher_stats(name):
         return empty
 
 def fetch_team_batting(team_id):
-    """Return dict with AVG, OPS, rs_pg, ra_pg for a team. Returns None values
-    for stats that cannot be fetched — never returns 4.5 placeholder."""
+    """
+    Return dict with AVG, OPS, rs_pg, ra_pg for a team.
+    rs_pg / ra_pg are None when genuinely unavailable — callers must handle None.
+
+    MLB Stats API field note (2026+):
+      • 'runsPerGame' is NOT populated — compute runs / gamesPlayed manually
+      • 'runsAllowed' is NOT in pitching group — use 'runs' (same meaning there)
+    """
     try:
         hit_data = _mlb_rest(f"/teams/{team_id}/stats",
                              {"stats": "season", "group": "hitting", "season": MLB_YEAR})
@@ -1054,42 +1067,48 @@ def fetch_team_batting(team_id):
         pit_splits = pit_data.get("stats", [{}]) if pit_data else []
         pit_stat   = (pit_splits[0].get("splits", [{}]) or [{}])[-1].get("stat", {}) if pit_splits else {}
 
-        # Compute rs_pg: prefer runsPerGame, else runs/gamesPlayed
+        # Compute rs_pg: 'runsPerGame' missing in 2026 → use runs / gamesPlayed
         rs_pg = None
-        if "runsPerGame" in hit_stat and float(hit_stat["runsPerGame"] or 0) > 0:
+        if float(hit_stat.get("runsPerGame") or 0) > 0:
             rs_pg = round(float(hit_stat["runsPerGame"]), 2)
-        elif hit_stat.get("runs") and hit_stat.get("gamesPlayed"):
-            gp = max(float(hit_stat["gamesPlayed"]), 1)
-            rs_pg = round(float(hit_stat["runs"]) / gp, 2)
+        elif float(hit_stat.get("runs") or 0) > 0 and float(hit_stat.get("gamesPlayed") or 0) > 0:
+            rs_pg = round(float(hit_stat["runs"]) / max(float(hit_stat["gamesPlayed"]), 1), 2)
 
-        # Compute ra_pg from pitching runsAllowed/gamesPlayed
+        # Compute ra_pg: 'runsAllowed' missing in 2026 → use 'runs' in pitching group
         ra_pg = None
-        if pit_stat.get("runsAllowed") and pit_stat.get("gamesPlayed"):
-            gp = max(float(pit_stat["gamesPlayed"]), 1)
-            ra_pg = round(float(pit_stat["runsAllowed"]) / gp, 2)
+        ra_raw = float(pit_stat.get("runsAllowed") or pit_stat.get("runs") or 0)
+        if ra_raw > 0 and float(pit_stat.get("gamesPlayed") or 0) > 0:
+            ra_pg = round(ra_raw / max(float(pit_stat["gamesPlayed"]), 1), 2)
 
         return {
-            "avg":   hit_stat.get("avg",  "N/A"),
-            "ops":   hit_stat.get("ops",  "N/A"),
-            "rs_pg": rs_pg if rs_pg is not None else 4.5,
-            "ra_pg": ra_pg if ra_pg is not None else 4.5,
+            "avg":      hit_stat.get("avg", "N/D"),
+            "ops":      hit_stat.get("ops", "N/D"),
+            "rs_pg":    rs_pg if rs_pg is not None else None,
+            "ra_pg":    ra_pg if ra_pg is not None else None,
             "_rs_real": rs_pg is not None,
             "_ra_real": ra_pg is not None,
         }
-    except Exception:
-        return {"avg": "N/A", "ops": "N/A", "rs_pg": 4.5, "ra_pg": 4.5,
+    except Exception as _e:
+        print(f"  ⚠️  fetch_team_batting [{team_id}]: {_e}")
+        return {"avg": "N/D", "ops": "N/D", "rs_pg": None, "ra_pg": None,
                 "_rs_real": False, "_ra_real": False}
 
 def fetch_team_pitching_ra(team_id):
-    """Return runs allowed per game from team pitching stats. Returns None on failure."""
+    """
+    Return runs allowed per game from team pitching stats. Returns None on failure.
+    NOTE: MLB Stats API 2026 does not populate 'runsAllowed' — the pitching group
+    uses 'runs' for runs allowed. Both field names are tried for compatibility.
+    """
     try:
         data = _mlb_rest(f"/teams/{team_id}/stats",
                          {"stats": "season", "group": "pitching", "season": MLB_YEAR})
         splits = data.get("stats", [{}]) if data else []
         stat   = (splits[0].get("splits", [{}]) or [{}])[-1].get("stat", {}) if splits else {}
-        if stat.get("runsAllowed") and stat.get("gamesPlayed"):
-            gp = max(float(stat["gamesPlayed"]), 1)
-            return round(float(stat["runsAllowed"]) / gp, 2)
+        # 'runsAllowed' missing in 2026 API — fall back to 'runs' (same meaning in pitching group)
+        ra_raw = float(stat.get("runsAllowed") or stat.get("runs") or 0)
+        gp     = max(float(stat.get("gamesPlayed") or 0), 1)
+        if ra_raw > 0 and float(stat.get("gamesPlayed") or 0) > 0:
+            return round(ra_raw / gp, 2)
         return None
     except Exception:
         return None
@@ -1125,15 +1144,22 @@ def morning_report_mlb():
             hp_stats = fetch_pitcher_stats(hp_name)
             ap_stats = fetch_pitcher_stats(ap_name)
 
-            # Team batting
-            home_bat = fetch_team_batting(home_id) if home_id else {"avg":"N/A","ops":"N/A","rs_pg":4.5,"ra_pg":4.5}
-            away_bat = fetch_team_batting(away_id) if away_id else {"avg":"N/A","ops":"N/A","rs_pg":4.5,"ra_pg":4.5}
+            # Team batting — rs_pg/ra_pg may be None when API data unavailable
+            home_bat = fetch_team_batting(home_id) if home_id else {"avg":"N/D","ops":"N/D","rs_pg":None,"ra_pg":None,"_rs_real":False,"_ra_real":False}
+            away_bat = fetch_team_batting(away_id) if away_id else {"avg":"N/D","ops":"N/D","rs_pg":None,"ra_pg":None,"_rs_real":False,"_ra_real":False}
 
-            # Runs allowed per game (from pitching stats)
-            if home_id: home_bat["ra_pg"] = fetch_team_pitching_ra(home_id)
-            if away_id: away_bat["ra_pg"] = fetch_team_pitching_ra(away_id)
+            # Runs allowed per game — overwrite with dedicated pitching endpoint
+            # (fetch_team_batting already computes ra_pg; this double-checks via pitching group)
+            if home_id:
+                pit_ra = fetch_team_pitching_ra(home_id)
+                if pit_ra is not None:
+                    home_bat["ra_pg"] = pit_ra
+            if away_id:
+                pit_ra = fetch_team_pitching_ra(away_id)
+                if pit_ra is not None:
+                    away_bat["ra_pg"] = pit_ra
 
-            # Pythagorean win probability (home team)
+            # Pythagorean win probability — handles None gracefully (returns 0.5)
             py_home = pythagorean_win_prob(home_bat["rs_pg"], home_bat["ra_pg"])
             py_away = pythagorean_win_prob(away_bat["rs_pg"], away_bat["ra_pg"])
             # Normalize
@@ -1165,8 +1191,12 @@ def morning_report_mlb():
                 f"  {hp_name} (H): ERA {hp_stats['era']} | WHIP {hp_stats['whip']} | K/9 {hp_stats['k9']}\n"
                 f"  {ap_name} (A): ERA {ap_stats['era']} | WHIP {ap_stats['whip']} | K/9 {ap_stats['k9']}\n"
                 f"Batting:\n"
-                f"  {home}: AVG {home_bat['avg']} | OPS {home_bat['ops']}\n"
-                f"  {away}: AVG {away_bat['avg']} | OPS {away_bat['ops']}\n"
+                f"  {home}: AVG {home_bat['avg']} | OPS {home_bat['ops']} | "
+                f"RS/j {home_bat['rs_pg'] if home_bat['rs_pg'] is not None else 'N/D'} | "
+                f"RA/j {home_bat['ra_pg'] if home_bat['ra_pg'] is not None else 'N/D'}\n"
+                f"  {away}: AVG {away_bat['avg']} | OPS {away_bat['ops']} | "
+                f"RS/j {away_bat['rs_pg'] if away_bat['rs_pg'] is not None else 'N/D'} | "
+                f"RA/j {away_bat['ra_pg'] if away_bat['ra_pg'] is not None else 'N/D'}\n"
                 f"Win Prob: {home} {win_prob_home:.1%} | {away} {win_prob_away:.1%}\n"
                 f"Pythagorean: {home} {py_home:.1%}\n"
                 f">>> {rec}"
@@ -2091,15 +2121,16 @@ def fetch_team_run_stats(team_name):
             h_stat = (hit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
             p_stat = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
 
-            # Prefer runsPerGame field; fall back to runs/gamesPlayed
-            gp_h = max(float(h_stat.get("gamesPlayed", 0) or 0), 1)
-            if "runsPerGame" in h_stat and float(h_stat["runsPerGame"] or 0) > 0:
+            # rs_pg: 'runsPerGame' absent in 2026 API → compute from runs/gamesPlayed
+            gp_h = max(float(h_stat.get("gamesPlayed") or 0), 1)
+            h_runs = float(h_stat.get("runs") or 0)
+            if float(h_stat.get("runsPerGame") or 0) > 0:
                 rs_pg = round(float(h_stat["runsPerGame"]), 2)
-            elif float(h_stat.get("runs", 0) or 0) > 0:
-                rs_pg = round(float(h_stat["runs"]) / gp_h, 2)
+            elif h_runs > 0:
+                rs_pg = round(h_runs / gp_h, 2)
             else:
                 print(f"  ⚠️  fetch_team_run_stats [{team_name}] intento {attempt}/3: "
-                      f"runsPerGame=0 y runs=0 — gamesPlayed={h_stat.get('gamesPlayed')} "
+                      f"runs=0 y runsPerGame ausente — gamesPlayed={h_stat.get('gamesPlayed')} "
                       f"(API puede no haber cargado estadísticas aún)")
                 if attempt < 3:
                     time.sleep(2)
@@ -2107,11 +2138,12 @@ def fetch_team_run_stats(team_name):
                 _team_run_cache[ck] = None
                 return None
 
-            games_p = max(float(p_stat.get("gamesPlayed", 0) or 0), 1)
-            ra_raw  = float(p_stat.get("runsAllowed", 0) or 0)
+            # ra_pg: 'runsAllowed' absent in 2026 API → use 'runs' in pitching group
+            games_p = max(float(p_stat.get("gamesPlayed") or 0), 1)
+            ra_raw  = float(p_stat.get("runsAllowed") or p_stat.get("runs") or 0)
             if ra_raw == 0:
                 print(f"  ⚠️  fetch_team_run_stats [{team_name}] intento {attempt}/3: "
-                      f"runsAllowed=0 — gamesPlayed={p_stat.get('gamesPlayed')} "
+                      f"runsAllowed y runs=0 en pitching — gamesPlayed={p_stat.get('gamesPlayed')} "
                       f"(pitcher stats no cargadas)")
                 if attempt < 3:
                     time.sleep(2)
@@ -2732,7 +2764,7 @@ def _fetch_team_batting_full(team_id) -> "dict | None":
             "ops":    float(ops_s) if ops_s else None,
             "k_pct":  k_pct,
             "bb_pct": bb_pct,
-            "rs_pg":  float(st.get("runsPerGame", 4.5)),
+            "rs_pg":  float(st.get("runsPerGame") or st.get("runs") or 0) / max(float(st.get("gamesPlayed") or 1), 1) if (float(st.get("runsPerGame") or st.get("runs") or 0) > 0) else None,
         }
         _batting_cache[ck] = result
         return result
@@ -6809,7 +6841,18 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
                 _splits_cache[ck] = None
                 return None
 
-            # ── Hitting stats → runs scored ───────────────────────────────
+            # ── Primary: schedule-based home/away splits (always works) ───
+            # The homeAndAway stats endpoint returns 404 for 2026 (and prior
+            # seasons tested). Use game-by-game linescore data instead — it is
+            # reliable and carries the same information.
+            sched_result = _splits_from_schedule(tid, team_name)
+            if sched_result:
+                _splits_cache[ck] = sched_result
+                _stats_disk_cache[dk] = sched_result
+                _save_stats_disk_cache()
+                return sched_result
+
+            # ── Secondary: homeAndAway stats endpoint (kept as backup) ────
             hit_data = _mlb_rest(f"/teams/{tid}/stats", {
                 "stats": "homeAndAway", "group": "hitting",
                 "season": MLB_YEAR, "sportId": 1,
@@ -6817,7 +6860,6 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
             hit_splits = (hit_data.get("stats", [{}])[0].get("splits", [])
                           if hit_data and hit_data.get("stats") else [])
 
-            # ── Pitching stats → runs allowed ─────────────────────────────
             pit_data = _mlb_rest(f"/teams/{tid}/stats", {
                 "stats": "homeAndAway", "group": "pitching",
                 "season": MLB_YEAR, "sportId": 1,
@@ -6836,14 +6878,8 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
                 if attempt < 3:
                     time.sleep(2)
                     continue
-                # All retries exhausted → try schedule-based fallback
-                print(f"  🔄 [{team_name}] usando _splits_from_schedule como último recurso")
-                result = _splits_from_schedule(tid, team_name)
-                _splits_cache[ck] = result
-                if result:
-                    _stats_disk_cache[dk] = result
-                    _save_stats_disk_cache()
-                return result
+                _splits_cache[ck] = None
+                return None
 
             sample = hit_splits[0] if hit_splits else pit_splits[0]
             sample_keys = {k: str(v)[:40] for k, v in sample.items()
