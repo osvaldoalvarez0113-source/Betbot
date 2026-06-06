@@ -1,0 +1,100 @@
+Fix ALL issues from status report:
+
+━━━━━━━━━━━━━━━━━━━━
+1. FIX #26 SHARP MONEY RADAR
+━━━━━━━━━━━━━━━━━━━━
+analyze_sharp_money() has dead 
+return None — never returns data.
+
+Wire it properly:
+- Detect reverse line movement (RLM)
+- Compare current odds vs opening odds
+- If line moves against public % → sharp
+- Return list of sharp picks
+- Integrate with main scan loop
+
+If too complex → remove completely
+and document that Steam Detector
+handles all sharp money alerting.
+
+━━━━━━━━━━━━━━━━━━━━
+2. FIX #14 IL/INJURY LIST
+━━━━━━━━━━━━━━━━━━━━
+Current source (Odds API) inconsistent.
+
+Add better source:
+Primary: MLB Stats API
+https://statsapi.mlb.com/api/v1/teams/
+{teamId}/roster?rosterType=injured
+&season=2026
+
+Secondary: ESPN API
+http://site.api.espn.com/apis/site/
+v2/sports/baseball/mlb/teams/
+{teamId}/injuries
+
+Use both sources combined.
+Cache per team per day.
+If both fail → show nothing
+(don't show wrong data)
+
+━━━━━━━━━━━━━━━━━━━━
+3. FIX #5 RUN STATS MORNING ZEROS
+━━━━━━━━━━━━━━━━━━━━
+API returns zeros early in day.
+Fix: if RS or RA returns 0.0 →
+treat as failed fetch, not real data.
+Use disk cache from yesterday if 
+today's data shows zeros.
+Never use 0.0 as real run stat.
+
+━━━━━━━━━━━━━━━━━━━━
+4. FIX #6 SPLITS MORNING EMPTY
+━━━━━━━━━━━━━━━━━━━━
+homeAndAway endpoint returns empty
+early in day.
+
+Fix: add time-based retry logic:
+- Before 12 PM ET → use yesterday's
+  cached splits (still valid)
+- After 12 PM ET → fetch fresh
+This avoids empty morning calls.
+
+━━━━━━━━━━━━━━━━━━━━
+5. ADD CLAUDE TO DAILY CARD
+━━━━━━━━━━━━━━━━━━━━
+Daily Card uses lighter pipeline
+without Claude AI.
+
+Upgrade: add Claude verification
+to top 3 picks in daily card.
+For IMPERDIBLES and TIENEN VALOR
+categories → run Claude analysis.
+Skip Claude for BORDERLINE and
+NO VALE LA PENA (save API calls).
+
+━━━━━━━━━━━━━━━━━━━━
+6. VERIFY CLAUDE MODEL
+━━━━━━━━━━━━━━━━━━━━
+Confirm CLAUDE_MODEL env var is
+set to claude-sonnet-4-6 in Railway.
+Update default in code to:
+model = os.getenv("CLAUDE_MODEL", 
+        "claude-sonnet-4-6")
+
+━━━━━━━━━━━━━━━━━━━━
+7. IMPROVE IL DATA DISPLAY
+━━━━━━━━━━━━━━━━━━━━
+Current: shows all IL players
+including minor injuries.
+
+Improve: only show KEY players
+on IL (starters, cleanup hitters,
+ace pitchers).
+
+Define key players per team:
+- Pitchers with ERA < 4.00
+- Hitters with OPS > 0.750
+- Regular starters in lineup
+
+Others → skip silently.
