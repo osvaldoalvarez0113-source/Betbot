@@ -1394,7 +1394,7 @@ def run_health_check():
 
     # 7 ── Claude API
     try:
-        probe = analyze_with_claude(
+        probe = panel_expertos(
             {
                 "match": "Test A vs Test B", "sport": "baseball_mlb",
                 "top_pick": "Test A",        "ev_pct": 5.0,
@@ -3579,7 +3579,7 @@ def analyze_totals(games, sport_key):
         _tc_data.update({k: v for k, v in extra.items()
                          if isinstance(v, (str, int, float, bool, type(None)))})
         _tc_sport  = "MLB" if is_mlb else "SOCCER"
-        _tc_claude = analyze_with_claude(_tc_data, _tc_sport)
+        _tc_claude = panel_expertos(_tc_data, _tc_sport)
         if _tc_claude:
             _tcc  = _tc_claude.get("confianza", "N/D")
             _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
@@ -5025,7 +5025,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
         if isinstance(v, (str, int, float, bool, type(None)))
     })
     _claude_sport_g  = "MLB" if is_mlb else "SOCCER"
-    _claude_result_g = analyze_with_claude(_claude_data_g, _claude_sport_g)
+    _claude_result_g = panel_expertos(_claude_data_g, _claude_sport_g)
 
     if _claude_result_g:
         _cc  = _claude_result_g.get("confianza", "N/D")
@@ -7693,10 +7693,12 @@ _CLAUDE_SYSTEM = (
 )
 
 
-def analyze_with_claude(game_data: dict, sport: str) -> "dict | None":
+def analyze_with_claude(game_data: dict, sport: str,
+                        _extra_system: str = "") -> "dict | None":
     """
     Pre-validate game_data, then send to Claude as the final verification layer.
     sport: "MLB" or "SOCCER"
+    _extra_system: optional extra text appended to _CLAUDE_SYSTEM (used by panel_expertos)
     Returns {pick, line, confianza, razonamiento, factores_positivos,
              factores_negativos, datos_inconsistentes, apostar}
     or None if API unavailable / error.
@@ -7711,7 +7713,7 @@ def analyze_with_claude(game_data: dict, sport: str) -> "dict | None":
     clean_data, pre_warnings = _pre_validate_for_claude(game_data, sport)
 
     _ck = hashlib.md5(
-        f"{sport}{json.dumps(clean_data, default=str, sort_keys=True)}".encode()
+        f"{sport}{_extra_system}{json.dumps(clean_data, default=str, sort_keys=True)}".encode()
     ).hexdigest()[:16]
     if _ck in _claude_cache:
         return _claude_cache[_ck]
@@ -7771,7 +7773,7 @@ def analyze_with_claude(game_data: dict, sport: str) -> "dict | None":
         msg    = client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=1024,
-            system=_CLAUDE_SYSTEM,
+            system=(_CLAUDE_SYSTEM + ("\n\n" + _extra_system if _extra_system else "")),
             messages=[{"role": "user", "content": prompt}],
         )
         raw = msg.content[0].text.strip()
@@ -7807,6 +7809,106 @@ def analyze_with_claude(game_data: dict, sport: str) -> "dict | None":
         print(f"  ⚠️  Claude API error: {e}")
         _claude_cache[_ck] = None
         return None
+
+
+def panel_expertos(game_data: dict, sport: str) -> "dict | None":
+    """
+    Panel of 3 expert personas — each calls analyze_with_claude with its own
+    system-prompt persona appended to _CLAUDE_SYSTEM.
+
+    Consensus rule: 2 of 3 must return apostar=True AND no hard veto
+    (apostar=False + confianza=BAJA from any expert) → final apostar=True.
+    Otherwise apostar=False.
+
+    Returns a merged dict compatible with the standard analyze_with_claude response,
+    or None if no expert could be reached.
+    """
+    _EXPERTOS = [
+        (
+            "El Estadístico",
+            "Eres El Estadístico — verifica solo matemáticas: EV, ERA, probabilidades y "
+            "coherencia numérica. Si algo no cuadra veta.",
+        ),
+        (
+            "El Sharp",
+            "Eres El Sharp — evalúa si el mercado y Pinnacle apoyan el pick. "
+            "Sigue el dinero inteligente.",
+        ),
+        (
+            "El Abogado del Diablo",
+            "Eres El Abogado del Diablo — busca razones para NO apostar. Sé escéptico.",
+        ),
+    ]
+
+    votos_favor   = 0
+    veto_absoluto = False
+    resultados    = []
+    factores_pos  = []
+    factores_neg  = []
+    inconsistencias = []
+
+    for nombre, extra in _EXPERTOS:
+        res = analyze_with_claude(game_data, sport, _extra_system=extra)
+        if res is None:
+            print(f"   🎓 {nombre}: no disponible")
+            resultados.append(None)
+            continue
+
+        apostar = res.get("apostar", True)
+        conf    = res.get("confianza", "N/D")
+        razon   = (res.get("razonamiento", "") or "")[:80]
+        icon    = "✅" if apostar else "❌"
+        c_icon  = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
+        print(f"   🎓 {nombre}: {c_icon}{conf} apostar={icon} | \"{razon}\"")
+
+        if apostar:
+            votos_favor += 1
+        if not apostar and conf == "BAJA":
+            veto_absoluto = True  # hard veto: kills consensus regardless of other votes
+
+        resultados.append(res)
+        factores_pos.extend(res.get("factores_positivos") or [])
+        factores_neg.extend(res.get("factores_negativos") or [])
+        inconsistencias.extend(res.get("datos_inconsistentes") or [])
+
+    disponibles = sum(1 for r in resultados if r is not None)
+    if disponibles == 0:
+        return None
+
+    consenso = (votos_favor >= 2) and not veto_absoluto
+
+    # Use highest-confidence result as the structural base for the merged response
+    base = next(
+        (r for r in resultados if r and r.get("confianza") == "ALTA"),
+        next(
+            (r for r in resultados if r and r.get("confianza") == "MEDIA"),
+            next((r for r in resultados if r), None),
+        ),
+    )
+    if base is None:
+        return None
+
+    veto_txt = "SÍ 🚨" if veto_absoluto else "NO"
+    decision = "✅ APOSTAR" if consenso else "❌ RECHAZADO"
+    print(
+        f"   🗳️  Panel [{sport}]: {votos_favor}/{disponibles} votos a favor | "
+        f"veto={veto_txt} → {decision}"
+    )
+
+    merged = dict(base)
+    merged["apostar"] = consenso
+    merged["confianza"] = (
+        "ALTA" if (votos_favor == 3 and not veto_absoluto)
+        else ("MEDIA" if consenso else "BAJA")
+    )
+    merged["factores_positivos"]   = list(dict.fromkeys(factores_pos))[:6]
+    merged["factores_negativos"]   = list(dict.fromkeys(factores_neg))[:4]
+    merged["datos_inconsistentes"] = list(dict.fromkeys(inconsistencias))
+    merged["razonamiento"] = (
+        (base.get("razonamiento", "") or "") +
+        f" [Panel {votos_favor}/3 a favor{'  — veto absoluto' if veto_absoluto else ''}]"
+    )
+    return merged
 
 
 def _claude_block(claude: "dict | None") -> str:
