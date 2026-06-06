@@ -1,0 +1,391 @@
+ULTIMATE UPGRADE — 4 LEVELS COMPLETE:
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 1A — MACHINE LEARNING MODEL
+━━━━━━━━━━━━━━━━━━━━
+Build ML model using historical data
+from backtest_log.csv:
+
+Install: pip install scikit-learn
+
+Features for model:
+- era_home, era_away
+- fip_home, fip_away  
+- ops_home, ops_away
+- park_factor
+- temp, wind_speed
+- days_rest_home, days_rest_away
+- h2h_avg_total
+- pinnacle_total_line
+- public_pct_over
+
+Target: 1 if UNDER won, 0 if OVER won
+
+Train RandomForestClassifier:
+from sklearn.ensemble import 
+RandomForestClassifier
+
+Split data: 80% train, 20% test
+Minimum 100 games to train.
+Save model to model.pkl
+
+Use ML probability alongside
+existing model:
+Final prob = (model_prob × 0.5) + 
+             (ml_prob × 0.3) +
+             (historical_hit × 0.2)
+
+Show in alert:
+"🤖 ML Score: 71% UNDER
+ Basado en 847 partidos históricos"
+
+Retrain every Sunday automatically
+with new backtest data.
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 1B — LINE MOVEMENT PREDICTION
+━━━━━━━━━━━━━━━━━━━━
+Track opening lines vs current lines
+for every game each scan.
+
+Store in line_history.json:
+{game_id: [
+  {time: "09:00", total: 8.5, ml_home: -130},
+  {time: "09:10", total: 8.0, ml_home: -145}
+]}
+
+Detect patterns:
+- Line moving consistently one direction
+  → predict it will continue moving
+- Line moving fast in first 2 hours
+  → sharp money, high confidence
+
+Alert when line moving strongly:
+"📈 LÍNEA EN MOVIMIENTO:
+ Yankees UNDER: 8.5 → 8.0 → 7.5
+ Movimiento: -1.0 en 3 horas
+ → Predicción: llegará a 7.0
+ → APOSTAR AHORA antes que baje más"
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 1C — REAL-TIME NEWS MONITOR
+━━━━━━━━━━━━━━━━━━━━
+Monitor 3 sources every scan:
+
+ESPN API:
+http://site.api.espn.com/apis/site/
+v2/sports/baseball/mlb/news?limit=20
+
+MLB Transactions:
+https://statsapi.mlb.com/api/v1/
+transactions?sportId=1
+&startDate=TODAY&endDate=TODAY
+
+Twitter/X (if TWITTER_BEARER_TOKEN set):
+Search: "(MLB OR baseball) 
+(injured OR scratch OR IL) lang:en"
+
+Keywords: injured, scratch, IL,
+ruled out, day-to-day, postponed,
+lineup change, not starting
+
+Impact levels:
+HIGH (starter pitcher out):
+→ Re-analyze game immediately
+→ Send urgent alert
+→ Cancel existing pick if needed
+
+MEDIUM (key hitter out):
+→ Adjust offensive projection -12%
+→ Update next alert
+
+LOW (bullpen change):
+→ Note in next scheduled alert
+
+Alert format:
+"🚨 ÚLTIMA HORA — [Fuente]
+━━━━━━━━━━━━
+📰 [Noticia]
+⚾ Equipo: [Team]
+💥 Impacto: ALTO/MEDIO/BAJO
+→ Re-analizando picks ahora..."
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 2A — PLAYER PROPS
+━━━━━━━━━━━━━━━━━━━━
+Add player props analysis for MLB:
+
+Fetch props from The Odds API:
+https://api.the-odds-api.com/v4/sports/
+baseball_mlb/events/{eventId}/odds
+?markets=pitcher_strikeouts,
+batter_hits,batter_home_runs
+
+For each starting pitcher analyze:
+Strikeout prop:
+- Fetch K/9 rate (strikeouts per 9 inn)
+- Compare vs opponent K% 
+- If K/9 > 9.0 AND opponent K% > 25%
+  → OVER strikeouts has value
+
+Show in alert:
+"⚾ PROP DESTACADO:
+ Cole strikeouts OVER 7.5
+ K/9 rate: 11.2 (élite)
+ Red Sox K%: 28% vs diestros
+ → Edge: +18% EV
+ 💰 $20 @ 1.85 — DraftKings"
+
+For World Cup player props:
+Goals scored, assists, cards
+Analyze key players:
+Messi, Mbappé, Vinicius goals
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 2B — PITCHER FATIGUE MODEL
+━━━━━━━━━━━━━━━━━━━━
+Track pitcher workload:
+
+Fetch last 5 starts per pitcher:
+- Total pitches thrown each start
+- Days between starts
+- Innings pitched trend
+
+Calculate fatigue score (0-100):
+High fatigue (score > 70):
+- Threw 110+ pitches last start
+- Less than 4 days rest
+- 3rd start in 12 days
+
+Low fatigue (score < 30):
+- Threw < 90 pitches last start  
+- 6+ days rest
+- Fresh after IL stint
+
+Apply to projection:
+High fatigue → +0.7 runs projected
+Low fatigue → -0.3 runs projected
+
+Show in alert:
+"💪 Fatiga pitcher:
+ Cole — Carga: BAJA ✅
+ Últimas salidas: 88, 92, 85 pitches
+ Descanso: 6 días
+ → Rendimiento óptimo esperado"
+
+OR:
+"😓 Fatiga pitcher:
+ Sale — Carga: ALTA ⚠️
+ Últimas salidas: 112, 108, 115 pitches  
+ → Puede salir temprano
+ → Bullpen factor aumentado"
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 2C — TRAVEL FATIGUE
+━━━━━━━━━━━━━━━━━━━━
+Track team travel schedule:
+
+Use MLB schedule to check:
+- Where was team playing yesterday?
+- How many time zones crossed?
+- Is this first game of road trip?
+
+Calculate travel impact:
+Cross 3+ time zones: -5% win prob
+Back-to-back road games: -3%
+First home game after long road: +3%
+Day game after night game: -4%
+
+Show in alert:
+"✈️ Factor viaje:
+ Red Sox: viajaron de LA a NY
+ (3 zonas horarias) anoche
+ → Fatiga de viaje: ⚠️
+ → Reduce probabilidad Red Sox -5%"
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 3A — PORTFOLIO OPTIMIZATION
+━━━━━━━━━━━━━━━━━━━━
+At end of each scan, optimize
+all picks as a portfolio:
+
+Max daily risk: 15% of bankroll
+Max per game: 5% of bankroll
+Max correlated bets: 2 (same sport)
+
+If too many picks found:
+Rank by EV and take top 3 only.
+Never bet more than 3 games same day
+unless all are PREMIUM level.
+
+Daily budget allocation:
+60% → Best pick of day
+25% → Second best pick
+15% → Third pick or parlay
+
+Show in daily card:
+"💼 PORTAFOLIO HOY:
+ Presupuesto total: $150
+ Pick 1 (60%): $90 UNDER Yankees
+ Pick 2 (25%): $37.50 Dodgers ML
+ Pick 3 (15%): $22.50 Parlay
+ ━━━━━━━━━━━
+ Ganancia esperada: +$31.50"
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 3B — BET TIMING OPTIMIZER
+━━━━━━━━━━━━━━━━━━━━
+Different bets have optimal times:
+
+TOTALS (Over/Under):
+Best time: 2-4 hours before game
+Why: Pitchers confirmed, weather clear
+Worst: Opening line (too uncertain)
+
+MONEYLINE:
+Best time: Opening line (Monday AM)
+Why: Sharp money moves it fast
+
+LIVE BETS:
+Best time: After 2nd inning
+Why: Pitchers showing true form
+
+STEAM MOVES:
+Best time: IMMEDIATELY (5 min max)
+Why: Lines move fast
+
+Add timing advice to each alert:
+"⏰ TIMING ÓPTIMO:
+ Este pick: apostar 2-4h antes
+ Juego: 7:05 PM ET
+ Ventana ideal: 3:00-5:00 PM ET
+ → Espera si ves antes de las 3 PM"
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 3C — CLV SYSTEMATIC TRACKING
+━━━━━━━━━━━━━━━━━━━━
+Enhance existing CLV system:
+
+Track for every bet:
+- Odds when we alerted
+- Odds at game time (closing)
+- CLV = closing - alert odds
+
+Calculate weekly:
+Positive CLV avg = model has real edge
+Negative CLV = getting bad lines
+
+Add to Sunday report:
+"📊 CLOSING LINE VALUE:
+ Esta semana:
+ CLV promedio: +4.2% ✅
+ Picks que ganaron al cierre: 73%
+ 
+ Mejor pick: UNDER Yankees +8.1% CLV
+ Peor pick: OVER Cubs -2.3% CLV
+ 
+ Conclusión: Modelo tiene edge real 💎"
+
+If CLV consistently negative:
+→ Alert: "⚠️ CLV negativo — 
+   apostando en mal momento.
+   Cambiar timing de apuestas."
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 4A — EXPAND TO 50+ BOOKS
+━━━━━━━━━━━━━━━━━━━━
+Current: ~15 books monitored
+Target: All available books in
+The Odds API
+
+Fetch all regions:
+&regions=us,us2,eu,uk,au
+
+This adds:
+UK books: Bet365, William Hill,
+Ladbrokes, Coral, SkyBet
+EU books: Unibet, Bwin, Betway
+AU books: Sportsbet, TAB, Neds
+
+Use for:
+- Better ARB detection (more books)
+- Better line shopping (top 5 not 3)
+- Pinnacle comparison
+
+⚠️ Flag non-US books as:
+"📍 Libro internacional —
+ verifica disponibilidad en tu región"
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 4B — FUTURES & SPECIAL PROPS
+━━━━━━━━━━━━━━━━━━━━
+Add futures analysis:
+
+MLB Futures:
+- Division winners
+- World Series winner
+- Cy Young / MVP odds
+
+World Cup Futures:
+- Tournament winner
+- Top scorer
+- Golden Boot
+
+Analyze value in futures:
+If our ELO model gives team
+higher probability than odds imply
+→ Alert future bet opportunity:
+
+"🏆 FUTURO CON VALOR:
+ España gana el Mundial
+ Nuestro modelo: 28% probabilidad
+ Bovada paga: +350 (22.2% implícito)
+ Edge: +5.8% EV
+ 💰 $30 en España campeón
+ Ganancia potencial: $135"
+
+━━━━━━━━━━━━━━━━━━━━
+NIVEL 4C — CROSS-GAME CORRELATIONS
+━━━━━━━━━━━━━━━━━━━━
+Detect patterns across multiple games:
+
+Weather correlations:
+If rain/cold in city →
+All games that city today → UNDER
+
+Pitcher domination days:
+If 3+ aces pitching same day →
+League-wide UNDER tendency
+
+Back-to-back series:
+Teams playing same opponent 3 days
+→ Familiarity factor affects model
+
+Alert when strong correlation:
+"🔗 CORRELACIÓN DETECTADA:
+ Hoy hay 4 juegos con ERA < 3.00
+ Históricamente: 68% Under días así
+ → Priorizar UNDER en todos los picks"
+
+━━━━━━━━━━━━━━━━━━━━
+IMPLEMENTATION RULES:
+━━━━━━━━━━━━━━━━━━━━
+- Each module wrapped in try/except
+- All cache daily to disk
+- All feed into Claude AI prompt
+- ML model only used if 100+ games
+- News monitor runs every scan
+- Portfolio optimizer runs after
+  all picks found each scan
+- Timing optimizer adds note to
+  every alert automatically
+- CLV tracked for every single bet
+- Correlations checked daily at 
+  noon ET before games start
+
+Add to Railway variables:
+TWITTER_BEARER_TOKEN = (optional)
+
+Commit after each level complete.
+Report which levels succeeded
+and which need attention.
