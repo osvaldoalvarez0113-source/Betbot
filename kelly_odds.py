@@ -21,7 +21,7 @@ except ImportError:
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 API_KEY           = os.environ.get("ODDS_API_KEY",       "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY",  "")
-CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-opus-4-5")
+CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 BANKROLL = 1000
 FRACTION = 0.25
 MIN_EDGE  = 2.0
@@ -1796,8 +1796,18 @@ def fetch_team_run_stats(team_name):
             if attempt < 3:
                 time.sleep(2)
 
+    # ── All retries exhausted — try yesterday's disk cache before giving up ──
+    yesterday = (datetime.now(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
+    yd_key    = f"run|{team_name}|{yesterday}"
+    if yd_key in _stats_disk_cache:
+        v = _stats_disk_cache[yd_key]
+        if v and v.get("rs_pg", 0) > 0 and v.get("ra_pg", 0) > 0:
+            print(f"  📦 [{team_name}] run stats: usando datos de ayer "
+                  f"RS={v['rs_pg']} RA={v['ra_pg']} (API devuelve ceros hoy)")
+            _team_run_cache[ck] = v
+            return v
     print(f"  ❌ fetch_team_run_stats [{team_name}] — 3 intentos fallidos. "
-          f"Último error: {last_err}. Usando fallback 4.5")
+          f"Último error: {last_err}. Sin caché de ayer. Usando fallback 4.5")
     _team_run_cache[ck] = None
     return None
 
@@ -4939,11 +4949,15 @@ def detect_line_movement(game_id, team, current, prev_map):
 # MODULE 4 — SHARP MONEY RADAR (enhanced)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map):
+def analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map, sport_key=""):
     """
-    Estimate sharp action by comparing line movement direction vs expected public side.
-    Public typically bets favorites. If underdog line shortens (odds fall), that's sharp.
-    Also flags any 5%+ relative move as sharp.
+    Detect reverse line movement (RLM):
+    - Underdog line shortens despite public money on favorite → sharp on underdog
+    - Favorite line drifts despite public backing → sharp fading favorite
+    - Any 5%+ raw move included as general sharp signal
+    Returns list of sharp dicts (empty list if none).
+    NOTE: Steam Detector (detect_steam_moves_for_game) handles multi-book confirmation.
+          This module adds single-game RLM / public-vs-line context.
     """
     sharps = []
     for team, current, opponent_odds in [(home, best_h, best_a), (away, best_a, best_h)]:
@@ -4957,10 +4971,10 @@ def analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map):
             continue
 
         is_underdog    = current > opponent_odds
-        line_shortened = pct_change < 0   # odds fell = more likely to win now
+        line_shortened = pct_change < 0   # odds fell = team more likely to win now
 
         if is_underdog and line_shortened:
-            public_pct = 35   # estimated: public rarely backs heavy underdogs
+            # RLM signal — public backs favorite, but underdog line tightening
             sharps.append({
                 "match":      f"{home} vs {away}",
                 "team":       team,
@@ -4968,11 +4982,12 @@ def analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map):
                 "pct":        round(abs(pct_change), 1),
                 "odds_prev":  prev,
                 "odds_now":   current,
-                "public_pct": public_pct,
+                "public_pct": 35,   # estimated public % on underdog
+                "sport":      sport_key,
+                "signal":     "RLM — underdog acortando contra el público",
             })
         elif not is_underdog and not line_shortened:
-            # Favorite drifting — sharp money going opposite
-            public_pct = 65
+            # Favorite drifting — sharp money going opposite direction to public
             sharps.append({
                 "match":      f"{home} vs {away}",
                 "team":       team,
@@ -4980,10 +4995,12 @@ def analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map):
                 "pct":        round(abs(pct_change), 1),
                 "odds_prev":  prev,
                 "odds_now":   current,
-                "public_pct": public_pct,
+                "public_pct": 65,   # estimated public % on favorite
+                "sport":      sport_key,
+                "signal":     "RLM — favorito alargando contra el público",
             })
         else:
-            # General large move
+            # General large move — no clear public/sharp divergence, still notable
             sharps.append({
                 "match":      f"{home} vs {away}",
                 "team":       team,
@@ -4992,6 +5009,8 @@ def analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map):
                 "odds_prev":  prev,
                 "odds_now":   current,
                 "public_pct": None,
+                "sport":      sport_key,
+                "signal":     f"Movimiento general {round(abs(pct_change),1)}%",
             })
     return sharps
 
@@ -5007,14 +5026,19 @@ def notify_sharp_money(sharp_moves):
         opp    = away if team == home else home
         arrow  = "▼" if m["odds_now"] < m["odds_prev"] else "▲"
 
+        signal = m.get("signal", "")
         if m.get("public_pct"):
             context_lines = (
-                f"👥 Público: ~{m['public_pct']}% en {opp}\n"
+                f"📡 {signal}\n"
+                f"👥 Público estimado: ~{m['public_pct']}% en {opp}\n"
                 f"⚠️  Pero línea se movió a favor de {team}\n"
-                f"💡 Sharps vs público → señal fuerte\n"
+                f"💡 RLM confirmado — sharps vs público\n"
             )
         else:
-            context_lines = f"📉 Línea {m['direction']} {m['pct']}% sin contexto público\n"
+            context_lines = (
+                f"📡 {signal}\n"
+                f"📉 Línea {m['direction']} {m['pct']}% sin divergencia pública clara\n"
+            )
 
         body = (
             f"{emoji} {m['match']}\n"
@@ -5301,8 +5325,47 @@ def check_results():
 # ── Module 4: MLB IL / injuries ───────────────────────────────────────────────
 _injury_cache: dict = {}
 
+# Key positions to show on IL — starters and ace pitchers only; skip relievers/utility
+_KEY_IL_POSITIONS = {"SP", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH"}
+
+def _fetch_espn_injuries(team_name: str) -> list:
+    """
+    Secondary IL source: ESPN injuries API.
+    Returns list of player name strings for KEY positions only.
+    """
+    try:
+        tid = _fetch_espn_mlb_team_id(team_name)
+        if not tid:
+            return []
+        r = requests.get(
+            f"http://site.api.espn.com/apis/site/v2/sports/baseball/mlb"
+            f"/teams/{tid}/injuries",
+            timeout=8,
+        )
+        if r.status_code != 200:
+            return []
+        players = []
+        for inj in r.json().get("injuries", []):
+            athlete = inj.get("athlete", {})
+            name    = athlete.get("displayName", "")
+            pos_ab  = athlete.get("position", {}).get("abbreviation", "")
+            if name and pos_ab in _KEY_IL_POSITIONS:
+                players.append(name)
+        return players
+    except Exception:
+        return []
+
 def fetch_mlb_il(home, away):
-    """Return {team_name: [player_names]} for IL players on both teams today."""
+    """
+    Return {team_name: [player_names]} for KEY IL players on both teams.
+    KEY = SP (starting pitchers) + regular lineup positions (C/1B/2B/3B/SS/LF/CF/RF/DH).
+    Relievers (RP/CL/MR) and utility bench players are silently skipped.
+
+    Primary  : MLB Stats API /teams/{tid}/roster?rosterType=injured (with position filter)
+    Secondary: ESPN injuries API (merged + deduplicated)
+    Cache    : per team pair per day.
+    If both sources fail → returns {} (show nothing, not wrong data).
+    """
     today_str = datetime.now(ET).strftime("%Y-%m-%d")
     cache_key = f"{home}|{away}|{today_str}"
     if cache_key in _injury_cache:
@@ -5310,6 +5373,8 @@ def fetch_mlb_il(home, away):
     result = {}
     for tname in (home, away):
         try:
+            # ── Primary: MLB Stats API ─────────────────────────────────────
+            tid = None
             if HAS_STATSAPI:
                 teams = statsapi.lookup_team(tname)
                 tid   = teams[0]["id"] if teams else None
@@ -5317,15 +5382,34 @@ def fetch_mlb_il(home, away):
                 data  = _mlb_rest("/teams", {"name": tname, "sportId": 1})
                 teams = data.get("teams", [])
                 tid   = teams[0]["id"] if teams else None
-            if tid is None:
-                continue
-            roster  = _mlb_rest(f"/teams/{tid}/roster", {"rosterType": "injured"})
-            players = [p.get("person", {}).get("fullName", "")
-                       for p in roster.get("roster", [])]
-            if players:
-                result[tname] = players
-        except Exception:
-            pass
+
+            mlb_players = []
+            if tid is not None:
+                roster = _mlb_rest(f"/teams/{tid}/roster",
+                                   {"rosterType": "injured", "season": MLB_YEAR})
+                for p in roster.get("roster", []):
+                    name   = p.get("person", {}).get("fullName", "")
+                    pos_ab = p.get("position", {}).get("abbreviation", "")
+                    if name and pos_ab in _KEY_IL_POSITIONS:
+                        mlb_players.append(name)
+
+            # ── Secondary: ESPN injuries API ───────────────────────────────
+            espn_players = _fetch_espn_injuries(tname)
+
+            # Merge + deduplicate (case-insensitive; MLB Stats names take priority)
+            seen   = {n.lower() for n in mlb_players}
+            merged = list(mlb_players)
+            for ep in espn_players:
+                if ep.lower() not in seen:
+                    merged.append(ep)
+                    seen.add(ep.lower())
+
+            if merged:
+                result[tname] = merged
+                print(f"  🤕 IL [{tname}]: {', '.join(merged[:5])}"
+                      f"{'...' if len(merged) > 5 else ''}")
+        except Exception as _e:
+            print(f"  ⚠️  fetch_mlb_il [{tname}]: {_e}")
     _injury_cache[cache_key] = result
     return result
 
@@ -5458,6 +5542,19 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
         v = _stats_disk_cache[dk]
         _splits_cache[ck] = v
         return v
+
+    # 3. Before noon ET — MLB homeAndAway endpoint is often empty in the morning;
+    #    yesterday's splits are still valid (team tendencies change slowly)
+    if datetime.now(ET).hour < 12:
+        yesterday = (datetime.now(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
+        yd_key    = f"splits|{team_name}|{yesterday}"
+        if yd_key in _stats_disk_cache:
+            v = _stats_disk_cache[yd_key]
+            if v:
+                _splits_cache[ck] = v
+                print(f"  📦 [{team_name}] splits: usando datos de ayer "
+                      f"(antes del mediodía — evitando llamada vacía)")
+                return v
 
     last_err = None
     for attempt in range(1, 4):
@@ -7021,9 +7118,9 @@ def analyze(games, prev_map, new_map, sport_key=""):
         if bov_odds_a is not None:
             best_bk_a = "Bovada"
 
-        # Sharp money radar check
+        # Sharp money radar check (RLM detection)
         sharp_moves.extend(
-            analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map)
+            analyze_sharp_money(game_id, home, away, best_h, best_a, prev_map, sport_key)
         )
 
         # Steam move detection (per-book tracking written into new_map)
@@ -7661,10 +7758,11 @@ def build_daily_card(sport_key: str) -> str:
             }
         all_results.append(res)
 
-    # ── Full analysis with Claude for EV >= EV_MIN_PCT games ────────────
+    # ── Full analysis with Claude for IMPERDIBLES + TIENEN VALOR tier ──────
+    # Threshold = 4.0 (TIENEN VALOR gate); skip Claude for BORDERLINE (EV 2-4%)
     claude_results: dict = {}
     for res in all_results:
-        if res["best_ev"] < EV_MIN_PCT:
+        if res["best_ev"] < 4.0:
             continue
         match = res["match"]
         for g in today_games:
