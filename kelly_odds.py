@@ -180,6 +180,25 @@ PREFERRED_BOOKS = {"bovada", "bodog"}
 # Target arb pair — both US-accessible from same regions
 ARB_BOOK_PAIR   = {"bovada", "bodog", "betonline.ag"}
 
+# ── US-only book whitelist (picks must come from one of these) ────────────────
+# International books (TAB, Winamax, Betsson, Paddy Power, etc.) are excluded
+# because they are not legally accessible in the US and their odds are unreliable.
+US_BOOKS_ONLY = {
+    "bovada", "bodog",
+    "betonline", "betonline.ag",
+    "fanduel",
+    "draftkings",
+    "mybookie",
+    "caesars",
+    "betmgm",
+    "pointsbet",
+}
+
+def _is_us_book(title: str) -> bool:
+    """Return True only if the bookmaker is on the US-only whitelist."""
+    t = (title or "").lower()
+    return any(us in t for us in US_BOOKS_ONLY)
+
 OPENWEATHER_KEY   = os.environ.get("OPENWEATHER_API_KEY", "")
 BANKROLL_LOG_FILE  = "bankroll_log.csv"
 CLV_LOG_FILE       = "clv_log.csv"
@@ -2925,11 +2944,14 @@ def wind_run_adj(wind):
 def get_book_total(game):
     """
     Extract totals line + odds from a game's bookmaker list.
-    Prefers Bovada/Bodog; falls back to first available.
+    Only considers US-licensed books (US_BOOKS_ONLY whitelist).
+    Prefers Bovada/Bodog; falls back to any other US book.
     Returns (line, over_odds, under_odds, bookmaker_name) or None.
     """
     preferred, fallback = None, None
     for bk in game.get("bookmakers", []):
+        if not _is_us_book(bk["title"]):
+            continue   # skip non-US books entirely
         is_pref = bk["title"].lower() in PREFERRED_BOOKS
         for m in bk.get("markets", []):
             if m["key"] == "totals":
@@ -3612,6 +3634,7 @@ def notify_totals(total_bets):
             _sw = b.get("stake_warn", "")
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            action += "\n💡 SUGERIDO — responde 'aposté' para registrar"
             if _sw:
                 action += f"\n{_sw}"
             # Build adjustment breakdown lines (Modules A9–A11)
@@ -3666,6 +3689,7 @@ def notify_totals(total_bets):
             _sw = b.get("stake_warn", "")
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            action += "\n💡 SUGERIDO — responde 'aposté' para registrar"
             if _sw:
                 action += f"\n{_sw}"
             form_h = b.get("form_home", "")
@@ -3738,9 +3762,11 @@ def notify_totals(total_bets):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _extract_h2h_best(game):
-    """Best decimal odds per outcome name across all books. Returns {name: (price, book)}."""
+    """Best decimal odds per outcome name across US-only books. Returns {name: (price, book)}."""
     best = {}
     for bk in game.get("bookmakers", []):
+        if not _is_us_book(bk["title"]):
+            continue   # skip non-US international books
         for m in bk.get("markets", []):
             if m["key"] == "h2h":
                 for o in m.get("outcomes", []):
@@ -4244,6 +4270,10 @@ def analyze_game_full(game, sport_key, prev_map=None):
             if team not in h2h_odds:
                 continue
             odds, book = h2h_odds[team]
+            # Fix 4: MLB moneyline sanity check — skip data-error odds
+            if is_mlb and odds > 5.0:
+                print(f"   ⚠️  MLB ODDS CAP: {lbl} @ {odds:.2f} > 5.0 — dato erróneo, omitido")
+                continue
             ev = (true_p * odds - 1) * 100
             r  = kelly_stake(true_p, odds)
             _all_evs.append((lbl, round(ev, 1)))
@@ -4254,7 +4284,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
                     continue
                 candidates.append({"label": lbl, "true_prob": true_p, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
-                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"],
+                                   "stake_warn": r.get("stake_warn", "")})
 
         # Totals
         _pitch_notes   = []
@@ -6257,15 +6288,29 @@ def notify_sharp_money(sharp_moves):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── Module 3: book safety ─────────────────────────────────────────────────────
+# SAFE = US-licensed books the user can actually access and trust
 SAFE_BOOKS = {
-    "bovada", "bodog", "fanduel", "draftkings", "mybookie",
-    "pointsbet", "caesars", "betmgm", "unibet",
-    "williamhill", "william hill", "pinnacle",
-    "betonline.ag", "betonline",
+    "bovada", "bodog",
+    "betonline", "betonline.ag",
+    "fanduel",
+    "draftkings",
+    "mybookie",
+    "caesars",
+    "betmgm",
+    "pointsbet",
 }
+# RISKY = international books not accessible in the US or known to limit winners
 RISKY_BOOKS = {
-    "1xbet", "gtbets", "betfred", "smarkets", "ladbrokes", "betway",
-    "everygame", "betvictor", "cloudbet", "stake",
+    # explicitly banned by user
+    "tab", "winamax", "betsson", "nordic bet", "nordicbet",
+    "paddy power", "paddypower", "boyle sports", "boylesports",
+    "everygame", "smarkets", "betvictor", "bet victor",
+    "unibet",
+    # additional known-risky international books
+    "1xbet", "gtbets", "betfred", "ladbrokes", "betway",
+    "cloudbet", "stake", "bet365",
+    "william hill", "williamhill",
+    "pinnacle",   # sharp book; US users typically can't deposit
 }
 
 def _book_warning(bookmaker):
@@ -8404,6 +8449,8 @@ def analyze(games, prev_map, new_map, sport_key=""):
         best_bk_h = best_bk_a = ""
         bov_odds_h = bov_odds_a = None   # Bovada/Bodog specific odds
         for bk in bookmakers:
+            if not _is_us_book(bk["title"]):
+                continue   # skip all non-US international books
             is_preferred = bk["title"].lower() in PREFERRED_BOOKS
             for m in bk.get("markets", []):
                 if m["key"] == "h2h":
@@ -8426,6 +8473,16 @@ def analyze(games, prev_map, new_map, sport_key=""):
 
         if not odds_h or not odds_a:
             continue
+
+        # Fix 4: MLB odds sanity cap — skip any pick where best odds > 5.0
+        # (14.0, 16.0, 30.0+ are data errors; no MLB team is a 30:1 underdog)
+        MLB_MAX_ODDS = 5.0
+        if "baseball_mlb" in sport_key:
+            if max(odds_h) > MLB_MAX_ODDS or max(odds_a) > MLB_MAX_ODDS:
+                bad_h = max(odds_h) > MLB_MAX_ODDS
+                print(f"  ⚠️  MLB ODDS CAP: {home if bad_h else away} "
+                      f"@ {max(odds_h) if bad_h else max(odds_a):.2f} > {MLB_MAX_ODDS} — dato erróneo, juego omitido")
+                continue   # skip this game entirely — data error
 
         best_h, best_a = max(odds_h), max(odds_a)
         avg_h  = sum(odds_h) / len(odds_h)
@@ -8558,6 +8615,7 @@ def notify_bets(new_bets):
             _sw = b.get("stake_warn", "")
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            action += "\n💡 SUGERIDO — responde 'aposté' para registrar"
             if _sw:
                 action += f"\n{_sw}"
             l1 = (
@@ -8588,6 +8646,7 @@ def notify_bets(new_bets):
             _sw = b.get("stake_warn", "")
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            action += "\n💡 SUGERIDO — responde 'aposté' para registrar"
             if _sw:
                 action += f"\n{_sw}"
             l1 = (
