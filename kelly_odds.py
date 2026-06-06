@@ -3590,12 +3590,15 @@ def analyze_totals(games, sport_key):
         if _tc_claude and _tc_claude.get("apostar", True):
             print(f"   ✅ TOTALS PICK: {bet_side} {book_line}  edge={edge_val:.1f}")
 
+        _tot_ev_pct = round((true_prob * bet_odds - 1) * 100, 1)
+        _tot_ev_d   = round(r["stake"] * _tot_ev_pct / 100, 2)
         total_bets.append({
             "match":        f"{home} vs {away}",
             "team":         bet_side,
             "side":         str(book_line),
             "odds":         bet_odds,
             "edge":         edge_val,
+            "ev_pct":       _tot_ev_pct,
             "stake":        r["stake"],
             "kelly_pct":    r["kelly_pct"],
             "confidence":   conf,
@@ -3607,8 +3610,8 @@ def analyze_totals(games, sport_key):
             "bookmaker":    bookmaker,
             "market_type":  "totals",
             "closing_edge": "",
-            "ev":           0,
-            "roi":          0,
+            "ev":           _tot_ev_d,
+            "roi":          round(_tot_ev_d / BANKROLL * 100, 3),
             "value_pct":    0,
             "elo_prob":     0,
             "bovada_odds":  None,
@@ -8587,12 +8590,14 @@ def analyze(games, prev_map, new_map, sport_key=""):
             val_pct = value_percentage(prob, best_odd)
             elo_p   = elo_win_prob(team, away if team == home else home)
 
+            ev_pct_val = round((prob * best_odd - 1) * 100, 1)
             bets.append({
                 "match":        f"{home} vs {away}",
                 "team":         team,
                 "side":         side,
                 "odds":         best_odd,
                 "edge":         r["edge"],
+                "ev_pct":       ev_pct_val,
                 "stake":        r["stake"],
                 "kelly_pct":    r["kelly_pct"],
                 "confidence":   confidence_level(r["edge"]),
