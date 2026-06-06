@@ -25,7 +25,13 @@ CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
 BANKROLL = 1000
 FRACTION = 0.25
 MIN_EDGE  = 2.0
-MIN_STAKE         = 10.00   # Module 7: never alert if Kelly stake < $10
+MIN_STAKE            = 10.00  # never alert if Kelly stake < $10
+MIN_BET              = 10.00  # hard floor — identical to MIN_STAKE
+MAX_SINGLE_BET_PCT   = 0.05   # hard cap: 5% of bankroll per single bet
+MAX_DAILY_EXPO_PCT   = 0.15   # hard cap: 15% of bankroll queued per day
+PROB_CAP             = 0.80   # max single-bet prob; anything higher → cap at 75%
+PROB_CAP_CEIL        = 0.75   # value used after capping (realistic MLB ceiling)
+PROB_CAP_PARLAY      = 0.75   # max probability for any parlay leg
 PREMIUM_MULT      = 1.5     # Module P: stake multiplier for PREMIUM alerts
 PREMIUM_MAX_STAKE = 100.0   # Module P: max PREMIUM bet size ($)
 INTERVAL  = 600       # 10-minute main scan (API limit-friendly)
@@ -236,6 +242,8 @@ _last_news_seen:  set  = set()    # 1C: news IDs already alerted this session
 _last_news_date:  date = date(2000, 1, 1)  # 1C: reset seen set daily
 _steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
 _ntfy_last_confirm_id: str = ""  # last ntfy message ID processed for confirmations
+_daily_exposure:      float = 0.0            # total stake queued today ($)
+_daily_exposure_date: "date" = date(2000, 1, 1)  # reset tracking when date changes
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
 _wc_form_cache: dict = {}       # (team_name, date_str) → {goals_for, goals_against, matches}
@@ -340,18 +348,54 @@ def remove_vig(odds_list):
     total   = sum(implied)
     return [p / total for p in implied]
 
-def kelly_stake(prob, fair_odd):
+def _cap_prob(p: float, is_parlay_leg: bool = False) -> float:
+    """
+    Cap unrealistically high probabilities before they inflate Kelly stakes.
+    MLB / soccer single bets: hard max 80%; if exceeded, clamp to 75%.
+    Parlay legs: hard max 75%.
+    Logs a warning whenever capping occurs so it shows up in Railway logs.
+    """
+    cap_check = PROB_CAP_PARLAY if is_parlay_leg else PROB_CAP
+    cap_value = PROB_CAP_PARLAY if is_parlay_leg else PROB_CAP_CEIL
+    if p > cap_check:
+        print(f"  ⚠️  PROB CAP: {p*100:.1f}% → {cap_value*100:.0f}%"
+              f" ({'parlay leg' if is_parlay_leg else 'single bet'}) — inflated probability clamped")
+        return cap_value
+    return p
+
+
+def kelly_stake(prob, fair_odd, is_parlay_leg: bool = False):
+    """
+    Returns Kelly stake dict with hard bankroll-rule enforcement:
+      • probability capped at PROB_CAP / PROB_CAP_PARLAY before any calculation
+      • final stake hard-capped at MAX_SINGLE_BET_PCT (5%) of BANKROLL
+      • stake below MIN_BET ($10) → zeroed out (no bet)
+      • stake_warn populated when the 5% cap was applied (shown in ntfy alert)
+    """
+    prob = _cap_prob(prob, is_parlay_leg)
     b = fair_odd - 1
     if b <= 0:
-        return {"stake": 0, "edge": 0, "has_value": False, "kelly_pct": 0}
-    k     = max(0.0, (b * prob - (1 - prob)) / b)
-    edge  = prob - 1.0 / fair_odd
-    stake = BANKROLL * min(k * FRACTION, 0.05) * _bankroll_mult * _kelly_monthly_mult
+        return {"stake": 0, "edge": 0, "has_value": False, "kelly_pct": 0, "stake_warn": ""}
+    k         = max(0.0, (b * prob - (1 - prob)) / b)
+    edge      = prob - 1.0 / fair_odd
+    max_stake = BANKROLL * MAX_SINGLE_BET_PCT               # absolute hard cap ($50 at $1000 BR)
+    raw       = BANKROLL * min(k * FRACTION, MAX_SINGLE_BET_PCT) * _bankroll_mult * _kelly_monthly_mult
+    # Apply absolute cap AFTER multipliers (multipliers can push beyond 5%)
+    stake_warn = ""
+    if raw > max_stake:
+        raw        = max_stake
+        stake_warn = f"⚠️ Stake reducido al {int(MAX_SINGLE_BET_PCT*100)}% máximo por reglas de bankroll"
+        print(f"  ⚠️  STAKE CAP applied: ${raw:.2f} (multipliers pushed above {MAX_SINGLE_BET_PCT*100:.0f}%)")
+    # Below minimum → no bet
+    if raw < MIN_BET and raw > 0:
+        raw = 0
+    stake = round(raw, 2)
     return {
-        "stake":     round(stake, 2),
-        "edge":      round(edge * 100, 2),
-        "has_value": edge > 0.02,
-        "kelly_pct": round(k * FRACTION * 100, 2),
+        "stake":      stake,
+        "edge":       round(edge * 100, 2),
+        "has_value":  edge > 0.02,
+        "kelly_pct":  round(k * FRACTION * 100, 2),
+        "stake_warn": stake_warn,
     }
 
 def confidence_level(edge_pct):
@@ -3565,8 +3609,11 @@ def notify_totals(total_bets):
             wind_line = f"💨 {wind}\n" if wind and wind != "Wind: N/A" else ""
             is_high = b["confidence"] == "HIGH"
             half_stake = round(b["stake"] / 2, 2)
+            _sw = b.get("stake_warn", "")
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            if _sw:
+                action += f"\n{_sw}"
             # Build adjustment breakdown lines (Modules A9–A11)
             base_p  = b.get("base_proj", b["our_line"])
             park_n  = (b.get("park_tend_note") or "").strip()
@@ -3616,8 +3663,11 @@ def notify_totals(total_bets):
             # ── Soccer / other sports ─────────────────────────────────────
             is_high    = b["confidence"] == "HIGH"
             half_stake = round(b["stake"] / 2, 2)
+            _sw = b.get("stake_warn", "")
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            if _sw:
+                action += f"\n{_sw}"
             form_h = b.get("form_home", "")
             form_a = b.get("form_away", "")
             form_block = ""
@@ -5533,19 +5583,66 @@ def queue_for_confirmation(bets: list, sport_key: str) -> None:
     """
     Replace log_bets() in the main scan loop.
     Each detected pick is queued for user confirmation instead of logged directly.
+
+    Hard bankroll guards applied here:
+      • MAX_DAILY_EXPO_PCT (15%): if adding a pick's stake would exceed today's
+        daily exposure limit, the pick is skipped with a warning ntfy alert.
+      • Daily exposure resets at midnight (CDT date change).
     """
+    global _daily_exposure, _daily_exposure_date
     if not bets:
         return
+
+    # Reset daily exposure counter on a new calendar day
+    today = datetime.now(CDT).date()
+    if today != _daily_exposure_date:
+        _daily_exposure      = 0.0
+        _daily_exposure_date = today
+
+    max_daily = BANKROLL * MAX_DAILY_EXPO_PCT   # e.g. $150 at $1000 bankroll
+
     queue = _load_confirm_queue()
     now   = datetime.now(CDT).strftime("%Y-%m-%d %H:%M CDT")
+    queued_count = 0
+
     for b in bets:
+        stake = float(b.get("stake", 0))
+
+        # ── Daily exposure hard cap ──────────────────────────────────────
+        if _daily_exposure + stake > max_daily:
+            remaining = round(max_daily - _daily_exposure, 2)
+            match_disp = b.get("match", "?")
+            team_disp  = b.get("team", b.get("label", "?"))
+            print(f"  🚫 DAILY CAP: {match_disp} → {team_disp} "
+                  f"(exposición ${_daily_exposure:.0f}/${max_daily:.0f}) — pick omitido")
+            ntfy_post(
+                "🚫 Límite diario alcanzado",
+                _two_layer_body(
+                    f"🚫 PICK BLOQUEADO — LÍMITE DIARIO\n"
+                    f"🎯 {match_disp} → {team_disp}\n"
+                    f"Exposición hoy: ${_daily_exposure:.0f} / ${max_daily:.0f} (15% bankroll)\n"
+                    f"Margen disponible: ${remaining}",
+                    f"El bot bloqueó este pick porque apostar ${stake} llevaría\n"
+                    f"la exposición diaria al {MAX_DAILY_EXPO_PCT*100:.0f}% del bankroll.\n\n"
+                    "Regla de bankroll: máximo 15% del bankroll en juego por día.\n"
+                    "El bot retomará picks cuando termine algún juego de hoy.",
+                ),
+                "default",
+            )
+            continue   # skip this pick — do NOT queue it
+
         entry = dict(b)
         entry["_sport_key"]  = sport_key
         entry["_queued_at"]  = now
         entry["_status"]     = "pending"
         queue.append(entry)
-    _save_confirm_queue(queue)
-    print(f"  📋 {len(bets)} pick(s) en cola de confirmación ({CONFIRM_FILE})")
+        _daily_exposure += stake
+        queued_count    += 1
+
+    if queued_count:
+        _save_confirm_queue(queue)
+        print(f"  📋 {queued_count} pick(s) en cola de confirmación "
+              f"(exposición hoy: ${_daily_exposure:.0f}/${max_daily:.0f})")
 
 
 def _confirm_bet(entry: dict) -> None:
@@ -8458,8 +8555,11 @@ def notify_bets(new_bets):
             impl_pct  = round(100 / b["odds"], 1) if b["odds"] else 0
             is_high   = b["edge"] >= 5.0 and elo_p >= 60
             half_stake = round(b["stake"] / 2, 2)
+            _sw = b.get("stake_warn", "")
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            if _sw:
+                action += f"\n{_sw}"
             l1 = (
                 f"🎯 {match_es}\n"
                 f"⏰ Hoy {gt} ET\n"
@@ -8485,8 +8585,11 @@ def notify_bets(new_bets):
             impl_pct   = round(100 / b["odds"], 1) if b["odds"] else 0
             is_high    = b["edge"] >= 5.0 and elo_p >= 60
             half_stake = round(b["stake"] / 2, 2)
+            _sw = b.get("stake_warn", "")
             action = (f"🟢 APOSTAR: ${b['stake']}" if is_high
                       else f"🟡 APOSTAR MITAD: ${half_stake}")
+            if _sw:
+                action += f"\n{_sw}"
             l1 = (
                 f"🎯 {match_es}\n"
                 f"⏰ Hoy {gt} ET\n"
