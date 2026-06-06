@@ -5649,6 +5649,68 @@ def _save_confirm_queue(queue: list) -> None:
         print(f"  ⚠️  confirm_queue save error: {e}")
 
 
+def _notify_simple_picks(bets: list) -> None:
+    """Send one clean ntfy alert per pick. No stakes, no portfolio, no limits."""
+    for b in bets:
+        try:
+            match = b.get("match", "?")
+            team  = b.get("team", b.get("label", "?"))
+            edge  = float(b.get("edge", b.get("ev_pct", 0)))
+            odds  = float(b.get("odds", 0))
+            book  = b.get("bookmaker", b.get("book", "?"))
+            # strip emoji prefixes
+            pick_clean = (team.replace("🔵 ", "").replace("🔴 ", "")
+                              .replace("📈 ", "").replace("📉 ", "")
+                              .replace("🏃 ", "").replace("🤝 ", ""))
+            # totals: add line to pick label
+            side = str(b.get("side", ""))
+            if side and side not in pick_clean:
+                pick_clean = f"{pick_clean} {side}"
+            conf_line = "🟢 ALTA" if edge >= 5.0 else "🟡 MEDIA"
+            body = (
+                f"Pick: {pick_clean}\n"
+                f"Edge: +{edge:.1f}%\n"
+                f"Cuota: {odds:.2f} — {book}\n"
+                f"Confianza: {conf_line}"
+            )
+            priority = "high" if edge >= 5.0 else "default"
+            ntfy_post(f"🎯 {match}", body, priority)
+            print(f"  📲 Alerta enviada: {match} | {pick_clean} | Edge:{edge:.1f}%")
+        except Exception as e:
+            print(f"  ⚠️  simple pick alert error: {e}")
+
+
+def _notify_simple_analyses(full_analyses: list) -> None:
+    """Send clean pick alert for each full-analysis game that has a qualifying pick."""
+    for a in full_analyses:
+        try:
+            candidates = a.get("candidates", [])
+            if not candidates:
+                continue
+            best = max(candidates, key=lambda c: c.get("ev_pct", 0))
+            edge = float(best.get("ev_pct", 0))
+            if edge < MIN_EDGE:
+                continue
+            match = a.get("match", "?")
+            label = best.get("label", "?")
+            pick_clean = (label.replace("🔵 ", "").replace("🔴 ", "")
+                               .replace("📈 ", "").replace("📉 ", ""))
+            odds  = float(best.get("odds", 0))
+            book  = best.get("book", "?")
+            conf_line = "🟢 ALTA" if edge >= 5.0 else "🟡 MEDIA"
+            body = (
+                f"Pick: {pick_clean}\n"
+                f"Edge: +{edge:.1f}%\n"
+                f"Cuota: {odds:.2f} — {book}\n"
+                f"Confianza: {conf_line}"
+            )
+            priority = "high" if edge >= 5.0 else "default"
+            ntfy_post(f"🎯 {match}", body, priority)
+            print(f"  📲 Análisis completo: {match} | {pick_clean} | Edge:{edge:.1f}%")
+        except Exception as e:
+            print(f"  ⚠️  simple analysis alert error: {e}")
+
+
 def _github_pull_daily_exposure() -> dict | None:
     """
     Fetch daily_exposure.json from GitHub via REST API.
@@ -11479,23 +11541,16 @@ def run_scan():
             if bets:
                 print(f"\n  ✅ {short} — {len(bets)} value bet(s):")
                 for b in bets:
-                    mv = f" [LINE {b['line_dir']}{b['line_delta']}]" if b["line_moved"] else ""
-                    print(f"    [{b['confidence']}]{mv} {b['match']} → "
-                          f"{b['team']} @{b['odds']} | Edge:{b['edge']}% | "
-                          f"EV:${b['ev']} | Book:{b['bookmaker']}")
-                # Queue for user confirmation — never auto-log
-                queue_for_confirmation(bets, short)
+                    print(f"    {b['match']} → {b['team']} @{b['odds']} | Edge:{b['edge']}%")
+                _notify_simple_picks(bets)
                 all_bets.extend(bets)
-                daily_bets.extend(bets)
             else:
                 print(f"  ❌ {short} — no ML value")
 
             if total_bets:
                 print(f"  🎯 {short} — {len(total_bets)} totals bet(s):")
-                # Queue for user confirmation — never auto-log
-                queue_for_confirmation(total_bets, short)
+                _notify_simple_picks(total_bets)
                 all_totals.extend(total_bets)
-                daily_bets.extend(total_bets)
             else:
                 print(f"  ❌ {short} — no totals value")
 
@@ -11513,7 +11568,7 @@ def run_scan():
 
             if full_analyses:
                 print(f"  🔍 {short} — {len(full_analyses)} full analysis(es)")
-                notify_game_analysis(full_analyses, sport_key)
+                _notify_simple_analyses(full_analyses)
                 all_full_analyses.extend(full_analyses)  # parlay collector
 
         except Exception as e:
@@ -11528,51 +11583,13 @@ def run_scan():
     except Exception:
         pass
 
-    # Level 3A: portfolio optimization — combine all picks and show budget
-    try:
-        _all_scan_picks = list(all_bets) + list(all_totals)
-        if _all_scan_picks:
-            _port = _portfolio_optimize(_all_scan_picks)
-            if _port:
-                print(f"\n{_port}")
-                ntfy_post("💼 Portafolio del Día", _port, "default")
-    except Exception as _poe:
-        print(f"  ⚠️  Portfolio error: {_poe}")
+    # Module P: PREMIUM alerts removed (stakes/portfolio disabled)
 
     # Level 4B: futures value check (runs once per day)
     try:
         _analyze_and_alert_futures()
     except Exception as _fbe:
         print(f"  ⚠️  Futures check error: {_fbe}")
-
-    # Level 4C: cross-game correlations — ace day, weather patterns
-    try:
-        _check_cross_game_correlations(all_full_analyses)
-    except Exception as _cce:
-        print(f"  ⚠️  Correlations check error: {_cce}")
-
-    if all_bets:
-        notify_bets(all_bets)
-    if all_totals:
-        notify_totals(all_totals)
-    if all_sharp:
-        notify_sharp_money(all_sharp)
-    if all_steams:
-        notify_steam_moves(all_steams)
-    if all_arbs:
-        notify_arbitrage(all_arbs)
-
-    # Parlay detector — runs once after all sports are processed
-    try:
-        detect_and_notify_parlays(all_full_analyses)
-    except Exception as _pe:
-        print(f"  ⚠️  Parlay detector error: {_pe}")
-
-    # Sync daily exposure to GitHub once per scan (survives Railway redeploys)
-    try:
-        _github_push_daily_exposure()
-    except Exception as _ghe:
-        print(f"  ⚠️  GitHub exposure sync error: {_ghe}")
 
     # Live betting scan — runs after pre-game analysis each cycle
     try:
@@ -11615,7 +11632,6 @@ if __name__ == "__main__":
     print("🤖 BetBot Pro — starting...")
     scan = 1
     _load_stats_disk_cache()  # load persistent stats cache (survives Railway restarts)
-    _daily_exposure, _daily_exposure_date = _load_daily_exposure()  # restore today's exposure
     compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
     try:
         _check_pinnacle_availability()   # Module 11: verify Pinnacle in Odds API plan
