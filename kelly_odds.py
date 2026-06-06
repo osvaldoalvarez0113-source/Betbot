@@ -178,6 +178,7 @@ OPENWEATHER_KEY   = os.environ.get("OPENWEATHER_API_KEY", "")
 BANKROLL_LOG_FILE  = "bankroll_log.csv"
 CLV_LOG_FILE       = "clv_log.csv"
 PENDING_BETS_FILE  = "pending_bets.json"
+CONFIRM_FILE       = "pending_confirm.json"   # bets awaiting user confirmation
 _LINE_HISTORY_FILE = "line_history.json"   # 1B: multi-scan totals line tracker
 
 # MLB ballpark coordinates — used for wind fetching (home team → (city, lat, lon))
@@ -234,6 +235,7 @@ _line_history:    dict = {}       # 1B: game_id → [{time, total, ml_home, ml_a
 _last_news_seen:  set  = set()    # 1C: news IDs already alerted this session
 _last_news_date:  date = date(2000, 1, 1)  # 1C: reset seen set daily
 _steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
+_ntfy_last_confirm_id: str = ""  # last ntfy message ID processed for confirmations
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
 _wc_form_cache: dict = {}       # (team_name, date_str) → {goals_for, goals_against, matches}
@@ -3678,7 +3680,7 @@ def notify_totals(total_bets):
 
         ntfy_post(title, body, priority)
         alerted_bets.add(key)
-        save_pending_bet(b)
+        # Do NOT auto-log — user must confirm via ntfy "aposté" command
         print(f"    🎯 {side} {line} {b['match']} | Our:{b['our_line']} | Edge:{b['edge']} {unit}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5501,6 +5503,302 @@ def save_pending_bet(bet):
             json.dump(pending, f, indent=2)
     except Exception:
         pass
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIRMATION SYSTEM
+# Bets are queued in pending_confirm.json after every alert.
+# Only after the user replies "aposté" or "bet placed" to the ntfy topic
+# does the bot move the bet into bets_log.csv and pending_bets.json.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_confirm_queue() -> list:
+    if not os.path.exists(CONFIRM_FILE):
+        return []
+    try:
+        with open(CONFIRM_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_confirm_queue(queue: list) -> None:
+    try:
+        with open(CONFIRM_FILE, "w") as f:
+            json.dump(queue, f, indent=2)
+    except Exception as e:
+        print(f"  ⚠️  confirm_queue save error: {e}")
+
+
+def queue_for_confirmation(bets: list, sport_key: str) -> None:
+    """
+    Replace log_bets() in the main scan loop.
+    Each detected pick is queued for user confirmation instead of logged directly.
+    """
+    if not bets:
+        return
+    queue = _load_confirm_queue()
+    now   = datetime.now(CDT).strftime("%Y-%m-%d %H:%M CDT")
+    for b in bets:
+        entry = dict(b)
+        entry["_sport_key"]  = sport_key
+        entry["_queued_at"]  = now
+        entry["_status"]     = "pending"
+        queue.append(entry)
+    _save_confirm_queue(queue)
+    print(f"  📋 {len(bets)} pick(s) en cola de confirmación ({CONFIRM_FILE})")
+
+
+def _confirm_bet(entry: dict) -> None:
+    """
+    Promote one queued bet entry into bets_log.csv and pending_bets.json.
+    Called when user confirms via ntfy.
+    """
+    sport_key = entry.pop("_sport_key", "")
+    entry.pop("_queued_at", None)
+    entry.pop("_status", None)
+
+    # Write to bets_log.csv (the permanent record)
+    try:
+        log_bets([entry], sport_key)
+    except Exception as e:
+        print(f"  ⚠️  log_bets in confirm: {e}")
+
+    # Write to pending_bets.json (for CLV closing-line tracking)
+    try:
+        save_pending_bet(entry)
+    except Exception as e:
+        print(f"  ⚠️  save_pending_bet in confirm: {e}")
+
+
+def _confirm_next_bet(match_hint: str = "") -> bool:
+    """
+    Confirm and log the next (or match_hint-matching) pending bet.
+    Returns True if a bet was confirmed, False if queue was empty.
+    """
+    queue = _load_confirm_queue()
+    pending = [e for e in queue if e.get("_status") == "pending"]
+    if not pending:
+        ntfy_post(
+            "📋 Sin picks pendientes",
+            "No hay picks esperando confirmación ahora mismo.\n"
+            "El bot te avisará cuando encuentre el próximo pick de valor.",
+            "default",
+        )
+        return False
+
+    # Match by team or match name fragment if hint provided
+    if match_hint:
+        hint_low = match_hint.lower()
+        matched  = next(
+            (e for e in pending
+             if hint_low in e.get("match", "").lower()
+             or hint_low in e.get("team", "").lower()),
+            None,
+        )
+        if not matched:
+            # Fall back to oldest
+            matched = pending[0]
+    else:
+        matched = pending[0]
+
+    _confirm_bet(matched)
+
+    # Remove from queue
+    queue = [e for e in queue if e is not matched]
+    _save_confirm_queue(queue)
+
+    remaining = sum(1 for e in queue if e.get("_status") == "pending")
+    match_disp = matched.get("match", "?")
+    team_disp  = matched.get("team", "?")
+    odds_disp  = matched.get("odds", "?")
+    stake_disp = matched.get("stake", "?")
+    book_disp  = matched.get("bookmaker", "?")
+
+    ntfy_post(
+        f"✅ Apuesta confirmada — {team_disp}",
+        _two_layer_body(
+            f"✅ PICK REGISTRADO\n"
+            f"🎯 {match_disp}\n"
+            f"APUESTA: {team_disp} @ {odds_disp} — {book_disp}\n"
+            f"💰 Stake: ${stake_disp}",
+            f"Este pick ahora está en tu historial y se auto-resultará cuando termine el juego.\n"
+            + (f"\n📋 Picks pendientes de confirmar: {remaining}" if remaining else
+               "\n✅ No hay más picks pendientes."),
+        ),
+        "default",
+    )
+    print(f"  ✅ CONFIRMADO: {match_disp} → {team_disp} @ {odds_disp}")
+    return True
+
+
+def _confirm_all_pending() -> int:
+    """Confirm every queued pending bet. Returns count confirmed."""
+    queue   = _load_confirm_queue()
+    pending = [e for e in queue if e.get("_status") == "pending"]
+    if not pending:
+        return 0
+    for entry in pending:
+        _confirm_bet(entry)
+    _save_confirm_queue([e for e in queue if e.get("_status") != "pending"])
+    print(f"  ✅ TODAS CONFIRMADAS: {len(pending)} picks")
+    return len(pending)
+
+
+def _cancel_next_bet(match_hint: str = "") -> bool:
+    """
+    Discard the next (or hint-matching) pending bet without logging it.
+    Returns True if a bet was cancelled.
+    """
+    queue   = _load_confirm_queue()
+    pending = [e for e in queue if e.get("_status") == "pending"]
+    if not pending:
+        ntfy_post(
+            "📋 Sin picks pendientes",
+            "No hay picks esperando confirmación ahora mismo.",
+            "default",
+        )
+        return False
+
+    if match_hint:
+        hint_low = match_hint.lower()
+        matched  = next(
+            (e for e in pending
+             if hint_low in e.get("match", "").lower()
+             or hint_low in e.get("team", "").lower()),
+            None,
+        ) or pending[0]
+    else:
+        matched = pending[0]
+
+    queue = [e for e in queue if e is not matched]
+    _save_confirm_queue(queue)
+
+    match_disp = matched.get("match", "?")
+    team_disp  = matched.get("team", "?")
+    ntfy_post(
+        f"🗑️ Pick cancelado — {team_disp}",
+        f"🗑️ Pick descartado: {match_disp} → {team_disp}\n"
+        f"No se registró en el historial.",
+        "default",
+    )
+    print(f"  🗑️ CANCELADO: {match_disp} → {team_disp}")
+    return True
+
+
+def _list_pending_confirm() -> None:
+    """Send ntfy listing all pending-confirmation bets."""
+    queue   = _load_confirm_queue()
+    pending = [e for e in queue if e.get("_status") == "pending"]
+    if not pending:
+        ntfy_post(
+            "📋 Sin picks pendientes",
+            "No hay picks en espera de confirmación.",
+            "default",
+        )
+        return
+
+    lines = []
+    for i, e in enumerate(pending, 1):
+        lines.append(
+            f"{i}. {e.get('match','?')}\n"
+            f"   {e.get('team','?')} @ {e.get('odds','?')} — {e.get('bookmaker','?')}\n"
+            f"   ${e.get('stake','?')} | En cola: {e.get('_queued_at','?')}"
+        )
+    body = (
+        f"📋 PICKS ESPERANDO CONFIRMACIÓN ({len(pending)}):\n"
+        f"{'━'*24}\n"
+        + "\n".join(lines)
+        + f"\n{'━'*24}\n"
+        "Responde 'aposté' para confirmar el primero.\n"
+        "Responde 'aposté todas' para confirmar todos.\n"
+        "Responde 'cancelé' para descartar el primero."
+    )
+    ntfy_post(f"📋 {len(pending)} picks pendientes", body, "default")
+
+
+def _poll_ntfy_confirmations() -> None:
+    """
+    Poll the ntfy topic for incoming messages from the user.
+    Recognises confirmation and cancellation commands and acts on the queue.
+
+    Commands (case-insensitive, sent by user to the same ntfy topic):
+      aposté / bet placed / confirmar         → confirm oldest pending bet
+      aposté [fragment] / confirmar [fragment]→ confirm bet matching fragment
+      aposté todas / confirm all              → confirm all pending bets
+      cancelé / cancel / no aposté            → discard oldest pending bet
+      cancelé [fragment]                      → discard bet matching fragment
+      picks pendientes / pending / pendientes → list pending bets
+    """
+    global _ntfy_last_confirm_id
+    if not NOTIFY:
+        return
+    try:
+        url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=120"
+        r   = requests.get(url, timeout=8)
+        if r.status_code != 200:
+            return
+        new_id = _ntfy_last_confirm_id
+        for raw_line in r.text.strip().splitlines():
+            try:
+                msg = json.loads(raw_line)
+            except Exception:
+                continue
+            if msg.get("event") != "message":
+                continue
+            mid = msg.get("id", "")
+            if mid == _ntfy_last_confirm_id:
+                # Reached the last one we already processed; skip rest
+                break
+            new_id = mid  # track newest ID seen this poll
+
+            text = (msg.get("message") or msg.get("title") or "").strip().lower()
+            if not text:
+                continue
+
+            # ── confirmation commands ──────────────────────────────────────
+            if any(k in text for k in ("aposté todas", "confirm all",
+                                        "aposte todas", "confirmar todas")):
+                n = _confirm_all_pending()
+                if n:
+                    ntfy_post(
+                        f"✅ {n} picks confirmados",
+                        f"Se registraron {n} picks en el historial.\n"
+                        "El bot auto-resultará cada uno cuando termine el juego.",
+                        "default",
+                    )
+                break
+
+            if any(k in text for k in ("aposté", "aposte", "bet placed",
+                                        "confirmar", "confirmed")):
+                # Extract optional match/team hint after the command keyword
+                hint = ""
+                for kw in ("aposté", "aposte", "bet placed", "confirmar", "confirmed"):
+                    if kw in text:
+                        hint = text.split(kw, 1)[1].strip()
+                        break
+                _confirm_next_bet(match_hint=hint)
+                break
+
+            # ── cancellation commands ──────────────────────────────────────
+            if any(k in text for k in ("cancelé", "cancele", "cancel",
+                                        "no aposté", "no aposte")):
+                hint = ""
+                for kw in ("cancelé", "cancele", "cancel", "no aposté", "no aposte"):
+                    if kw in text:
+                        hint = text.split(kw, 1)[1].strip()
+                        break
+                _cancel_next_bet(match_hint=hint)
+                break
+
+            # ── list commands ──────────────────────────────────────────────
+            if any(k in text for k in ("pendientes", "pending", "picks")):
+                _list_pending_confirm()
+                break
+
+        _ntfy_last_confirm_id = new_id
+    except Exception as e:
+        print(f"  ⚠️  _poll_ntfy_confirmations error: {e}")
+
 
 def check_closing_lines(current_games_by_sport):
     """
@@ -8207,11 +8505,7 @@ def notify_bets(new_bets):
 
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
-        # Module 8: save ML bets to pending_bets for CLV tracking
-        try:
-            save_pending_bet(b)
-        except Exception:
-            pass
+        # Do NOT auto-log — user must confirm via ntfy "aposté" command
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE — CSV LOGGING
@@ -10818,8 +11112,8 @@ def run_scan():
                     print(f"    [{b['confidence']}]{mv} {b['match']} → "
                           f"{b['team']} @{b['odds']} | Edge:{b['edge']}% | "
                           f"EV:${b['ev']} | Book:{b['bookmaker']}")
-                if LOG_CSV:
-                    log_bets(bets, short)
+                # Queue for user confirmation — never auto-log
+                queue_for_confirmation(bets, short)
                 all_bets.extend(bets)
                 daily_bets.extend(bets)
             else:
@@ -10827,8 +11121,8 @@ def run_scan():
 
             if total_bets:
                 print(f"  🎯 {short} — {len(total_bets)} totals bet(s):")
-                if LOG_CSV:
-                    log_bets(total_bets, short)
+                # Queue for user confirmation — never auto-log
+                queue_for_confirmation(total_bets, short)
                 all_totals.extend(total_bets)
                 daily_bets.extend(total_bets)
             else:
@@ -11035,11 +11329,17 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"  ⚠️  Scan error (will retry): {e}")
 
-            # Module 1: auto-resultados — check after every scan
+            # Module 1: auto-resultados — check confirmed bets after every scan
             try:
                 check_results()
             except Exception as e:
                 print(f"  ⚠️  check_results error: {e}")
+
+            # Confirmation system: poll ntfy topic for "aposté" / "bet placed"
+            try:
+                _poll_ntfy_confirmations()
+            except Exception as e:
+                print(f"  ⚠️  poll_confirmations error: {e}")
 
             print(f"\n⏳ Next scan in {INTERVAL // 60} min...")
             time.sleep(INTERVAL)
