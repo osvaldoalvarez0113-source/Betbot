@@ -29,7 +29,8 @@ except ImportError:
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 API_KEY           = os.environ.get("ODDS_API_KEY",       "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY",  "")
-CLAUDE_MODEL      = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
+CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
+CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-haiku-4-5-20251001")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO       = os.environ.get("GITHUB_REPO",  "osvaldoalvarez0113-source/Betbot")
 BANKROLL = 1000
@@ -3587,6 +3588,9 @@ def analyze_totals(games, sport_key):
         _tc_data.update({k: v for k, v in extra.items()
                          if isinstance(v, (str, int, float, bool, type(None)))})
         _tc_sport  = "MLB" if is_mlb else "SOCCER"
+        if edge_val < 5.0:
+            print(f"   ⏭️  Panel omitido — edge {edge_val:.1f}% < 5% mínimo ({bet_side} {book_line})")
+            continue
         _tc_claude = panel_expertos(_tc_data, _tc_sport)
         if _tc_claude:
             _tcc  = _tc_claude.get("confianza", "N/D")
@@ -5046,8 +5050,13 @@ def analyze_game_full(game, sport_key, prev_map=None):
         k: v for k, v in context.items()
         if isinstance(v, (str, int, float, bool, type(None)))
     })
-    _claude_sport_g  = "MLB" if is_mlb else "SOCCER"
-    _claude_result_g = panel_expertos(_claude_data_g, _claude_sport_g)
+    _claude_sport_g = "MLB" if is_mlb else "SOCCER"
+    _top_ev = top3[0]["ev_pct"]
+    if _top_ev < 5.0:
+        print(f"   ⏭️  Panel omitido — EV {_top_ev:.1f}% < 5% mínimo ({top3[0]['label']})")
+        _claude_result_g = None
+    else:
+        _claude_result_g = panel_expertos(_claude_data_g, _claude_sport_g)
 
     if _claude_result_g:
         _cc  = _claude_result_g.get("confianza", "N/D")
@@ -7716,11 +7725,13 @@ _CLAUDE_SYSTEM = (
 
 
 def analyze_with_claude(game_data: dict, sport: str,
-                        _extra_system: str = "") -> "dict | None":
+                        _extra_system: str = "",
+                        _model: str = "") -> "dict | None":
     """
     Pre-validate game_data, then send to Claude as the final verification layer.
     sport: "MLB" or "SOCCER"
     _extra_system: optional extra text appended to _CLAUDE_SYSTEM (used by panel_expertos)
+    _model: override Claude model (default: CLAUDE_MODEL); panel uses CLAUDE_PANEL_MODEL
     Returns {pick, line, confianza, razonamiento, factores_positivos,
              factores_negativos, datos_inconsistentes, apostar}
     or None if API unavailable / error.
@@ -7735,7 +7746,7 @@ def analyze_with_claude(game_data: dict, sport: str,
     clean_data, pre_warnings = _pre_validate_for_claude(game_data, sport)
 
     _ck = hashlib.md5(
-        f"{sport}{_extra_system}{json.dumps(clean_data, default=str, sort_keys=True)}".encode()
+        f"{sport}{_extra_system}{_model}{json.dumps(clean_data, default=str, sort_keys=True)}".encode()
     ).hexdigest()[:16]
     if _ck in _claude_cache:
         return _claude_cache[_ck]
@@ -7793,7 +7804,7 @@ def analyze_with_claude(game_data: dict, sport: str,
     try:
         client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg    = client.messages.create(
-            model=CLAUDE_MODEL,
+            model=(_model or CLAUDE_MODEL),
             max_tokens=1024,
             system=(_CLAUDE_SYSTEM + ("\n\n" + _extra_system if _extra_system else "")),
             messages=[{"role": "user", "content": prompt}],
@@ -7870,7 +7881,8 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     inconsistencias = []
 
     for nombre, extra in _EXPERTOS:
-        res = analyze_with_claude(game_data, sport, _extra_system=extra)
+        res = analyze_with_claude(game_data, sport, _extra_system=extra,
+                                  _model=CLAUDE_PANEL_MODEL)
         if res is None:
             print(f"   🎓 {nombre}: no disponible")
             resultados.append(None)
