@@ -275,6 +275,7 @@ _steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
 _ntfy_last_confirm_id: str = ""  # last ntfy message ID processed for confirmations
 _daily_exposure:      float = 0.0            # total stake queued today ($)
 _daily_exposure_date: "date" = date(2000, 1, 1)  # reset tracking when date changes
+_tg_broadcast_fn = None  # set by telegram_bot.iniciar_telegram; broadcasts to Telegram
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
 _wc_form_cache: dict = {}       # (team_name, date_str) → {goals_for, goals_against, matches}
@@ -5628,6 +5629,11 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         clean = best_clean
         title = f"🔍 {match_es} | Mejor: {clean} +{a['best_ev']}%"
         ntfy_post(title, body, "high")
+        if _tg_broadcast_fn:
+            try:
+                _tg_broadcast_fn(a)
+            except Exception as _tbe:
+                print(f"  ⚠️  Telegram broadcast error: {_tbe}")
         alerted_game_analysis.add(a["game_id"])
         if alerted is not None:
             alerted[match_key_ana] = float(a.get("best_ev", 0))
@@ -5843,6 +5849,95 @@ def build_analizar_text(result: dict) -> list:
 # ═══════════════════════════════════════════════════════════════════════════════
 # IMPROVEMENT 3: CLV (CLOSING LINE VALUE) TRACKING
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def get_today_hoy_summary() -> list:
+    """
+    Quick MLB daily card for /hoy Telegram command.
+    No Claude — uses _card_analyze_game (fast, model-only EV).
+    Returns list of message strings (each ≤3800 chars) for Telegram.
+    """
+    try:
+        games = get_odds("baseball_mlb")
+    except Exception:
+        return ["⚠️ No se pudo contactar la API de odds."]
+
+    today_et   = datetime.now(ET)
+    today_date = today_et.date()
+    today_str  = today_et.strftime("%d/%m/%Y")
+
+    today_games = []
+    for g in (games or []):
+        ct = g.get("commence_time", "")
+        try:
+            gdate = datetime.fromisoformat(ct.replace("Z", "+00:00")).astimezone(ET).date()
+            if gdate == today_date:
+                today_games.append(g)
+        except Exception:
+            today_games.append(g)
+
+    if not today_games:
+        return [f"⚾ Sin juegos MLB para hoy ({today_str})."]
+
+    header = (
+        f"⚾ <b>MLB HOY — {today_str}</b>\n"
+        f"{_DIV}\n"
+        f"{len(today_games)} partidos programados\n"
+        f"{_DIV}\n"
+    )
+
+    rows = []
+    for g in sorted(today_games, key=lambda x: x.get("commence_time", "")):
+        try:
+            res = _card_analyze_game(g, "baseball_mlb")
+        except Exception:
+            continue
+
+        parts_m = res["match"].split(" vs ", 1)
+        home_es = _es(parts_m[0])
+        away_es = _es(parts_m[1]) if len(parts_m) > 1 else "?"
+        gt      = _card_fmt_time(res["commence"])
+        ph      = res["pitcher_h"]
+        pa      = res["pitcher_a"]
+        er_h    = res["era_h"]
+        er_a    = res["era_a"]
+        ev      = res["best_ev"]
+        lbl     = res["best_label"]
+
+        if ev >= 5.0 and lbl:
+            pick_ln = f"   📌 Pick: {_es(lbl)} | EV +{ev:.1f}% ✅\n"
+        elif ev >= 2.0 and lbl:
+            pick_ln = f"   Pick rápido: {_es(lbl)} | EV +{ev:.1f}%\n"
+        else:
+            pick_ln = "   Sin edge claro por modelo.\n"
+
+        rows.append(
+            f"🔵 <b>{home_es} vs {away_es}</b> — {gt}\n"
+            f"   P. Local:    {ph} (ERA {er_h:.2f})\n"
+            f"   P. Visitante: {pa} (ERA {er_a:.2f})\n"
+            f"{pick_ln}"
+        )
+
+    if not rows:
+        return [f"⚾ Sin datos disponibles para hoy ({today_str})."]
+
+    # Pack rows into parts ≤ 3800 chars
+    result_parts = []
+    current = header
+    for row in rows:
+        if len(current) + len(row) + 1 > 3800:
+            result_parts.append(current)
+            current = row
+        else:
+            current += "\n" + row
+    if current:
+        result_parts.append(current)
+
+    result_parts[-1] += (
+        f"\n{_DIV}\n"
+        f"⚠️ Picks sin análisis Claude — usa /analizar para análisis completo."
+    )
+    return result_parts
+
 
 def save_pending_bet(bet):
     """Persist an alerted totals bet to pending_bets.json for CLV tracking."""
@@ -10035,6 +10130,11 @@ def send_night_summary():
                 f"💰 Bankroll: ${current:,.2f}"
             )
             ntfy_post("🌙 RESUMEN DEL DÍA", body, "default")
+            if _tg_broadcast_fn:
+                try:
+                    _tg_broadcast_fn(body)
+                except Exception:
+                    pass
             print("  🌙 Resumen nocturno: sin picks hoy")
             return
 
@@ -10091,6 +10191,11 @@ def send_night_summary():
             f"   en el reporte de las 8 AM"
         )
         ntfy_post("🌙 RESUMEN DEL DÍA", body, "default")
+        if _tg_broadcast_fn:
+            try:
+                _tg_broadcast_fn(body)
+            except Exception:
+                pass
         print(f"  🌙 Resumen nocturno enviado ({len(today_bets)} picks)")
     except Exception as e:
         print(f"  ⚠️  send_night_summary error: {e}")
@@ -10467,6 +10572,11 @@ def _send_parlay_alert(p: dict):
     print(f"\n  🎰 PARLAY detectado — {l1['bet_type']} x2 | "
           f"EV +{p['parlay_ev']:.1f}% | Stake ${p['parlay_stake']:.0f}")
     ntfy_post(title, body, priority="high")
+    if _tg_broadcast_fn:
+        try:
+            _tg_broadcast_fn(f"🎰 <b>PARLAY SUGERIDO</b>\n{_DIV}\n{body}")
+        except Exception:
+            pass
 
 
 def detect_and_notify_parlays(all_analyses: list):
@@ -12097,7 +12207,8 @@ if __name__ == "__main__":
     try:
         from telegram_bot import iniciar_telegram as _iniciar_tg
         _iniciar_tg(analyze_fn=analyze_game_full, get_odds_fn=get_odds,
-                    build_text_fn=build_analizar_text)
+                    build_text_fn=build_analizar_text,
+                    get_hoy_fn=get_today_hoy_summary)
     except Exception as _tge:
         print(f"  ⚠️  Telegram bot startup skipped: {_tge}")
 

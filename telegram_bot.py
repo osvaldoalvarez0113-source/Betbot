@@ -47,6 +47,7 @@ _authorized_ids: set = set()
 _analyze_fn          = None
 _get_odds_fn         = None
 _build_text_fn       = None
+_get_hoy_fn          = None
 _start_time          = datetime.datetime.now()
 _last_scan_time      = None   # updated by kelly_odds integration if desired
 
@@ -144,7 +145,8 @@ def _cmd_ayuda(chat_id: str):
         "/reporte   — reporte completo W/L/ROI\n"
         "/clv       — Closing Line Value (edge real)\n"
         "/estado    — salud del bot\n"
-        "/analizar  <code>Equipo A vs Equipo B</code> — análisis del partido\n"
+        "/hoy       — juegos MLB de hoy con pitchers y pick rápido\n"
+        "/analizar  <code>Equipo A vs Equipo B</code> — análisis completo del partido\n"
         "/ayuda     — esta lista"
     ))
 
@@ -362,6 +364,54 @@ def _cmd_analizar(chat_id: str, args: str):
     ))
 
 
+def _broadcast_to_all(payload):
+    """
+    Broadcast to all authorized Telegram chats.
+    payload: dict  → analysis result, formatted via _build_text_fn
+             str   → sent as-is (plain text or HTML)
+    """
+    if isinstance(payload, dict):
+        if _build_text_fn:
+            try:
+                parts = _build_text_fn(payload)
+            except Exception as _fe:
+                best  = (payload.get("candidates") or [{}])[0]
+                match = payload.get("match", "?")
+                ev    = payload.get("best_ev", best.get("ev_pct", 0))
+                label = payload.get("best_label", best.get("label", "?"))
+                parts = [f"🔍 <b>{match}</b>\nPick: <b>{label}</b> | EV: +{ev:.1f}%"]
+        else:
+            best  = (payload.get("candidates") or [{}])[0]
+            match = payload.get("match", "?")
+            ev    = payload.get("best_ev", best.get("ev_pct", 0))
+            label = payload.get("best_label", best.get("label", "?"))
+            parts = [f"🔍 <b>{match}</b>\nPick: <b>{label}</b> | EV: +{ev:.1f}%"]
+    else:
+        parts = [str(payload)]
+
+    for cid in list(_authorized_ids):
+        for part in parts:
+            if part and part.strip():
+                try:
+                    _send(cid, part)
+                except Exception as _se:
+                    print(f"  ⚠️  Telegram broadcast [{cid}]: {_se}")
+
+
+def _cmd_hoy(chat_id: str):
+    if not _get_hoy_fn:
+        _send(chat_id, "⚠️ Módulo /hoy no disponible — bot iniciando.")
+        return
+    _send(chat_id, "⏳ Obteniendo juegos MLB de hoy... (~15 segundos)")
+    try:
+        parts = _get_hoy_fn()
+        for part in parts:
+            if part and part.strip():
+                _send(chat_id, part)
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error obteniendo juegos: {e}")
+
+
 # ── Dispatcher ──────────────────────────────────────────────────
 
 def _dispatch(update: dict):
@@ -389,6 +439,7 @@ def _dispatch(update: dict):
         "/reporte":  lambda: _cmd_reporte(chat_id),
         "/clv":      lambda: _cmd_clv(chat_id),
         "/estado":   lambda: _cmd_estado(chat_id),
+        "/hoy":      lambda: _cmd_hoy(chat_id),
         "/analizar": lambda: _cmd_analizar(chat_id, args),
     }
 
@@ -430,7 +481,7 @@ def _polling_loop():
 
 # ── Public entry point ──────────────────────────────────────────
 
-def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None):
+def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None, get_hoy_fn=None):
     """
     Inicia el bot de Telegram en un hilo daemon.
     Llamar una sola vez al arranque del bot, antes del while True:.
@@ -439,8 +490,9 @@ def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None):
         analyze_fn:    referencia a analyze_game_full(game, sport_key, prev_map)
         get_odds_fn:   referencia a get_odds(sport_key) → list[dict]
         build_text_fn: referencia a build_analizar_text(result) → list[str]
+        get_hoy_fn:    referencia a get_today_hoy_summary() → list[str]
     """
-    global _analyze_fn, _get_odds_fn, _build_text_fn
+    global _analyze_fn, _get_odds_fn, _build_text_fn, _get_hoy_fn
 
     if not TELEGRAM_TOKEN:
         print("  ⚠️  Telegram: TELEGRAM_TOKEN no configurado — bot desactivado")
@@ -450,6 +502,17 @@ def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None):
     _analyze_fn    = analyze_fn
     _get_odds_fn   = get_odds_fn
     _build_text_fn = build_text_fn
+    _get_hoy_fn    = get_hoy_fn
+
+    # Wire auto-broadcast back into kelly_odds for auto-alerts
+    try:
+        import sys
+        _ko = sys.modules.get("__main__") or sys.modules.get("kelly_odds")
+        if _ko and hasattr(_ko, "_tg_broadcast_fn"):
+            _ko._tg_broadcast_fn = _broadcast_to_all
+            print("  📤 Telegram: auto-broadcast conectado (alertas, resumen, parlays)")
+    except Exception as _wbe:
+        print(f"  ⚠️  Telegram: no se pudo conectar broadcast: {_wbe}")
 
     # Load authorized chat IDs from env + file
     _authorized_ids.update(_load_authorized())
