@@ -318,7 +318,11 @@ def _cmd_analizar(chat_id: str, args: str):
         return
 
     if not result:
-        _send(chat_id, "🔴 Análisis completado — <b>sin pick recomendado</b> (EV insuficiente o Claude vetó).")
+        _send(chat_id, (
+            "⚠️ No se pudo obtener análisis para este partido.\n"
+            "Posibles causas: partido no encontrado en API, datos insuficientes, "
+            "o error de conexión. Intenta de nuevo en unos minutos."
+        ))
         return
 
     # ── Usar build_analizar_text si está disponible (formato completo) ────────
