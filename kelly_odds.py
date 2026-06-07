@@ -5021,7 +5021,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                   f"(mínimo {EV_MIN_PCT:.1f}%)")
         else:
             print(f"   ❌ Sin picks — sin odds válidas para analizar")
-        return None
+        if not force_panel:
+            return None
+        # force_panel=True (/analizar manual): no hay edge positivo pero
+        # el usuario quiere ver el análisis completo — continuar con top3=[]
 
     # Rank by EV%, keep top 3, tag safest (prob ≥ 60%)
     candidates.sort(key=lambda x: x["ev_pct"], reverse=True)
@@ -5029,13 +5032,31 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     for c in top3:
         c["safest"] = c["true_prob"] >= 0.60
 
+    # force_panel=True con sin candidatos: devolver resultado con contexto completo
+    # (el usuario quiere ver pitchers/stats/clima aunque no haya edge)
+    if not top3:
+        return {
+            "game_id":    game_id,
+            "match":      f"{home} vs {away}",
+            "time":       commence,
+            "sport":      sport_key,
+            "is_mlb":     is_mlb,
+            "candidates": [],
+            "context":    context,
+            "best_label": None,
+            "best_ev":    0.0,
+            "claude_intel": None,
+        }
+
     # ── Feature 7: data completeness guard ───────────────────────────────
     _dqs = context.get("data_quality_score", 100)
     if _dqs < 40:
         print(f"  ⏭️  Juego omitido — datos muy escasos ({_dqs}/100): {home} vs {away}")
         _log_error("data_completeness", "skip", f"{home} vs {away}",
                    f"score {_dqs}/100 < 40")
-        return None
+        if not force_panel:
+            return None
+        print(f"  ℹ️  force_panel=True — mostrando análisis con datos escasos a usuario")
 
     # ── Claude AI: expert validation of top pick ──────────────────────────
     _claude_data_g = {
@@ -5802,15 +5823,23 @@ def build_analizar_text(result: dict) -> list:
             p1 += f"🟨 Árbitro: {ref['name']} — {ref.get('tendency','?')}\n"
 
     # ─── PARTE 2: Picks ───────────────────────────────────────────────────────
-    p1 += f"{_DIV}\n📊 TOP PICKS\n{_DIV}\n"
-    for idx, c in enumerate(cands):
-        rank = (["1️⃣", "2️⃣", "3️⃣"][idx] if idx < 3 else "🔹")
-        safe = "\n   ✅ Pick más seguro" if c.get("safest") else ""
+    p1 += f"{_DIV}\n📊 ANÁLISIS DE PICKS\n{_DIV}\n"
+    if cands:
+        for idx, c in enumerate(cands):
+            rank = (["1️⃣", "2️⃣", "3️⃣"][idx] if idx < 3 else "🔹")
+            safe = "\n   ✅ Pick más seguro" if c.get("safest") else ""
+            p1 += (
+                f"{rank} <b>{c['label']}</b>\n"
+                f"   EV: +{c['ev_pct']:.1f}%  |  Prob: {round(c['true_prob']*100)}%{safe}\n"
+                f"   💰 {c['odds']} @ {c['book']}\n"
+                f"   Stake: ${c['stake']:.0f}\n"
+            )
+    else:
         p1 += (
-            f"{rank} <b>{c['label']}</b>\n"
-            f"   EV: +{c['ev_pct']:.1f}%  |  Prob: {round(c['true_prob']*100)}%{safe}\n"
-            f"   💰 {c['odds']} @ {c['book']}\n"
-            f"   Stake: ${c['stake']:.0f}\n"
+            "⚠️ <b>Sin picks con edge positivo</b>\n"
+            "   El modelo no encuentra valor en la línea actual.\n"
+            "   Revisa el contexto de arriba y decide según tu criterio.\n"
+            "   (Apostar sin edge esperado es -EV a largo plazo)\n"
         )
 
     # ─── PARTE 3: Panel de expertos + recomendación ───────────────────────────
@@ -5832,16 +5861,26 @@ def build_analizar_text(result: dict) -> list:
     final_apostar = ci.get("apostar")
     panel_razon   = ci.get("razonamiento") or ""
     best = cands[0] if cands else {}
-    rec_icon = ("✅ APOSTAR" if final_apostar is True
-                else ("❌ PASAR" if final_apostar is False else "⚠️ VERIFICAR"))
-    p2 += (
-        f"{_DIV}\n📋 <b>RECOMENDACIÓN FINAL: {rec_icon}</b>\n"
-        f"Pick: <b>{best.get('label', '?')}</b>\n"
-        f"Stake sugerido: <b>${best.get('stake', 0):.0f}</b> @ {best.get('book','?')}\n"
-        f"EV: +{best.get('ev_pct', 0):.1f}%  |  Prob: {round(best.get('true_prob', 0)*100)}%\n"
-    )
-    if panel_razon:
-        p2 += f"<i>{panel_razon}</i>\n"
+
+    if ci:
+        rec_icon = ("✅ APOSTAR" if final_apostar is True
+                    else ("❌ PASAR" if final_apostar is False else "⚠️ VERIFICAR"))
+        p2 += f"{_DIV}\n📋 <b>RECOMENDACIÓN FINAL: {rec_icon}</b>\n"
+        if best:
+            p2 += (
+                f"Pick: <b>{best.get('label', '?')}</b>\n"
+                f"Stake sugerido: <b>${best.get('stake', 0):.0f}</b> @ {best.get('book','?')}\n"
+                f"EV: +{best.get('ev_pct', 0):.1f}%  |  Prob: {round(best.get('true_prob', 0)*100)}%\n"
+            )
+        if panel_razon:
+            p2 += f"<i>{panel_razon}</i>\n"
+    else:
+        p2 += (
+            f"{_DIV}\n📋 <b>RECOMENDACIÓN: ⚠️ SIN PICKS CON EDGE</b>\n"
+            "El modelo no encontró valor en la línea actual.\n"
+            "El contexto de arriba tiene toda la info disponible.\n"
+            "Usa tu criterio para decidir si apostar.\n"
+        )
 
     return [p1, p2]
 
