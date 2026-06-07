@@ -5634,6 +5634,212 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         print(f"  🔍 Análisis: {a['match']} — {len(a['candidates'])} pick(s), "
               f"mejor EV +{a['best_ev']}%")
 
+def build_analizar_text(result: dict) -> list:
+    """
+    Build Telegram-HTML message parts for /analizar (manual analysis).
+    Returns a list of strings (parts) — each fits in one Telegram message.
+    Format mirrors notify_game_analysis: context, picks, expert panel.
+    """
+    match   = result.get("match", "?")
+    home, away = (match.split(" vs ", 1) + [""])[:2] if " vs " in match else (match, "")
+    home_es = _es(home)
+    away_es = _es(away)
+    is_mlb  = result.get("is_mlb", False)
+    ctx     = result.get("context", {})
+    cands   = result.get("candidates", [])
+    ci      = result.get("claude_intel") or {}
+    gt      = _fmt_smart_gt(result.get("time", ""))
+    emoji   = _sport_emoji(result.get("sport", ""))
+
+    # ─── PARTE 1: Contexto ────────────────────────────────────────────────────
+    p1 = f"{emoji} <b>{home_es} vs {away_es}</b>\n⏰ {gt}\n{_DIV}\n📋 CONTEXTO\n{_DIV}\n"
+
+    if is_mlb:
+        def _hn(c):
+            return "zurdo" if c == "L" else ("diestro" if c == "R" else None)
+
+        pn_h  = ctx.get("pname_home", "TBD")
+        pn_a  = ctx.get("pname_away", "TBD")
+        er_h  = ctx.get("era_home",  4.50)
+        er_a  = ctx.get("era_away",  4.50)
+        fip_h = ctx.get("fip_home")
+        fip_a = ctx.get("fip_away")
+        sc_h  = ctx.get("statcast_home")
+        sc_a  = ctx.get("statcast_away")
+        hnd_h = ctx.get("hand_home")
+        hnd_a = ctx.get("hand_away")
+
+        h_ht = f" ({_hn(hnd_h)})" if _hn(hnd_h) else ""
+        a_ht = f" ({_hn(hnd_a)})" if _hn(hnd_a) else ""
+
+        # Pitcher local
+        p1 += f"🔵 <b>Pitcher {home_es}</b>: {pn_h}{h_ht}\n   ERA: {er_h:.2f} — {_era_label(er_h)}\n"
+        if fip_h is not None:
+            p1 += f"   FIP: {fip_h:.2f} — {_era_label(fip_h)}\n"
+        p1 += _statcast_alert_block(pn_h, sc_h, er_h)
+
+        # Pitcher visitante
+        p1 += f"🔴 <b>Pitcher {away_es}</b>: {pn_a}{a_ht}\n   ERA: {er_a:.2f} — {_era_label(er_a)}\n"
+        if fip_a is not None:
+            p1 += f"   FIP: {fip_a:.2f} — {_era_label(fip_a)}\n"
+        p1 += _statcast_alert_block(pn_a, sc_a, er_a)
+
+        # Bullpen ERA (live fetch)
+        for _t, _ts, _se in ((home, home_es, er_h), (away, away_es, er_a)):
+            try:
+                _, _bn = fetch_bullpen_era(_t, _se)
+                p1 += f"{_bn}\n"
+            except Exception:
+                pass
+
+        # Carreras anotadas/recibidas por juego
+        if "rs_home" in ctx:
+            p1 += (
+                f"⚾ {home_es} — anota {ctx['rs_home']} | recibe {ctx['ra_home']} por juego\n"
+                f"⚾ {away_es} — anota {ctx['rs_away']} | recibe {ctx['ra_away']} por juego\n"
+            )
+
+        # Bateo + tendencia últimos juegos
+        for _t, _te, _bk in ((home, home_es, "bat_home"), (away, away_es, "bat_away")):
+            bat = ctx.get(_bk)
+            if bat:
+                ops = bat.get("ops")
+                p1 += f"🏏 <b>Bateo {_te}</b>: AVG {bat['avg']:.3f}"
+                if ops is not None:
+                    p1 += f"  |  OPS {ops:.3f} ({_ops_label(ops)})"
+                p1 += "\n"
+                if bat.get("k_pct") is not None:
+                    p1 += f"   Se poncha: {bat['k_pct']:.0f}%\n"
+                if bat.get("bb_pct") is not None:
+                    p1 += f"   BB%: {bat['bb_pct']:.0f}%\n"
+                ins = _batting_insight(_t, ops, bat.get("k_pct"))
+                if ins:
+                    p1 += f"{ins}\n"
+            try:
+                recent = fetch_mlb_team_recent(_t)
+                if recent and recent.get("results"):
+                    rs_str = " | ".join(
+                        f"{_result_to_es(r)} {sc}" for r, sc in recent["results"]
+                    )
+                    p1 += (
+                        f"📋 {_te} últimos {len(recent['results'])} juegos:\n"
+                        f"   {rs_str}\n"
+                        f"   Balance: {recent['wins']}G — {recent['losses']}P\n"
+                    )
+            except Exception:
+                pass
+
+        # Pinnacle
+        pin = ctx.get("pinnacle_odds")
+        if pin:
+            raw_h = 1.0 / max(pin["home"], 1.001)
+            raw_a = 1.0 / max(pin["away"], 1.001)
+            tot   = raw_h + raw_a
+            p1 += (
+                f"📌 Pinnacle — {home_es}: {pin['home']:+.0f} ({round(raw_h/tot*100,1)}%)"
+                f"  |  {away_es}: {pin['away']:+.0f} ({round(raw_a/tot*100,1)}%)\n"
+            )
+
+        # Clima y viento
+        if ctx.get("temp_label"):
+            p1 += f"{ctx['temp_label']}\n"
+        if ctx.get("wind_info"):
+            p1 += f"💨 {ctx['wind_info']}\n"
+
+        # Línea y movimiento
+        if ctx.get("line_moved") and ctx.get("line_note"):
+            p1 += f"📉 {ctx['line_note']}\n"
+
+        # Umpire
+        ump = ctx.get("umpire")
+        if ump and ump.get("name"):
+            p1 += f"👨‍⚖️ Árbitro: {ump['name']} — {ump.get('tendency','?')}\n"
+
+        # Lesionados
+        for til, ils in ctx.get("il_data", {}).items():
+            if ils:
+                p1 += f"🤕 Lesionados ({_es(til)}): {', '.join(ils[:4])}\n"
+
+        # Home/away splits
+        hs  = ctx.get("h_splits") or {}
+        as_ = ctx.get("a_splits") or {}
+        if hs.get("home_rs") and as_.get("away_rs"):
+            p1 += (
+                f"🏠 {home_es} en casa: {hs['home_rs']} anota | {hs['home_ra']} recibe"
+                f" | {hs['home_wpct']*100:.0f}% victorias\n"
+                f"🚗 {away_es} de visita: {as_['away_rs']} anota | {as_['away_ra']} recibe"
+                f" | {as_['away_wpct']*100:.0f}% victorias\n"
+            )
+
+    else:
+        # Soccer
+        p1 += (
+            f"💪 {home_es}: {_elo_tier(ctx.get('elo_home', 1500))}\n"
+            f"💪 {away_es}: {_elo_tier(ctx.get('elo_away', 1500))}\n"
+            f"🤝 Empate: {ctx.get('p_draw','?')}%\n"
+        )
+        for sf_key, tname_es in (("sform_h", home_es), ("sform_a", away_es)):
+            sf = ctx.get(sf_key)
+            if sf:
+                rs = " | ".join(_result_to_es(r) for r in sf["results"])
+                p1 += (
+                    f"📋 {tname_es} — últimos {sf['n']} partidos:\n"
+                    f"   {rs}\n"
+                    f"   ⚽ {sf['gf_pg']} goles/partido | 🛡️ {sf['ga_pg']} recibidos\n"
+                )
+        if ctx.get("temp_label_s"):
+            p1 += f"{ctx['temp_label_s']}\n"
+        if ctx.get("line_moved") and ctx.get("line_note"):
+            p1 += f"📉 {ctx['line_note']}\n"
+        ref = ctx.get("referee")
+        if ref and ref.get("name"):
+            p1 += f"🟨 Árbitro: {ref['name']} — {ref.get('tendency','?')}\n"
+
+    # ─── PARTE 2: Picks ───────────────────────────────────────────────────────
+    p1 += f"{_DIV}\n📊 TOP PICKS\n{_DIV}\n"
+    for idx, c in enumerate(cands):
+        rank = (["1️⃣", "2️⃣", "3️⃣"][idx] if idx < 3 else "🔹")
+        safe = "\n   ✅ Pick más seguro" if c.get("safest") else ""
+        p1 += (
+            f"{rank} <b>{c['label']}</b>\n"
+            f"   EV: +{c['ev_pct']:.1f}%  |  Prob: {round(c['true_prob']*100)}%{safe}\n"
+            f"   💰 {c['odds']} @ {c['book']}\n"
+            f"   Stake: ${c['stake']:.0f}\n"
+        )
+
+    # ─── PARTE 3: Panel de expertos + recomendación ───────────────────────────
+    experts   = ci.get("_expertos_detalle") or []
+    _ci_icons = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}
+
+    p2 = f"{_DIV}\n🎓 PANEL DE EXPERTOS\n{_DIV}\n"
+    if experts:
+        for ex in experts:
+            ap = ("✅ APOSTAR" if ex.get("apostar") is True
+                  else ("❌ PASAR" if ex.get("apostar") is False else "⚪ N/D"))
+            ec = _ci_icons.get(ex.get("confianza", ""), "⚪")
+            er = ex.get("razonamiento") or "no disponible"
+            p2 += f"<b>{ex['nombre']}</b> {ec}{ex.get('confianza','?')} — {ap}\n<i>{er}</i>\n\n"
+    else:
+        p2 += "Sin análisis de expertos disponible.\n"
+
+    # Recomendación final
+    final_apostar = ci.get("apostar")
+    panel_razon   = ci.get("razonamiento") or ""
+    best = cands[0] if cands else {}
+    rec_icon = ("✅ APOSTAR" if final_apostar is True
+                else ("❌ PASAR" if final_apostar is False else "⚠️ VERIFICAR"))
+    p2 += (
+        f"{_DIV}\n📋 <b>RECOMENDACIÓN FINAL: {rec_icon}</b>\n"
+        f"Pick: <b>{best.get('label', '?')}</b>\n"
+        f"Stake sugerido: <b>${best.get('stake', 0):.0f}</b> @ {best.get('book','?')}\n"
+        f"EV: +{best.get('ev_pct', 0):.1f}%  |  Prob: {round(best.get('true_prob', 0)*100)}%\n"
+    )
+    if panel_razon:
+        p2 += f"<i>{panel_razon}</i>\n"
+
+    return [p1, p2]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # IMPROVEMENT 3: CLV (CLOSING LINE VALUE) TRACKING
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -11890,7 +12096,8 @@ if __name__ == "__main__":
     # Telegram bot — background polling thread (daemon, never blocks main loop)
     try:
         from telegram_bot import iniciar_telegram as _iniciar_tg
-        _iniciar_tg(analyze_fn=analyze_game_full, get_odds_fn=get_odds)
+        _iniciar_tg(analyze_fn=analyze_game_full, get_odds_fn=get_odds,
+                    build_text_fn=build_analizar_text)
     except Exception as _tge:
         print(f"  ⚠️  Telegram bot startup skipped: {_tge}")
 

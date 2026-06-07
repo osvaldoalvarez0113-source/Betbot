@@ -46,6 +46,7 @@ else:
 _authorized_ids: set = set()
 _analyze_fn          = None
 _get_odds_fn         = None
+_build_text_fn       = None
 _start_time          = datetime.datetime.now()
 _last_scan_time      = None   # updated by kelly_odds integration if desired
 
@@ -315,65 +316,49 @@ def _cmd_analizar(chat_id: str, args: str):
         return
 
     if not result:
-        _send(chat_id, "🔴 Análisis completado — <b>sin pick recomendado</b> (Claude vetó o EV insuficiente).")
+        _send(chat_id, "🔴 Análisis completado — <b>sin pick recomendado</b> (EV insuficiente o Claude vetó).")
         return
 
-    home      = result.get("match", "?").split(" vs ")[0]
-    away      = result.get("match", "?").split(" vs ")[-1]
-    pick      = result.get("top_pick", "?")
-    ev        = result.get("ev_pct", result.get("best_ev", 0))
-    prob      = result.get("true_prob", 0)
-    conf      = result.get("confidence", result.get("confianza", "?"))
-    stake     = result.get("stake", 0)
-    conf_icon = {"HIGH": "🟢", "ALTA": "🟢", "MEDIUM": "🟡", "MEDIA": "🟡",
-                 "LOW": "🔴", "BAJA": "🔴"}.get(str(conf).upper(), "⚪")
-    cands     = result.get("candidates", [])
+    # ── Usar build_analizar_text si está disponible (formato completo) ────────
+    if _build_text_fn:
+        try:
+            parts = _build_text_fn(result)
+            for part in parts:
+                if part and part.strip():
+                    _send(chat_id, part)
+            return
+        except Exception as _bte:
+            _send(chat_id, f"⚠️ Error al formatear análisis: {_bte}")
+            return
+
+    # ── Fallback: formato básico si build_text_fn no está disponible ──────────
+    cands = result.get("candidates", [])
+    best  = cands[0] if cands else {}
+    pick  = result.get("best_label", best.get("label", "?"))
+    ev    = result.get("best_ev",   best.get("ev_pct", 0))
+    prob  = round(best.get("true_prob", 0) * 100)
+    stake = best.get("stake", 0)
+    match = result.get("match", "?")
+    home  = match.split(" vs ")[0]
+    away  = match.split(" vs ")[-1]
+
     cands_txt = ""
-    if cands:
-        cands_txt = "\n<b>Candidatos:</b>\n" + "\n".join(
-            f"  • {c.get('label','?')} @ {c.get('book','?')} | EV+{c.get('ev_pct',0):.1f}%"
-            for c in cands[:3]
-        )
+    for c in cands[:3]:
+        cands_txt += f"\n  • {c.get('label','?')} @ {c.get('book','?')} | EV+{c.get('ev_pct',0):.1f}%"
 
-    # ── Veredictos individuales de los 3 expertos ───────────────────────────
-    _ci_data    = result.get("claude_intel") or {}
-    _experts    = _ci_data.get("_expertos_detalle") or []
-    _conf_icons = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}
-    _exp_lines  = []
-    for ex in _experts:
-        _ap = ("✅" if ex.get("apostar") is True
-               else ("❌" if ex.get("apostar") is False else "⚪"))
-        _ec = _conf_icons.get(ex.get("confianza", ""), "⚪")
-        _er = (ex.get("razonamiento") or "")[:90]
-        _exp_lines.append(
-            f"  • <b>{ex['nombre']}</b>: {_ec} {ex.get('confianza','?')} {_ap}\n"
-            f"    <i>{_er}</i>"
-        )
-    _experts_txt = ("\n\n<b>🎓 Veredicto expertos:</b>\n" + "\n".join(_exp_lines)
-                    if _exp_lines else "")
-
-    # ── Recomendación final del panel ────────────────────────────────────────
-    _final_apostar = _ci_data.get("apostar")
-    _panel_razon   = (_ci_data.get("razonamiento") or "")[:130]
-    if _ci_data:
-        _rec_icon = "✅ APOSTAR" if _final_apostar else "❌ PASAR"
-        _votos    = _panel_razon.rsplit("[Panel ", 1)
-        _votos_lbl = ("[Panel " + _votos[-1]) if len(_votos) > 1 else ""
-        _rec_txt  = f"\n\n<b>📋 Recomendación final:</b> {_rec_icon} {_votos_lbl}"
-    else:
-        _rec_txt = (f"\n\n<b>📋 Recomendación:</b> ⚠️ Edge bajo ({ev:.1f}%) — sin análisis de expertos"
-                    if ev < 5.0 else "")
+    ci_data       = result.get("claude_intel") or {}
+    final_apostar = ci_data.get("apostar")
+    rec_icon      = "✅ APOSTAR" if final_apostar is True else ("❌ PASAR" if final_apostar is False else "")
+    rec_txt       = f"\n\n<b>Recomendación:</b> {rec_icon}" if rec_icon else ""
 
     _send(chat_id, (
         f"🎯 <b>{home} vs {away}</b>\n\n"
         f"Pick: <b>{pick}</b>\n"
         f"EV: <b>+{ev:.1f}%</b>\n"
-        f"Prob modelo: {prob:.1f}%\n"
-        f"Confianza: {conf_icon} {conf}\n"
-        f"Stake sugerido: ${stake:.2f}\n"
+        f"Prob modelo: {prob}%\n"
+        f"Stake sugerido: ${stake:.0f}\n"
         f"{cands_txt}"
-        f"{_experts_txt}"
-        f"{_rec_txt}"
+        f"{rec_txt}"
     ))
 
 
@@ -445,24 +430,26 @@ def _polling_loop():
 
 # ── Public entry point ──────────────────────────────────────────
 
-def iniciar_telegram(analyze_fn=None, get_odds_fn=None):
+def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None):
     """
     Inicia el bot de Telegram en un hilo daemon.
     Llamar una sola vez al arranque del bot, antes del while True:.
 
     Args:
-        analyze_fn:  referencia a analyze_game_full(game, sport_key, prev_map)
-        get_odds_fn: referencia a get_odds(sport_key) → list[dict]
+        analyze_fn:    referencia a analyze_game_full(game, sport_key, prev_map)
+        get_odds_fn:   referencia a get_odds(sport_key) → list[dict]
+        build_text_fn: referencia a build_analizar_text(result) → list[str]
     """
-    global _analyze_fn, _get_odds_fn
+    global _analyze_fn, _get_odds_fn, _build_text_fn
 
     if not TELEGRAM_TOKEN:
         print("  ⚠️  Telegram: TELEGRAM_TOKEN no configurado — bot desactivado")
         print("       Obtén un token en @BotFather y agrégalo en Railway como TELEGRAM_TOKEN")
         return
 
-    _analyze_fn  = analyze_fn
-    _get_odds_fn = get_odds_fn
+    _analyze_fn    = analyze_fn
+    _get_odds_fn   = get_odds_fn
+    _build_text_fn = build_text_fn
 
     # Load authorized chat IDs from env + file
     _authorized_ids.update(_load_authorized())
