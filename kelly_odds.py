@@ -4042,7 +4042,7 @@ PROB_MIN_ML      = 0.62  # Moneyline — 62% minimum
 PROB_MIN_PREMIUM = 0.70  # Premium alerts — 70% minimum
 _RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
 
-def analyze_game_full(game, sport_key, prev_map=None):
+def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False):
     """
     Full per-game analysis across ML, Totals, and Spread/Handicap.
     Returns result dict or None (if no bet reaches EV_MIN_PCT).
@@ -5052,7 +5052,7 @@ def analyze_game_full(game, sport_key, prev_map=None):
     })
     _claude_sport_g = "MLB" if is_mlb else "SOCCER"
     _top_ev = top3[0]["ev_pct"]
-    if _top_ev < 5.0:
+    if _top_ev < 5.0 and not force_panel:
         print(f"   ⏭️  Panel omitido — EV {_top_ev:.1f}% < 5% mínimo ({top3[0]['label']})")
         _claude_result_g = None
     else:
@@ -5071,7 +5071,8 @@ def analyze_game_full(game, sport_key, prev_map=None):
 
     # Hard veto: Claude says apostar=False OR confianza=BAJA → block immediately
     # Guard must fire BEFORE any pick is assigned or returned
-    if _claude_result_g and (
+    # force_panel=True (manual /analizar): skip veto so full analysis is returned
+    if _claude_result_g and not force_panel and (
             not _claude_result_g.get("apostar", True)
             or _claude_result_g.get("confianza") == "BAJA"):
         _veto_why = (f"apostar={_claude_result_g.get('apostar')}, "
@@ -7938,6 +7939,15 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     merged["factores_positivos"]   = list(dict.fromkeys(factores_pos))[:6]
     merged["factores_negativos"]   = list(dict.fromkeys(factores_neg))[:4]
     merged["datos_inconsistentes"] = list(dict.fromkeys(inconsistencias))
+    merged["_expertos_detalle"] = [
+        {
+            "nombre":        _EXPERTOS[i][0],
+            "apostar":       r.get("apostar")                          if r else None,
+            "confianza":     r.get("confianza", "N/D")                 if r else "N/D",
+            "razonamiento":  (r.get("razonamiento", "") or "")[:120]   if r else "no disponible",
+        }
+        for i, r in enumerate(resultados)
+    ]
     merged["razonamiento"] = (
         (base.get("razonamiento", "") or "") +
         f" [Panel {votos_favor}/3 a favor{'  — veto absoluto' if veto_absoluto else ''}]"

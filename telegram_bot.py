@@ -309,7 +309,7 @@ def _cmd_analizar(chat_id: str, args: str):
         return
 
     try:
-        result = _analyze_fn(game_found, sport_found, {})
+        result = _analyze_fn(game_found, sport_found, {}, force_panel=True)
     except Exception as e:
         _send(chat_id, f"⚠️ Error en el análisis: {e}")
         return
@@ -335,6 +335,35 @@ def _cmd_analizar(chat_id: str, args: str):
             for c in cands[:3]
         )
 
+    # ── Veredictos individuales de los 3 expertos ───────────────────────────
+    _ci_data    = result.get("claude_intel") or {}
+    _experts    = _ci_data.get("_expertos_detalle") or []
+    _conf_icons = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}
+    _exp_lines  = []
+    for ex in _experts:
+        _ap = ("✅" if ex.get("apostar") is True
+               else ("❌" if ex.get("apostar") is False else "⚪"))
+        _ec = _conf_icons.get(ex.get("confianza", ""), "⚪")
+        _er = (ex.get("razonamiento") or "")[:90]
+        _exp_lines.append(
+            f"  • <b>{ex['nombre']}</b>: {_ec} {ex.get('confianza','?')} {_ap}\n"
+            f"    <i>{_er}</i>"
+        )
+    _experts_txt = ("\n\n<b>🎓 Veredicto expertos:</b>\n" + "\n".join(_exp_lines)
+                    if _exp_lines else "")
+
+    # ── Recomendación final del panel ────────────────────────────────────────
+    _final_apostar = _ci_data.get("apostar")
+    _panel_razon   = (_ci_data.get("razonamiento") or "")[:130]
+    if _ci_data:
+        _rec_icon = "✅ APOSTAR" if _final_apostar else "❌ PASAR"
+        _votos    = _panel_razon.rsplit("[Panel ", 1)
+        _votos_lbl = ("[Panel " + _votos[-1]) if len(_votos) > 1 else ""
+        _rec_txt  = f"\n\n<b>📋 Recomendación final:</b> {_rec_icon} {_votos_lbl}"
+    else:
+        _rec_txt = (f"\n\n<b>📋 Recomendación:</b> ⚠️ Edge bajo ({ev:.1f}%) — sin análisis de expertos"
+                    if ev < 5.0 else "")
+
     _send(chat_id, (
         f"🎯 <b>{home} vs {away}</b>\n\n"
         f"Pick: <b>{pick}</b>\n"
@@ -343,6 +372,8 @@ def _cmd_analizar(chat_id: str, args: str):
         f"Confianza: {conf_icon} {conf}\n"
         f"Stake sugerido: ${stake:.2f}\n"
         f"{cands_txt}"
+        f"{_experts_txt}"
+        f"{_rec_txt}"
     ))
 
 
