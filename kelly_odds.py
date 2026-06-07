@@ -4059,11 +4059,11 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
 
     print(f"\n🔍 ANÁLISIS: {home} vs {away}  [{sport_key}]")
 
-    if game_starts_soon(commence, 60):
+    if game_starts_soon(commence, 60) and not force_panel:
         print(f"   ⏰ OMITIDO — inicia en < 60 min")
         return None
     tc = _timing_check(commence, is_mlb)
-    if tc["skip"]:
+    if tc["skip"] and not force_panel:
         print(f"   ⏰ OMITIDO — fuera de ventana horaria")
         return None
 
