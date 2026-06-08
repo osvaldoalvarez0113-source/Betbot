@@ -4508,6 +4508,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
 
     candidates  = []   # {label, true_prob, odds, book, ev_pct, kelly_pct, stake, safest}
     _all_evs: list = []   # [(label, ev_pct)] for every candidate tried, pass or fail
+    _all_mkts:  dict = {}   # label → {prob, ev_pct, odds, book} — ALL markets evaluated
     context     = {}
 
     h2h_odds    = _extract_h2h_best(game)
@@ -4782,6 +4783,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             ev = (true_p_capped * odds - 1) * 100  # EV computed on capped probability
             r  = kelly_stake(true_p_capped, odds)
             _all_evs.append((lbl, round(ev, 1)))
+            _all_mkts[lbl] = {"prob": true_p_capped, "ev_pct": round(ev, 1),
+                               "odds": odds, "book": book}
             if ev >= EV_MIN_PCT and r["stake"] > 0:
                 # Improvement 2: ML requires ≥62% probability (checked after cap)
                 if true_p_capped < PROB_MIN_ML:
@@ -4961,6 +4964,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 ev = (p * odds - 1) * 100   # EV = true Poisson prob × decimal odds − 1
                 r  = kelly_stake(p_kelly, odds)
                 _all_evs.append((side_label, round(ev, 1)))
+                _all_mkts[side_label] = {"prob": p, "ev_pct": round(ev, 1),
+                                         "odds": odds, "book": bk_name}
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
                     _tot_cands.append({"label": side_label, "true_prob": p, "odds": odds,
                                        "book": bk_name, "ev_pct": round(ev, 1),
@@ -4985,6 +4990,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             ev   = (p_cover * odds - 1) * 100
             r    = kelly_stake(p_cover, odds)
             _all_evs.append((lbl, round(ev, 1)))
+            _all_mkts[lbl] = {"prob": p_cover, "ev_pct": round(ev, 1),
+                               "odds": odds, "book": book}
             if ev >= EV_MIN_PCT and r["stake"] > 0:
                 candidates.append({"label": lbl, "true_prob": p_cover, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
@@ -5012,6 +5019,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 ev = (_f5_p_c * _f5_odds - 1) * 100
                 r  = kelly_stake(_f5_p_c, _f5_odds)
                 _all_evs.append((_f5_lbl, round(ev, 1)))
+                _all_mkts[_f5_lbl] = {"prob": _f5_p_c, "ev_pct": round(ev, 1),
+                                       "odds": _f5_odds, "book": _f5_bk}
                 if ev >= EV_MIN_PCT and r["stake"] > 0 and _f5_p_c >= PROB_MIN_ML:
                     candidates.append({"label": _f5_lbl, "true_prob": _f5_p_c,
                                        "odds": _f5_odds, "book": _f5_bk,
@@ -5039,6 +5048,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 ev = (_ft_p * _ft_odds - 1) * 100
                 r  = kelly_stake(_ft_p, _ft_odds)
                 _all_evs.append((_ft_lbl, round(ev, 1)))
+                _all_mkts[_ft_lbl] = {"prob": _ft_p, "ev_pct": round(ev, 1),
+                                       "odds": _ft_odds, "book": f5_book}
                 if ev >= EV_MIN_PCT and r["stake"] > 0 and _ft_p >= PROB_MIN_TOTALS:
                     _f5t_cands.append({"label": _ft_lbl, "true_prob": _ft_p,
                                        "odds": _ft_odds, "book": f5_book,
@@ -5067,6 +5078,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 ev = (_ht_p * _ht_od - 1) * 100
                 r  = kelly_stake(_ht_p, _ht_od)
                 _all_evs.append((_ht_lbl, round(ev, 1)))
+                _all_mkts[_ht_lbl] = {"prob": _ht_p, "ev_pct": round(ev, 1),
+                                       "odds": _ht_od, "book": _hits_bk}
                 if ev >= EV_MIN_PCT and r["stake"] > 0 and _ht_p >= PROB_MIN_TOTALS:
                     _hits_cands.append({"label": _ht_lbl, "true_prob": _ht_p,
                                         "odds": _ht_od, "book": _hits_bk,
@@ -5139,6 +5152,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                     ev = (_kp_p * _kp_pr - 1) * 100
                     r  = kelly_stake(_kp_p, _kp_pr)
                     _all_evs.append((_kp_lbl, round(ev, 1)))
+                    _all_mkts[_kp_lbl] = {"prob": _kp_p, "ev_pct": round(ev, 1),
+                                           "odds": _kp_pr, "book": "Props"}
                     if ev >= EV_MIN_PCT and r["stake"] > 0 and _kp_p >= 0.52:
                         candidates.append({"label": _kp_lbl, "true_prob": _kp_p,
                                            "odds": _kp_pr, "book": "Props",
@@ -5247,6 +5262,28 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         except Exception:
             pass
 
+        # Pitcher pace (pitches per inning — flags short outings)
+        _h_pace = _a_pace = None
+        try:
+            _h_pace = fetch_pitcher_pace(h_pname)
+        except Exception:
+            pass
+        try:
+            _a_pace = fetch_pitcher_pace(a_pname)
+        except Exception:
+            pass
+
+        # Bullpen load (innings used in last 3 days)
+        _bp_load_h = _bp_load_a = None
+        try:
+            _bp_load_h = fetch_bullpen_load(home)
+        except Exception:
+            pass
+        try:
+            _bp_load_a = fetch_bullpen_load(away)
+        except Exception:
+            pass
+
         # MLB A3: temperature adjustment
         temp_f     = (wind.get("temp_f") if wind else None)
         t_adj, t_label = _temp_run_adj(temp_f)
@@ -5324,6 +5361,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 (10.5 if a_era_eff < 2.00 else 9.5 if a_era_eff < 2.75 else
                   8.5 if a_era_eff < 3.50 else 7.5 if a_era_eff < 4.50 else 6.5) *
                 (6.0 if a_era_eff < 3.00 else 5.5 if a_era_eff < 4.00 else 5.0) / 9.0, 1),
+            "pitcher_pace_home":  _h_pace,
+            "pitcher_pace_away":  _a_pace,
+            "bullpen_load_home":  _bp_load_h,
+            "bullpen_load_away":  _bp_load_a,
         }
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
@@ -5717,16 +5758,17 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     # (el usuario quiere ver pitchers/stats/clima aunque no haya edge)
     if not top3:
         return {
-            "game_id":    game_id,
-            "match":      f"{home} vs {away}",
-            "time":       commence,
-            "sport":      sport_key,
-            "is_mlb":     is_mlb,
-            "candidates": [],
-            "context":    context,
-            "best_label": None,
-            "best_ev":    0.0,
+            "game_id":     game_id,
+            "match":       f"{home} vs {away}",
+            "time":        commence,
+            "sport":       sport_key,
+            "is_mlb":      is_mlb,
+            "candidates":  [],
+            "context":     context,
+            "best_label":  None,
+            "best_ev":     0.0,
             "claude_intel": None,
+            "all_markets": _all_mkts,
         }
 
     # ── Feature 7: data completeness guard ───────────────────────────────
@@ -5839,6 +5881,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         "best_label":  top3[0]["label"],
         "best_ev":     top3[0]["ev_pct"],
         "claude_intel": _claude_result_g,
+        "all_markets": _all_mkts,
     }
 
 
@@ -5912,15 +5955,29 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
 
             # Home pitcher block
             h_hand_txt = f" ({_hand_es(hnd_h)})" if _hand_es(hnd_h) else ""
+            _k9_h_inline = ""
+            try:
+                _ps_h_n = fetch_pitcher_stats(pn_h)
+                _k9_h_v = _ps_h_n.get("k9") if _ps_h_n else None
+                if _k9_h_v not in (None, "N/A", ""):
+                    _k9_h_inline = f"  |  K/9: {float(_k9_h_v):.1f}"
+            except Exception:
+                pass
             ctx_lines  = (
                 f"🔵 Pitcher local: {pn_h}{h_hand_txt}\n"
-                f"   ERA: {er_h:.2f} — {_era_label(er_h)}\n"
+                f"   ERA: {er_h:.2f} — {_era_label(er_h)}{_k9_h_inline}\n"
             )
             if fip_h is not None:
                 ctx_lines += (
                     f"   FIP (rendimiento real): {fip_h:.2f} — {_era_label(fip_h)}\n"
                     + _fip_luck(er_h, fip_h)
                 )
+            _pace_h_ctx = ctx.get("pitcher_pace_home")
+            if _pace_h_ctx:
+                ctx_lines += f"   Ritmo: {_pace_h_ctx['avg_pi']} pitches/entrada"
+                if _pace_h_ctx.get("flag"):
+                    ctx_lines += f" {_pace_h_ctx['flag']}"
+                ctx_lines += "\n"
             # ── Elite Source 1: Statcast block — home pitcher ────────────────
             sc_h = ctx.get("statcast_home")
             sc_a = ctx.get("statcast_away")
@@ -5930,15 +5987,29 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
 
             # Away pitcher block
             a_hand_txt = f" ({_hand_es(hnd_a)})" if _hand_es(hnd_a) else ""
+            _k9_a_inline = ""
+            try:
+                _ps_a_n = fetch_pitcher_stats(pn_a)
+                _k9_a_v = _ps_a_n.get("k9") if _ps_a_n else None
+                if _k9_a_v not in (None, "N/A", ""):
+                    _k9_a_inline = f"  |  K/9: {float(_k9_a_v):.1f}"
+            except Exception:
+                pass
             ctx_lines += (
                 f"🔴 Pitcher visita: {pn_a}{a_hand_txt}\n"
-                f"   ERA: {er_a:.2f} — {_era_label(er_a)}\n"
+                f"   ERA: {er_a:.2f} — {_era_label(er_a)}{_k9_a_inline}\n"
             )
             if fip_a is not None:
                 ctx_lines += (
                     f"   FIP (rendimiento real): {fip_a:.2f} — {_era_label(fip_a)}\n"
                     + _fip_luck(er_a, fip_a)
                 )
+            _pace_a_ctx = ctx.get("pitcher_pace_away")
+            if _pace_a_ctx:
+                ctx_lines += f"   Ritmo: {_pace_a_ctx['avg_pi']} pitches/entrada"
+                if _pace_a_ctx.get("flag"):
+                    ctx_lines += f" {_pace_a_ctx['flag']}"
+                ctx_lines += "\n"
             # ── Elite Source 1: Statcast block — away pitcher ────────────────
             ctx_lines += _statcast_alert_block(pn_a, sc_a, er_a)
 
@@ -6048,18 +6119,34 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                         f"   {game_strs}\n"
                         f"   Balance: {recent['wins']} ganados, {recent['losses']} perdidos\n"
                     )
+            # Bullpen load — últimos 3 días
+            _bp_load_h_n = ctx.get("bullpen_load_home")
+            _bp_load_a_n = ctx.get("bullpen_load_away")
+            if _bp_load_h_n or _bp_load_a_n:
+                ctx_lines += "⚾ Bullpen (últimos 3 días):\n"
+                if _bp_load_h_n:
+                    ctx_lines += f"   {home_es}: {_bp_load_h_n['ip_3d']} inn"
+                    if _bp_load_h_n.get("flag"):
+                        ctx_lines += f" {_bp_load_h_n['flag']}"
+                    ctx_lines += "\n"
+                if _bp_load_a_n:
+                    ctx_lines += f"   {away_es}: {_bp_load_a_n['ip_3d']} inn"
+                    if _bp_load_a_n.get("flag"):
+                        ctx_lines += f" {_bp_load_a_n['flag']}"
+                    ctx_lines += "\n"
             # Umpire
             ump = ctx.get("umpire")
             if ump and ump.get("name"):
-                if ump["tendency"] == "OVER":
-                    ump_note = "zona apretada → puede inflar el total"
-                elif ump["tendency"] == "UNDER":
-                    ump_note = "zona expandida → favorece el Under"
+                _tend = ump.get("tendency", "NEUTRAL")
+                if _tend == "OVER":
+                    ump_note = "zona cerrada (apretada) — favorece hits y OVER"
+                elif _tend == "UNDER":
+                    ump_note = "zona amplia (expandida) — favorece ponches y UNDER"
                 else:
-                    ump_note = "historial de juegos con score normal"
+                    ump_note = "zona normal — sin tendencia marcada"
                 ctx_lines += (
                     f"👨‍⚖️ Árbitro: {ump['name']}\n"
-                    f"   Historial: {ump_note}\n"
+                    f"   Tendencia: {ump_note}\n"
                 )
             # TBD pitcher
             if ctx.get("tbd_note"):
@@ -6312,6 +6399,23 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                 f"{odds_line}"
             )
 
+        # All-markets block (shows every evaluated market, not just top picks)
+        _all_mkts_n   = a.get("all_markets", {})
+        _cand_lbs_n   = {c["label"] for c in a["candidates"]}
+        all_mkts_lines = ""
+        _has_k_n = False
+        for _lbl, _m in _all_mkts_n.items():
+            _edge  = " ✅" if _lbl in _cand_lbs_n else ""
+            _ev_s  = f"+{_m['ev_pct']:.1f}%" if _m["ev_pct"] >= 0 else f"{_m['ev_pct']:.1f}%"
+            _ppc   = round(_m["prob"] * 100)
+            all_mkts_lines += (
+                f"  {_lbl}: {_ppc}% | {_ev_s} | {_m['odds']:.2f} @ {_m['book']}{_edge}\n"
+            )
+            if "⚡" in _lbl:
+                _has_k_n = True
+        if not _has_k_n and is_mlb and _all_mkts_n:
+            all_mkts_lines += "  ⚡ Props K: sin K/9 confirmado >8.5 — se prefiere ML\n"
+
         # Verdict — cap to MEDIA whenever any ⚠️ warning is present
         if tc.get("cap_conf") or has_warning:
             verdict = f"{_DIV3}\n🟡 CONFIANZA: MEDIA"
@@ -6321,6 +6425,12 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         _claude_blk = _claude_block(a.get("claude_intel"))
         _dq_line_a  = ("✅ Datos verificados\n" if not has_warning
                        else "⚠️ Verificar antes de apostar — algunos datos sin confirmar\n")
+
+        _mkts_section = (
+            f"{_DIV}\n📊 TODOS LOS MERCADOS\n{_DIV}\n{all_mkts_lines}"
+            if all_mkts_lines else ""
+        )
+
         body = (
             f"{emoji} {match_es}\n"
             f"{action_line}\n"
@@ -6329,8 +6439,9 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             f"📋 CONTEXTO\n"
             f"{_DIV}\n"
             f"{ctx_lines}"
+            f"{_mkts_section}"
             f"{_DIV}\n"
-            f"📊 TOP PICKS (EV > {EV_MIN_PCT:.0f}%)\n"
+            f"⭐ TOP PICKS (EV > {EV_MIN_PCT:.0f}%)\n"
             f"{_DIV}\n"
             f"{picks_lines}"
             f"{high_ev_flag}"
@@ -6379,69 +6490,140 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
 def build_analizar_text(result: dict) -> list:
     """
     Build Telegram-HTML message parts for /analizar (manual analysis).
-    Returns a list of strings (parts) — each fits in one Telegram message.
-    Format mirrors notify_game_analysis: context, picks, expert panel.
+    Returns [p1, p2] — each fits in one Telegram message.
+    Format: CONTEXTO DEL JUEGO → TODOS LOS MERCADOS → PANEL DE EXPERTOS → RECOMENDACIÓN
     """
-    match   = result.get("match", "?")
+    match    = result.get("match", "?")
     home, away = (match.split(" vs ", 1) + [""])[:2] if " vs " in match else (match, "")
-    home_es = _es(home)
-    away_es = _es(away)
-    is_mlb  = result.get("is_mlb", False)
-    ctx     = result.get("context", {})
-    cands   = result.get("candidates", [])
-    ci      = result.get("claude_intel") or {}
-    gt      = _fmt_smart_gt(result.get("time", ""))
-    emoji   = _sport_emoji(result.get("sport", ""))
+    home_es  = _es(home)
+    away_es  = _es(away)
+    is_mlb   = result.get("is_mlb", False)
+    ctx      = result.get("context", {})
+    cands    = result.get("candidates", [])
+    ci       = result.get("claude_intel") or {}
+    gt       = _fmt_smart_gt(result.get("time", ""))
+    emoji    = _sport_emoji(result.get("sport", ""))
+    all_mkts = result.get("all_markets", {})
+    cand_lbs = {c["label"] for c in cands}
 
-    # ─── PARTE 1: Contexto ────────────────────────────────────────────────────
-    p1 = f"{emoji} <b>{home_es} vs {away_es}</b>\n⏰ {gt}\n{_DIV}\n📋 CONTEXTO\n{_DIV}\n"
+    # ─── PARTE 1: Contexto del juego ─────────────────────────────────────────
+    p1 = (
+        f"{emoji} <b>{home_es} vs {away_es}</b>\n"
+        f"⏰ {gt}\n{_DIV}\n📋 CONTEXTO DEL JUEGO\n{_DIV}\n"
+    )
 
     if is_mlb:
         def _hn(c):
             return "zurdo" if c == "L" else ("diestro" if c == "R" else None)
 
-        pn_h  = ctx.get("pname_home", "TBD")
-        pn_a  = ctx.get("pname_away", "TBD")
-        er_h  = ctx.get("era_home",  4.50)
-        er_a  = ctx.get("era_away",  4.50)
-        fip_h = ctx.get("fip_home")
-        fip_a = ctx.get("fip_away")
-        sc_h  = ctx.get("statcast_home")
-        sc_a  = ctx.get("statcast_away")
-        hnd_h = ctx.get("hand_home")
-        hnd_a = ctx.get("hand_away")
+        pn_h   = ctx.get("pname_home", "TBD")
+        pn_a   = ctx.get("pname_away", "TBD")
+        er_h   = ctx.get("era_home",  4.50)
+        er_a   = ctx.get("era_away",  4.50)
+        fip_h  = ctx.get("fip_home")
+        fip_a  = ctx.get("fip_away")
+        sc_h   = ctx.get("statcast_home")
+        sc_a   = ctx.get("statcast_away")
+        hnd_h  = ctx.get("hand_home")
+        hnd_a  = ctx.get("hand_away")
+        pace_h = ctx.get("pitcher_pace_home")
+        pace_a = ctx.get("pitcher_pace_away")
+        bp_h   = ctx.get("bullpen_load_home")
+        bp_a   = ctx.get("bullpen_load_away")
+        pf_h   = ctx.get("pform_h")
+        pf_a   = ctx.get("pform_a")
 
         h_ht = f" ({_hn(hnd_h)})" if _hn(hnd_h) else ""
         a_ht = f" ({_hn(hnd_a)})" if _hn(hnd_a) else ""
 
-        # Pitcher local
-        p1 += f"🔵 <b>Pitcher {home_es}</b>: {pn_h}{h_ht}\n   ERA: {er_h:.2f} — {_era_label(er_h)}\n"
+        # ── Pitcher local ─────────────────────────────────────────────────────
+        p1 += f"🔵 <b>Pitcher {home_es}</b>: {pn_h}{h_ht}\n"
+        _k9_h_str = ""
+        try:
+            _ps_h = fetch_pitcher_stats(pn_h)
+            _k9_v = _ps_h.get("k9") if _ps_h else None
+            if _k9_v not in (None, "N/A", ""):
+                _k9_h_str = f"  |  K/9: {float(_k9_v):.1f}"
+        except Exception:
+            pass
+        p1 += f"   ERA: {er_h:.2f} — {_era_label(er_h)}{_k9_h_str}\n"
         if fip_h is not None:
             p1 += f"   FIP: {fip_h:.2f} — {_era_label(fip_h)}\n"
+        if pace_h:
+            p1 += f"   Ritmo: {pace_h['avg_pi']} pitches/entrada"
+            if pace_h.get("flag"):
+                p1 += f" {pace_h['flag']}"
+            p1 += "\n"
+        if pf_h:
+            eras_str = " → ".join(str(e) for e in pf_h["eras"])
+            p1 += f"   Forma: {pf_h['trend']} | {eras_str}\n"
         p1 += _statcast_alert_block(pn_h, sc_h, er_h)
+        # Splits bateadores visitantes vs este pitcher
+        for lr in ctx.get("lr_notes", []):
+            if lr.get("lineup") == away and lr.get("verdict", "normal") != "normal":
+                avg_pct = f"{lr['avg']:.3f}".lstrip("0")
+                p1 += (
+                    f"   ⚔️ {away_es} batea {avg_pct} vs {lr['hand']}s"
+                    f" → {lr['verdict']} (favorece {_es(lr['favor'])})\n"
+                )
 
-        # Pitcher visitante
-        p1 += f"🔴 <b>Pitcher {away_es}</b>: {pn_a}{a_ht}\n   ERA: {er_a:.2f} — {_era_label(er_a)}\n"
+        # ── Pitcher visitante ─────────────────────────────────────────────────
+        p1 += f"🔴 <b>Pitcher {away_es}</b>: {pn_a}{a_ht}\n"
+        _k9_a_str = ""
+        try:
+            _ps_a = fetch_pitcher_stats(pn_a)
+            _k9_v_a = _ps_a.get("k9") if _ps_a else None
+            if _k9_v_a not in (None, "N/A", ""):
+                _k9_a_str = f"  |  K/9: {float(_k9_v_a):.1f}"
+        except Exception:
+            pass
+        p1 += f"   ERA: {er_a:.2f} — {_era_label(er_a)}{_k9_a_str}\n"
         if fip_a is not None:
             p1 += f"   FIP: {fip_a:.2f} — {_era_label(fip_a)}\n"
+        if pace_a:
+            p1 += f"   Ritmo: {pace_a['avg_pi']} pitches/entrada"
+            if pace_a.get("flag"):
+                p1 += f" {pace_a['flag']}"
+            p1 += "\n"
+        if pf_a:
+            eras_str = " → ".join(str(e) for e in pf_a["eras"])
+            p1 += f"   Forma: {pf_a['trend']} | {eras_str}\n"
         p1 += _statcast_alert_block(pn_a, sc_a, er_a)
+        # Splits bateadores locales vs este pitcher
+        for lr in ctx.get("lr_notes", []):
+            if lr.get("lineup") == home and lr.get("verdict", "normal") != "normal":
+                avg_pct = f"{lr['avg']:.3f}".lstrip("0")
+                p1 += (
+                    f"   ⚔️ {home_es} batea {avg_pct} vs {lr['hand']}s"
+                    f" → {lr['verdict']} (favorece {_es(lr['favor'])})\n"
+                )
 
-        # Bullpen ERA (live fetch)
-        for _t, _ts, _se in ((home, home_es, er_h), (away, away_es, er_a)):
-            try:
-                _, _bn = fetch_bullpen_era(_t, _se)
-                p1 += f"{_bn}\n"
-            except Exception:
-                pass
+        # ── Bullpen ───────────────────────────────────────────────────────────
+        try:
+            _bpera_h, _ = fetch_bullpen_era(home)
+            _bpera_a, _ = fetch_bullpen_era(away)
+            p1 += f"⚾ <b>Bullpen ERA</b>: {home_es} {_bpera_h:.2f} | {away_es} {_bpera_a:.2f}\n"
+        except Exception:
+            pass
+        if bp_h or bp_a:
+            p1 += "⚾ <b>Bullpen últimos 3 días</b>\n"
+            if bp_h:
+                p1 += f"   {home_es}: {bp_h['ip_3d']} inn"
+                if bp_h.get("flag"):
+                    p1 += f" {bp_h['flag']}"
+                p1 += "\n"
+            if bp_a:
+                p1 += f"   {away_es}: {bp_a['ip_3d']} inn"
+                if bp_a.get("flag"):
+                    p1 += f" {bp_a['flag']}"
+                p1 += "\n"
 
-        # Carreras anotadas/recibidas por juego
+        # ── Bateo + últimos juegos ────────────────────────────────────────────
         if "rs_home" in ctx:
             p1 += (
-                f"⚾ {home_es} — anota {ctx['rs_home']} | recibe {ctx['ra_home']} por juego\n"
-                f"⚾ {away_es} — anota {ctx['rs_away']} | recibe {ctx['ra_away']} por juego\n"
+                f"⚾ {home_es} — anota {ctx['rs_home']} | recibe {ctx['ra_home']} /juego\n"
+                f"⚾ {away_es} — anota {ctx['rs_away']} | recibe {ctx['ra_away']} /juego\n"
             )
-
-        # Bateo + tendencia últimos juegos
         for _t, _te, _bk in ((home, home_es, "bat_home"), (away, away_es, "bat_away")):
             bat = ctx.get(_bk)
             if bat:
@@ -6451,9 +6633,7 @@ def build_analizar_text(result: dict) -> list:
                     p1 += f"  |  OPS {ops:.3f} ({_ops_label(ops)})"
                 p1 += "\n"
                 if bat.get("k_pct") is not None:
-                    p1 += f"   Se poncha: {bat['k_pct']:.0f}%\n"
-                if bat.get("bb_pct") is not None:
-                    p1 += f"   BB%: {bat['bb_pct']:.0f}%\n"
+                    p1 += f"   Ponchados: {bat['k_pct']:.0f}%\n"
                 ins = _batting_insight(_t, ops, bat.get("k_pct"))
                 if ins:
                     p1 += f"{ins}\n"
@@ -6471,7 +6651,35 @@ def build_analizar_text(result: dict) -> list:
             except Exception:
                 pass
 
-        # Pinnacle
+        # ── Récord local/visitante ────────────────────────────────────────────
+        hs  = ctx.get("h_splits") or {}
+        as_ = ctx.get("a_splits") or {}
+        if hs.get("home_wpct") is not None or as_.get("away_wpct") is not None:
+            p1 += "📈 <b>Récord de locación</b>\n"
+            if hs.get("home_wpct") is not None:
+                p1 += (
+                    f"   🏠 {home_es} en casa: {hs['home_wpct']*100:.0f}%"
+                    f" | Anota {hs.get('home_rs','?')} | Recibe {hs.get('home_ra','?')}\n"
+                )
+            if as_.get("away_wpct") is not None:
+                p1 += (
+                    f"   🚗 {away_es} de visita: {as_['away_wpct']*100:.0f}%"
+                    f" | Anota {as_.get('away_rs','?')} | Recibe {as_.get('away_ra','?')}\n"
+                )
+
+        # ── Árbitro de home plate ─────────────────────────────────────────────
+        ump = ctx.get("umpire")
+        if ump and ump.get("name"):
+            tend = ump.get("tendency", "NEUTRAL")
+            if tend == "OVER":
+                ump_desc = "zona cerrada (apretada) — favorece hits y OVER"
+            elif tend == "UNDER":
+                ump_desc = "zona amplia (expandida) — favorece ponches y UNDER"
+            else:
+                ump_desc = "zona normal — sin tendencia marcada"
+            p1 += f"👨‍⚖️ Árbitro: {ump['name']} — {ump_desc}\n"
+
+        # ── Pinnacle, clima, línea, lesionados ────────────────────────────────
         pin = ctx.get("pinnacle_odds")
         if pin:
             raw_h = 1.0 / max(pin["home"], 1.001)
@@ -6481,40 +6689,18 @@ def build_analizar_text(result: dict) -> list:
                 f"📌 Pinnacle — {home_es}: {pin['home']:+.0f} ({round(raw_h/tot*100,1)}%)"
                 f"  |  {away_es}: {pin['away']:+.0f} ({round(raw_a/tot*100,1)}%)\n"
             )
-
-        # Clima y viento
         if ctx.get("temp_label"):
             p1 += f"{ctx['temp_label']}\n"
         if ctx.get("wind_info"):
             p1 += f"💨 {ctx['wind_info']}\n"
-
-        # Línea y movimiento
         if ctx.get("line_moved") and ctx.get("line_note"):
             p1 += f"📉 {ctx['line_note']}\n"
-
-        # Umpire
-        ump = ctx.get("umpire")
-        if ump and ump.get("name"):
-            p1 += f"👨‍⚖️ Árbitro: {ump['name']} — {ump.get('tendency','?')}\n"
-
-        # Lesionados
         for til, ils in ctx.get("il_data", {}).items():
             if ils:
                 p1 += f"🤕 Lesionados ({_es(til)}): {', '.join(ils[:4])}\n"
 
-        # Home/away splits
-        hs  = ctx.get("h_splits") or {}
-        as_ = ctx.get("a_splits") or {}
-        if hs.get("home_rs") and as_.get("away_rs"):
-            p1 += (
-                f"🏠 {home_es} en casa: {hs['home_rs']} anota | {hs['home_ra']} recibe"
-                f" | {hs['home_wpct']*100:.0f}% victorias\n"
-                f"🚗 {away_es} de visita: {as_['away_rs']} anota | {as_['away_ra']} recibe"
-                f" | {as_['away_wpct']*100:.0f}% victorias\n"
-            )
-
     else:
-        # Soccer
+        # Soccer context
         p1 += (
             f"💪 {home_es}: {_elo_tier(ctx.get('elo_home', 1500))}\n"
             f"💪 {away_es}: {_elo_tier(ctx.get('elo_away', 1500))}\n"
@@ -6537,9 +6723,20 @@ def build_analizar_text(result: dict) -> list:
         if ref and ref.get("name"):
             p1 += f"🟨 Árbitro: {ref['name']} — {ref.get('tendency','?')}\n"
 
-    # ─── PARTE 2: Picks ───────────────────────────────────────────────────────
-    p1 += f"{_DIV}\n📊 ANÁLISIS DE PICKS\n{_DIV}\n"
-    if cands:
+    # ─── TODOS LOS MERCADOS ───────────────────────────────────────────────────
+    p1 += f"{_DIV}\n📊 TODOS LOS MERCADOS\n{_DIV}\n"
+    _has_k = False
+    if all_mkts:
+        for lbl, m in all_mkts.items():
+            edge    = " ✅" if lbl in cand_lbs else ""
+            ev_s    = f"+{m['ev_pct']:.1f}%" if m["ev_pct"] >= 0 else f"{m['ev_pct']:.1f}%"
+            prob_pc = round(m["prob"] * 100)
+            p1 += f"  {lbl}: {prob_pc}% | {ev_s} | {m['odds']:.2f} @ {m['book']}{edge}\n"
+            if "⚡" in lbl:
+                _has_k = True
+        if not _has_k and is_mlb:
+            p1 += "  ⚡ Props K: sin K/9 confirmado >8.5 — se prefiere ML\n"
+    elif cands:
         for idx, c in enumerate(cands):
             rank = (["1️⃣", "2️⃣", "3️⃣"][idx] if idx < 3 else "🔹")
             safe = "\n   ✅ Pick más seguro" if c.get("safest") else ""
@@ -6557,7 +6754,7 @@ def build_analizar_text(result: dict) -> list:
             "   (Apostar sin edge esperado es -EV a largo plazo)\n"
         )
 
-    # ─── PARTE 3: Panel de expertos + recomendación ───────────────────────────
+    # ─── PARTE 2: Panel de expertos + recomendación ───────────────────────────
     experts   = ci.get("_expertos_detalle") or []
     _ci_icons = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}
 
@@ -6572,26 +6769,26 @@ def build_analizar_text(result: dict) -> list:
     else:
         p2 += "Sin análisis de expertos disponible.\n"
 
-    # Recomendación final
     final_apostar = ci.get("apostar")
     panel_razon   = ci.get("razonamiento") or ""
     best = cands[0] if cands else {}
 
+    p2 += f"{_DIV}\n"
     if ci:
         rec_icon = ("✅ APOSTAR" if final_apostar is True
                     else ("❌ PASAR" if final_apostar is False else "⚠️ VERIFICAR"))
-        p2 += f"{_DIV}\n📋 <b>RECOMENDACIÓN FINAL: {rec_icon}</b>\n"
+        p2 += f"📋 <b>RECOMENDACIÓN FINAL: {rec_icon}</b>\n"
         if best:
             p2 += (
                 f"Pick: <b>{best.get('label', '?')}</b>\n"
-                f"Stake sugerido: <b>${best.get('stake', 0):.0f}</b> @ {best.get('book','?')}\n"
+                f"Stake: <b>${best.get('stake', 0):.0f}</b> @ {best.get('book','?')}\n"
                 f"EV: +{best.get('ev_pct', 0):.1f}%  |  Prob: {round(best.get('true_prob', 0)*100)}%\n"
             )
         if panel_razon:
             p2 += f"<i>{panel_razon}</i>\n"
     else:
         p2 += (
-            f"{_DIV}\n📋 <b>RECOMENDACIÓN: ⚠️ SIN PICKS CON EDGE</b>\n"
+            "📋 <b>RECOMENDACIÓN: ⚠️ SIN PICKS CON EDGE</b>\n"
             "El modelo no encontró valor en la línea actual.\n"
             "El contexto de arriba tiene toda la info disponible.\n"
             "Usa tu criterio para decidir si apostar.\n"
@@ -8378,6 +8575,134 @@ def fetch_pitcher_recent_form(pitcher_name: str) -> dict | None:
         return result
     except Exception:
         return None
+
+
+# ── Pitcher pace: average pitches per inning (last 5 starts) ──────────────────
+_pitcher_pace_cache: dict = {}
+
+def fetch_pitcher_pace(pitcher_name: str) -> "dict | None":
+    """
+    Average pitches per inning from last 5 real starts (MLB Stats API game log).
+    Returns {avg_pi: float, starts: int, flag: str} or None.
+    flag is non-empty when avg_pi > 18 → short outing likely (bullpen factor).
+    """
+    if not pitcher_name or pitcher_name in ("TBD", ""):
+        return None
+    if pitcher_name in _pitcher_pace_cache:
+        return _pitcher_pace_cache[pitcher_name]
+    try:
+        search = _mlb_rest("/people/search", {"names": pitcher_name, "sportId": 1})
+        people = search.get("people", []) if search else []
+        if not people:
+            return None
+        pid    = people[0]["id"]
+        season = datetime.now().year
+        data   = _mlb_rest(f"/people/{pid}/stats", {
+            "stats": "gameLog", "group": "pitching",
+            "season": season, "limit": 10,
+        })
+        splits = (data.get("stats", [{}])[0].get("splits", [])
+                  if data and data.get("stats") else [])
+        starts = []
+        for s in splits:
+            stat   = s.get("stat", {})
+            ip_raw = stat.get("inningsPitched", "0") or "0"
+            ip     = float(ip_raw)
+            np_val = int(stat.get("numberOfPitches") or stat.get("pitchesThrown") or 0)
+            if ip >= 3.0 and np_val >= 30:
+                starts.append((np_val, ip))
+        last5 = starts[-5:] if len(starts) >= 5 else starts
+        if not last5:
+            return None
+        total_p = sum(p for p, i in last5)
+        total_i = sum(i for p, i in last5)
+        if total_i == 0:
+            return None
+        avg_pi = round(total_p / total_i, 1)
+        flag   = "⚠️ SALIDA CORTA PROBABLE — bullpen factor" if avg_pi > 18 else ""
+        result = {"avg_pi": avg_pi, "starts": len(last5), "flag": flag}
+        _pitcher_pace_cache[pitcher_name] = result
+        return result
+    except Exception:
+        return None
+
+
+# ── Bullpen load: innings pitched by relievers in last 3 days ─────────────────
+_bullpen_load_cache: dict = {}
+
+def fetch_bullpen_load(team_name: str) -> "dict | None":
+    """
+    Total innings pitched by relievers in the last 3 completed calendar days.
+    Returns {ip_3d: float, flag: str} or None.
+    flag non-empty when ip_3d > 8.0 (bullpen tired → risk for UNDER).
+    Uses /schedule to get game PKs, then /game/{pk}/boxscore per game.
+    """
+    today_dt  = datetime.now(CDT)
+    today_str = today_dt.strftime("%Y-%m-%d")
+    ck = f"{team_name}_{today_str}"
+    if ck in _bullpen_load_cache:
+        return _bullpen_load_cache[ck]
+    try:
+        # ── Resolve team ID ────────────────────────────────────────────────
+        tid = None
+        if HAS_STATSAPI:
+            tms = statsapi.lookup_team(team_name)
+            if tms:
+                tid = int(tms[0]["id"])
+        if not tid:
+            teams_data = _mlb_rest("/teams", {"sportId": 1, "season": MLB_YEAR})
+            for t in teams_data.get("teams", []):
+                nm = t.get("name", "") or t.get("teamName", "")
+                if team_name.lower() in nm.lower():
+                    tid = int(t["id"])
+                    break
+        if not tid:
+            return None
+        # ── Schedule for last 3 completed days ────────────────────────────
+        from_dt = (today_dt - timedelta(days=3)).strftime("%Y-%m-%d")
+        to_dt   = (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        sched   = _mlb_rest("/schedule", {
+            "sportId": 1, "teamId": tid,
+            "startDate": from_dt, "endDate": to_dt,
+        })
+        game_pks = [
+            g.get("gamePk")
+            for de in sched.get("dates", [])
+            for g in de.get("games", [])
+            if (g.get("status", {}).get("abstractGameState") or "") == "Final"
+            and g.get("gamePk")
+        ]
+        # ── Boxscore per game → sum reliever IP ───────────────────────────
+        total_bp_ip = 0.0
+        for gk in game_pks:
+            try:
+                bs      = _mlb_rest(f"/game/{gk}/boxscore", {})
+                teams_b = bs.get("teams", {})
+                for side in ("home", "away"):
+                    t_data = teams_b.get(side, {})
+                    t_id_b = int(t_data.get("team", {}).get("id") or 0)
+                    if t_id_b != tid:
+                        continue
+                    pitchers = t_data.get("pitchers", [])
+                    players  = t_data.get("players", {})
+                    for i, p_id in enumerate(pitchers):
+                        if i == 0:
+                            continue  # skip starter
+                        key    = f"ID{p_id}"
+                        pstats = players.get(key, {}).get("stats", {}).get("pitching", {})
+                        ip_raw = pstats.get("inningsPitched") or "0"
+                        total_bp_ip += _parse_ip(str(ip_raw))
+                    break
+            except Exception:
+                continue
+        flag   = "🔥 BULLPEN CANSADO — riesgo para UNDER" if total_bp_ip > 8.0 else ""
+        result = {"ip_3d": round(total_bp_ip, 1), "flag": flag}
+        _bullpen_load_cache[ck] = result
+        return result
+    except Exception as e:
+        print(f"  ⚠️  fetch_bullpen_load {team_name}: {e}")
+        return None
+
 
 # ── MLB A2: Home plate umpire ──────────────────────────────────────────────────
 _umpire_cache: dict = {}
