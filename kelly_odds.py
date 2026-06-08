@@ -2260,15 +2260,44 @@ def fetch_probable_pitchers_today():
 
 def _lookup_pitcher_data(home, away, pitchers):
     """
-    Fuzzy lookup in the pitchers dict using team name substrings.
-    Returns pitcher dict or empty dict.
+    Fuzzy lookup in the pitchers dict using token overlap scoring.
+
+    Scores each candidate by how many home/away tokens hit the correct
+    side of the key, then penalises cross-hits (tokens that bleed into
+    the wrong side).  This avoids false positives like 'sox' matching
+    both 'boston red sox' and 'chicago white sox' when only one team is
+    actually the home team.
+
+    Returns the best-scoring entry, or {} when nothing matches.
     """
+    if not pitchers:
+        return {}
+
+    home_words = set(home.lower().split())
+    away_words = set(away.lower().split())
+    best_score = 0
+    best_val   = {}
+
     for key, val in pitchers.items():
         h_key, a_key = key.split('|', 1)
-        if (any(w in h_key for w in home.lower().split()) and
-                any(w in a_key for w in away.lower().split())):
-            return val
-    return {}
+        h_words = set(h_key.split())
+        a_words = set(a_key.split())
+
+        h_match = len(home_words & h_words)   # home words landing on h_key  ✓
+        a_match = len(away_words & a_words)   # away words landing on a_key  ✓
+        h_cross = len(home_words & a_words)   # home words bleeding into a_key ✗
+        a_cross = len(away_words & h_words)   # away words bleeding into h_key ✗
+
+        # Need at least one genuine hit on each side before scoring
+        if h_match == 0 or a_match == 0:
+            continue
+
+        score = h_match + a_match - h_cross - a_cross
+        if score > best_score:
+            best_score = score
+            best_val   = val
+
+    return best_val
 
 def pitcher_run_adjustment(home_era, away_era):
     """
