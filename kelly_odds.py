@@ -3857,6 +3857,69 @@ def _extract_spread_best(game):
                         best[name] = (point, price, bk["title"])
     return best
 
+def _extract_f5_h2h_best(game):
+    """Best decimal odds per outcome in h2h_h1 (F5 / primera mitad ML). Returns {name: (price, book)}."""
+    best = {}
+    for bk in game.get("bookmakers", []):
+        if not _is_us_book(bk["title"]):
+            continue
+        for m in bk.get("markets", []):
+            if m["key"] == "h2h_h1":
+                for o in m.get("outcomes", []):
+                    name, price = o["name"], o["price"]
+                    if name not in best or price > best[name][0]:
+                        best[name] = (price, bk["title"])
+    return best
+
+def _extract_f5_total(game):
+    """
+    Extract F5 (primeras 5 entradas) totals line + odds from totals_h1 market.
+    Returns (line, over_odds, under_odds, bookmaker_name) or None.
+    """
+    preferred, fallback = None, None
+    for bk in game.get("bookmakers", []):
+        if not _is_us_book(bk["title"]):
+            continue
+        is_pref = bk["title"].lower() in PREFERRED_BOOKS
+        for m in bk.get("markets", []):
+            if m["key"] == "totals_h1":
+                by_name = {o["name"]: o for o in m.get("outcomes", [])}
+                if "Over" not in by_name or "Under" not in by_name:
+                    continue
+                entry = (
+                    by_name["Over"]["point"],
+                    by_name["Over"]["price"],
+                    by_name["Under"]["price"],
+                    bk["title"],
+                )
+                if is_pref:
+                    preferred = entry
+                elif fallback is None:
+                    fallback = entry
+    return preferred or fallback
+
+def _extract_hits_total(game):
+    """
+    Busca un mercado de hits totales combinados en los bookmakers.
+    Claves posibles: 'totals_hits', 'total_hits', 'batter_hits_total', etc.
+    Returns (line, over_odds, under_odds, book) or None.
+    """
+    for bk in game.get("bookmakers", []):
+        if not _is_us_book(bk["title"]):
+            continue
+        for m in bk.get("markets", []):
+            mkey = m.get("key", "").lower()
+            if "hit" in mkey and ("total" in mkey or "combined" in mkey):
+                by_name = {o["name"]: o for o in m.get("outcomes", [])}
+                if "Over" in by_name and "Under" in by_name:
+                    return (
+                        float(by_name["Over"]["point"]),
+                        float(by_name["Over"]["price"]),
+                        float(by_name["Under"]["price"]),
+                        bk["title"],
+                    )
+    return None
+
 def poisson_runline_prob(home_exp, away_exp, home_spread, max_runs=15):
     """
     P(home covers run line) given home_spread (e.g. -1.5 = home must win by 2+).
@@ -4517,6 +4580,136 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                                    "book": book, "ev_pct": round(ev, 1),
                                    "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
 
+        # ── F5 ML (primera mitad — moneyline primeras 5 entradas) ────────────
+        f5_h2h = _extract_f5_h2h_best(game)
+        if f5_h2h:
+            _era_diff_f5 = a_era_eff - h_era_eff   # positivo = pitcher local mejor
+            _f5_ml_adj   = max(-0.08, min(0.08, _era_diff_f5 * 0.03))
+            p_home_f5 = max(0.05, min(0.92, p_home + _f5_ml_adj))
+            p_away_f5 = 1.0 - p_home_f5
+            for _f5_tm, _f5_p, _f5_lbl in [
+                (home, p_home_f5, f"⚾ {home} F5 ML"),
+                (away, p_away_f5, f"⚾ {away} F5 ML"),
+            ]:
+                if _f5_tm not in f5_h2h:
+                    continue
+                _f5_odds, _f5_bk = f5_h2h[_f5_tm]
+                if _f5_odds > 4.0:
+                    continue
+                _f5_p_c = _cap_prob(_f5_p)
+                ev = (_f5_p_c * _f5_odds - 1) * 100
+                r  = kelly_stake(_f5_p_c, _f5_odds)
+                _all_evs.append((_f5_lbl, round(ev, 1)))
+                if ev >= EV_MIN_PCT and r["stake"] > 0 and _f5_p_c >= PROB_MIN_ML:
+                    candidates.append({"label": _f5_lbl, "true_prob": _f5_p_c,
+                                       "odds": _f5_odds, "book": _f5_bk,
+                                       "ev_pct": round(ev, 1),
+                                       "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # ── F5 Total (primeras 5 entradas — Over/Under) ───────────────────────
+        f5_tot = _extract_f5_total(game)
+        if f5_tot:
+            f5_line, f5_ov_odds, f5_un_odds, f5_book = f5_tot
+            _h_m_f5 = h_fip if h_fip is not None else h_era_eff
+            _a_m_f5 = a_fip if a_fip is not None else a_era_eff
+            f5_exp  = max(0.5, (home_exp + away_exp) * 0.52)
+            if _h_m_f5 < 2.75 or _a_m_f5 < 2.75:   # pitcher élite → menos carreras F5
+                f5_exp = max(0.5, f5_exp - 0.5)
+            for _ft_lbl, _is_f5_ov, _ft_p, _ft_odds in [
+                (f"📈 OVER {f5_line} F5",  True,
+                 poisson_ou_prob(f5_exp, f5_line, True),  f5_ov_odds),
+                (f"📉 UNDER {f5_line} F5", False,
+                 poisson_ou_prob(f5_exp, f5_line, False), f5_un_odds),
+            ]:
+                _ft_p_adj = min(0.95, _ft_p + 0.03) if not _is_f5_ov else _ft_p
+                ev = (_ft_p_adj * _ft_odds - 1) * 100
+                r  = kelly_stake(_ft_p_adj, _ft_odds)
+                _all_evs.append((_ft_lbl, round(ev, 1)))
+                if ev >= EV_MIN_PCT and r["stake"] > 0 and _ft_p_adj >= PROB_MIN_TOTALS:
+                    candidates.append({"label": _ft_lbl, "true_prob": _ft_p_adj,
+                                       "odds": _ft_odds, "book": f5_book,
+                                       "ev_pct": round(ev, 1),
+                                       "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # ── Hits totales combinados (Over/Under) ──────────────────────────────
+        _hits_mkt = _extract_hits_total(game)
+        if _hits_mkt and bat_h and bat_a:
+            _hits_line, _hits_ov_od, _hits_un_od, _hits_bk = _hits_mkt
+            _h_avg    = bat_h.get("avg") or 0.250
+            _a_avg    = bat_a.get("avg") or 0.250
+            _exp_hits = round((_h_avg * 30.0) + (_a_avg * 30.0), 1)
+            if h_era_eff < 3.0 or a_era_eff < 3.0:   # pitcher élite → menos hits
+                _exp_hits = max(4.0, _exp_hits - 1.5)
+            for _ht_lbl, _is_ht_ov, _ht_p, _ht_od in [
+                (f"🎯 HITS OVER {_hits_line}",  True,
+                 poisson_ou_prob(_exp_hits, _hits_line, True),  _hits_ov_od),
+                (f"🎯 HITS UNDER {_hits_line}", False,
+                 poisson_ou_prob(_exp_hits, _hits_line, False), _hits_un_od),
+            ]:
+                ev = (_ht_p * _ht_od - 1) * 100
+                r  = kelly_stake(_ht_p, _ht_od)
+                _all_evs.append((_ht_lbl, round(ev, 1)))
+                if ev >= EV_MIN_PCT and r["stake"] > 0 and _ht_p >= PROB_MIN_TOTALS:
+                    candidates.append({"label": _ht_lbl, "true_prob": _ht_p,
+                                       "odds": _ht_od, "book": _hits_bk,
+                                       "ev_pct": round(ev, 1),
+                                       "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+        # ── Ponches del pitcher titular (Strikeout K props) ───────────────────
+        try:
+            _ko_props = _fetch_player_props(game_id)
+            for _kp_nm, _kp_era, _kp_sc in [
+                (h_pname, h_era_eff, h_statcast),
+                (a_pname, a_era_eff, a_statcast),
+            ]:
+                if not _kp_nm or _kp_nm == "TBD":
+                    continue
+                _kp_key = next(
+                    (k for k in _ko_props
+                     if "pitcher_strikeouts" in k
+                     and _kp_nm.split()[-1].lower() in k.lower()),
+                    None,
+                )
+                if not _kp_key:
+                    continue
+                _kp_sides = _ko_props[_kp_key]
+                _kp_ov_d  = _kp_sides.get("Over", {})
+                _kp_un_d  = _kp_sides.get("Under", {})
+                _kp_line  = _kp_ov_d.get("point")
+                if not _kp_line:
+                    continue
+                _kp_line  = float(_kp_line)
+                _kp_ov_pr = float(_kp_ov_d.get("price", 1.90))
+                _kp_un_pr = float(_kp_un_d.get("price", 1.90))
+                _kp_k9    = (_kp_sc.get("k9") if _kp_sc and _kp_sc.get("k9") else None)
+                if not _kp_k9:
+                    _kp_k9 = (10.5 if _kp_era < 2.00 else
+                               9.5  if _kp_era < 2.75 else
+                               8.5  if _kp_era < 3.50 else
+                               7.5  if _kp_era < 4.50 else 6.5)
+                _kp_ip   = (6.0 if _kp_era < 3.00 else
+                             5.5 if _kp_era < 4.00 else 5.0)
+                _kp_expk = round(_kp_k9 * _kp_ip / 9.0, 2)
+                _kp_sn   = _kp_nm.split()[-1]
+                for _kp_lbl, _kp_p, _kp_pr in [
+                    (f"⚡ {_kp_sn} K OVER {_kp_line}",
+                     poisson_ou_prob(_kp_expk, _kp_line, True),  _kp_ov_pr),
+                    (f"⚡ {_kp_sn} K UNDER {_kp_line}",
+                     poisson_ou_prob(_kp_expk, _kp_line, False), _kp_un_pr),
+                ]:
+                    if _kp_pr < 1.50:
+                        continue
+                    ev = (_kp_p * _kp_pr - 1) * 100
+                    r  = kelly_stake(_kp_p, _kp_pr)
+                    _all_evs.append((_kp_lbl, round(ev, 1)))
+                    if ev >= EV_MIN_PCT and r["stake"] > 0 and _kp_p >= 0.52:
+                        candidates.append({"label": _kp_lbl, "true_prob": _kp_p,
+                                           "odds": _kp_pr, "book": "Props",
+                                           "ev_pct": round(ev, 1),
+                                           "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+        except Exception as _ke:
+            print(f"   ⚠️  K props: {_ke}")
+
         # Line movement flag
         h_cur = h2h_odds.get(home, (0,))[0]
         a_cur = h2h_odds.get(away, (0,))[0]
@@ -4649,6 +4842,20 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             "era_eff_away":   a_era_eff,
             # ── Elite Source 2: Pinnacle Market Reference ─────────────────────
             "pinnacle_odds":  pin_data,     # {"home": price, "away": price} or None
+            # ── Mercados extendidos (F5, Hits, Ponches) ───────────────────────
+            "f5_proj":   round((home_exp + away_exp) * 0.52, 2),
+            "f5_h2h_ok": bool(f5_h2h),
+            "f5_tot_ok": bool(f5_tot) if "f5_tot" in dir() else False,
+            "hits_proj": round(((bat_h.get("avg") or 0.250) * 30 +
+                                (bat_a.get("avg") or 0.250) * 30), 1) if bat_h and bat_a else None,
+            "ko_proj_home": round(
+                (10.5 if h_era_eff < 2.00 else 9.5 if h_era_eff < 2.75 else
+                  8.5 if h_era_eff < 3.50 else 7.5 if h_era_eff < 4.50 else 6.5) *
+                (6.0 if h_era_eff < 3.00 else 5.5 if h_era_eff < 4.00 else 5.0) / 9.0, 1),
+            "ko_proj_away": round(
+                (10.5 if a_era_eff < 2.00 else 9.5 if a_era_eff < 2.75 else
+                  8.5 if a_era_eff < 3.50 else 7.5 if a_era_eff < 4.50 else 6.5) *
+                (6.0 if a_era_eff < 3.00 else 5.5 if a_era_eff < 4.00 else 5.0) / 9.0, 1),
         }
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
@@ -6792,7 +6999,7 @@ def get_odds(sport_key):
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
             params={"apiKey": API_KEY, "regions": "us,us2,eu,uk,au",
-                    "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
+                    "markets": "h2h,totals,spreads,h2h_h1,totals_h1", "oddsFormat": "decimal"},
             timeout=10,
         )
         return r.json() if r.status_code == 200 else []
