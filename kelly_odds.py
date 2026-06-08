@@ -276,6 +276,7 @@ _ntfy_last_confirm_id: str = ""  # last ntfy message ID processed for confirmati
 _daily_exposure:      float = 0.0            # total stake queued today ($)
 _daily_exposure_date: "date" = date(2000, 1, 1)  # reset tracking when date changes
 _tg_broadcast_fn = None  # set by telegram_bot.iniciar_telegram; broadcasts to Telegram
+_ML_MODULE = None        # ml_model module set at startup; None = model unavailable
 
 _pitcher_cache: dict = {}   # date_str → {team_key: {home_era, away_era, ...}}
 _wc_form_cache: dict = {}       # (team_name, date_str) → {goals_for, goals_against, matches}
@@ -4766,11 +4767,46 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 p_adj = min(0.95, p + 0.03) if not is_over else p
                 if not is_over:
                     _pitch_notes.append("📊 Modelo prefiere UNDER (más confiable históricamente)")
+                # ── ML ensemble blend ─────────────────────────────────────────────
+                # Get ML probability for this side (OVER or UNDER) from the ensemble.
+                # predict_under_prob() returns P(UNDER wins); convert to the side we're
+                # evaluating.  Pinnacle's implied probability for the side is passed so
+                # the ML model's output is clamped to within 15pp of the sharp market.
+                _ml_p_side = None
+                if _ML_MODULE is not None:
+                    try:
+                        # Extract Pinnacle totals odds for calibration clamp
+                        _pin_tots_ml = _extract_pinnacle_totals(game)
+                        _pin_p_ml    = None
+                        if _pin_tots_ml:
+                            _raw_ov = 1.0 / max(_pin_tots_ml.get("over",  999), 1.001)
+                            _raw_un = 1.0 / max(_pin_tots_ml.get("under", 999), 1.001)
+                            _tot_ml = _raw_ov + _raw_un
+                            if _tot_ml > 0:
+                                # Pinnacle implied prob for the side we're evaluating
+                                _pin_p_ml = (
+                                    (_raw_ov / _tot_ml) if is_over
+                                    else (_raw_un / _tot_ml)
+                                )
+                        _under_prob_ml = _ML_MODULE.predict_under_prob(
+                            book_line, adj_total,
+                            is_over_pick=is_over,
+                            pinnacle_prob=_pin_p_ml,
+                        )
+                        if _under_prob_ml is not None:
+                            # Convert UNDER probability to the side being evaluated
+                            _ml_p_side = (1.0 - _under_prob_ml) if is_over else _under_prob_ml
+                    except Exception:
+                        pass   # silently skip ML if anything fails
                 # Improvement 4: blend model probability 70% + historical hit rate 30%
+                # If ML ensemble is available: model×50% + ML×30% + historical×20%
                 # p_kelly used ONLY for Kelly stake sizing (conservative bet sizing)
                 # EV uses p_adj (true model probability) per formula: EV = (true_prob × odds) - 1
                 _hist_rate = 0.526 if not is_over else 0.527
-                p_kelly = round(p_adj * 0.7 + _hist_rate * 0.3, 4)
+                if _ml_p_side is not None and _ML_MODULE is not None:
+                    p_kelly = _ML_MODULE.blend_prob(p_adj, _ml_p_side, _hist_rate)
+                else:
+                    p_kelly = round(p_adj * 0.7 + _hist_rate * 0.3, 4)
                 ev = (p_adj * odds - 1) * 100   # EV = (true_prob × decimal_odds) - 1
                 r  = kelly_stake(p_kelly, odds)
                 _all_evs.append((side_label, round(ev, 1)))
@@ -12839,6 +12875,7 @@ if __name__ == "__main__":
             _ml   = _ilu.module_from_spec(_spec)
             _spec.loader.exec_module(_ml)
             _ml.load()                   # Level 1A: load ML model into memory
+            _ML_MODULE = _ml
             print("  🤖 ML model inicializado al arranque")
     except Exception as _mle:
         print(f"  ⚠️  ML model startup skipped: {_mle}")
