@@ -2670,7 +2670,11 @@ def _apply_pinnacle_calibration(
 
         model_p = c["true_prob"]
         blended = round(model_p * 0.4 + pin_p * 0.6, 4)
-        div_pp  = abs(model_p - pin_p) * 100
+        # Divergencia se mide sobre la prob YA calibrada, no sobre la raw.
+        # blended = model×40% + Pinnacle×60% → la distancia restante con Pinnacle
+        # es siempre mucho menor que la distancia del modelo crudo.
+        # Ejemplo: model=87.2%, pin=50% → blended=64.9% → div=14.9pp (no 37.2pp)
+        div_pp  = abs(blended - pin_p) * 100
 
         # Recomputar EV y stake con prob calibrada
         odds      = c["odds"]
