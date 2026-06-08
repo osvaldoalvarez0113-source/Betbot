@@ -4581,7 +4581,9 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                                    "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
 
         # ── F5 ML (primera mitad — moneyline primeras 5 entradas) ────────────
-        f5_h2h = _extract_f5_h2h_best(game)
+        # F5 odds se obtienen por endpoint de evento (no en get_odds principal)
+        _f5_data = _fetch_f5_odds(game_id)
+        f5_h2h = _extract_f5_h2h_best(_f5_data)
         if f5_h2h:
             _era_diff_f5 = a_era_eff - h_era_eff   # positivo = pitcher local mejor
             _f5_ml_adj   = max(-0.08, min(0.08, _era_diff_f5 * 0.03))
@@ -4607,7 +4609,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
 
         # ── F5 Total (primeras 5 entradas — Over/Under) ───────────────────────
-        f5_tot = _extract_f5_total(game)
+        f5_tot = _extract_f5_total(_f5_data)
         if f5_tot:
             f5_line, f5_ov_odds, f5_un_odds, f5_book = f5_tot
             _h_m_f5 = h_fip if h_fip is not None else h_era_eff
@@ -4632,7 +4634,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
 
         # ── Hits totales combinados (Over/Under) ──────────────────────────────
-        _hits_mkt = _extract_hits_total(game)
+        _hits_mkt = _extract_hits_total(_f5_data)
         if _hits_mkt and bat_h and bat_a:
             _hits_line, _hits_ov_od, _hits_un_od, _hits_bk = _hits_mkt
             _h_avg    = bat_h.get("avg") or 0.250
@@ -6999,7 +7001,7 @@ def get_odds(sport_key):
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
             params={"apiKey": API_KEY, "regions": "us,us2,eu,uk,au",
-                    "markets": "h2h,totals,spreads,h2h_h1,totals_h1", "oddsFormat": "decimal"},
+                    "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
         return r.json() if r.status_code == 200 else []
@@ -11793,6 +11795,35 @@ def _fetch_player_props(event_id: str) -> dict:
         return result
     except Exception as e:
         print(f"  ⚠️  Props [{event_id[:8]}]: {e}")
+        return {}
+
+_f5_odds_cache: dict = {}   # event_id → game-like dict with h2h_h1 / totals_h1 bookmakers
+
+def _fetch_f5_odds(event_id: str) -> dict:
+    """
+    Obtiene odds de primera mitad (h2h_h1, totals_h1) para un evento MLB específico.
+    Retorna un dict con estructura idéntica a un game dict (bookmakers[]), o {} si falla.
+    Se obtiene por endpoint de evento para no romper get_odds() principal.
+    """
+    if not API_KEY or not event_id:
+        return {}
+    ck = f"f5_{event_id}"
+    if ck in _f5_odds_cache:
+        return _f5_odds_cache[ck]
+    try:
+        url = (f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{event_id}/odds"
+               f"?apiKey={API_KEY}&regions=us,us2,eu,uk&oddsFormat=decimal"
+               f"&markets=h2h_h1,totals_h1")
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            _f5_odds_cache[ck] = {}
+            return {}
+        data = r.json()
+        _f5_odds_cache[ck] = data
+        return data
+    except Exception as e:
+        print(f"  ⚠️  F5 odds [{event_id[:8]}]: {e}")
+        _f5_odds_cache[ck] = {}
         return {}
 
 def _format_props_alert(props: dict, h_pname: str, a_pname: str,
