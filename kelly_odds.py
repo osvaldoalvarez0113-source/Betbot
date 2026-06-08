@@ -4517,6 +4517,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 _over_edge > 1.0
             )
 
+            # Calcula EV de OVER y UNDER por separado; envía al panel solo el de mayor EV
+            _tot_cands = []
             for side_label, is_over, p, odds in [
                 (f"📈 OVER {book_line} carreras",  True,
                  poisson_ou_prob(adj_total, book_line, True),  over_odds),
@@ -4555,9 +4557,12 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 r  = kelly_stake(p_kelly, odds)
                 _all_evs.append((side_label, round(ev, 1)))
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
-                    candidates.append({"label": side_label, "true_prob": p_adj, "odds": odds,
+                    _tot_cands.append({"label": side_label, "true_prob": p_adj, "odds": odds,
                                        "book": bk_name, "ev_pct": round(ev, 1),
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+            # Solo el lado con mayor EV va al panel de expertos
+            if _tot_cands:
+                candidates.append(max(_tot_cands, key=lambda x: x["ev_pct"]))
 
         # Run line
         for team, is_home in [(home, True), (away, False)]:
@@ -4617,6 +4622,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             f5_exp  = max(0.5, (home_exp + away_exp) * 0.52)
             if _h_m_f5 < 2.75 or _a_m_f5 < 2.75:   # pitcher élite → menos carreras F5
                 f5_exp = max(0.5, f5_exp - 0.5)
+            # Calcula EV de OVER y UNDER F5 por separado; envía al panel solo el de mayor EV
+            _f5t_cands = []
             for _ft_lbl, _is_f5_ov, _ft_p, _ft_odds in [
                 (f"📈 OVER {f5_line} F5",  True,
                  poisson_ou_prob(f5_exp, f5_line, True),  f5_ov_odds),
@@ -4628,10 +4635,12 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 r  = kelly_stake(_ft_p_adj, _ft_odds)
                 _all_evs.append((_ft_lbl, round(ev, 1)))
                 if ev >= EV_MIN_PCT and r["stake"] > 0 and _ft_p_adj >= PROB_MIN_TOTALS:
-                    candidates.append({"label": _ft_lbl, "true_prob": _ft_p_adj,
+                    _f5t_cands.append({"label": _ft_lbl, "true_prob": _ft_p_adj,
                                        "odds": _ft_odds, "book": f5_book,
                                        "ev_pct": round(ev, 1),
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+            if _f5t_cands:
+                candidates.append(max(_f5t_cands, key=lambda x: x["ev_pct"]))
 
         # ── Hits totales combinados (Over/Under) ──────────────────────────────
         _hits_mkt = _extract_hits_total(_f5_data)
@@ -4642,6 +4651,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             _exp_hits = round((_h_avg * 30.0) + (_a_avg * 30.0), 1)
             if h_era_eff < 3.0 or a_era_eff < 3.0:   # pitcher élite → menos hits
                 _exp_hits = max(4.0, _exp_hits - 1.5)
+            # Calcula EV de HITS OVER y UNDER por separado; envía al panel solo el de mayor EV
+            _hits_cands = []
             for _ht_lbl, _is_ht_ov, _ht_p, _ht_od in [
                 (f"🎯 HITS OVER {_hits_line}",  True,
                  poisson_ou_prob(_exp_hits, _hits_line, True),  _hits_ov_od),
@@ -4652,10 +4663,12 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 r  = kelly_stake(_ht_p, _ht_od)
                 _all_evs.append((_ht_lbl, round(ev, 1)))
                 if ev >= EV_MIN_PCT and r["stake"] > 0 and _ht_p >= PROB_MIN_TOTALS:
-                    candidates.append({"label": _ht_lbl, "true_prob": _ht_p,
-                                       "odds": _ht_od, "book": _hits_bk,
-                                       "ev_pct": round(ev, 1),
-                                       "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+                    _hits_cands.append({"label": _ht_lbl, "true_prob": _ht_p,
+                                        "odds": _ht_od, "book": _hits_bk,
+                                        "ev_pct": round(ev, 1),
+                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+            if _hits_cands:
+                candidates.append(max(_hits_cands, key=lambda x: x["ev_pct"]))
 
         # ── Ponches del pitcher titular (Strikeout K props) ───────────────────
         try:
