@@ -3189,7 +3189,7 @@ def fetch_bullpen_era(team_name: str, starter_era: float = 4.20) -> "tuple[float
         bullpen_era = round(max(0.0, min(bullpen_era, 9.99)), 2)
 
         # ── Validation 1: plausibility range check ────────────────────────
-        if not (2.00 <= bullpen_era <= 7.00):
+        if not (1.00 <= bullpen_era <= 7.00):
             print(f"  ⚠️  Bullpen ERA {_es(team_name)} fuera de rango: {bullpen_era} — dato no verificado")
             _data_quality[ck] = {"verified": False, "source": "MLB API", "reason": "out_of_range"}
             pend_note = (
@@ -3873,10 +3873,10 @@ def poisson_runline_prob(home_exp, away_exp, home_spread, max_runs=15):
 # STAT RANGE VALIDATION (Feature 3)
 # ══════════════════════════════════════════════════════════════════════════════
 _STAT_RANGES: dict = {
-    "era":         (1.50, 8.00),
-    "fip":         (1.50, 8.00),
+    "era":         (0.50, 8.00),   # 0.50 mínimo — ERA élite legítima (ej. 1.46 Sanchez)
+    "fip":         (0.50, 8.00),   # mismo criterio que ERA
     "ops":         (0.500, 1.100),
-    "bullpen_era": (2.00, 7.00),
+    "bullpen_era": (1.00, 7.00),   # bullpens élite pueden bajar de 2.00
     "win_pct":     (0.20, 0.80),
     "rs_pg":       (2.0,  8.0),
     "ra_pg":       (2.0,  8.0),
@@ -4726,8 +4726,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         # Apply all adjustments to p_win / p_draw / p_loss
         _ml_delta_g = _streak_ml_delta + _ln_adj_g
         if abs(_ml_delta_g) > 0.001 or _draw_boost_g > 0.001:
-            p_win   = max(0.05, min(0.85, p_win  + _ml_delta_g))
-            p_loss  = max(0.05, min(0.85, p_loss - _ml_delta_g))
+            p_win   = max(0.05, min(0.92, p_win  + _ml_delta_g))
+            p_loss  = max(0.05, min(0.92, p_loss - _ml_delta_g))
             if _draw_boost_g > 0:
                 p_draw = min(0.60, p_draw + _draw_boost_g)
             _tot_g  = max(0.01, p_win + p_draw + p_loss)
@@ -7950,7 +7950,7 @@ def fetch_venue_temp(venue_city: str) -> float | None:
 _claude_cache: dict = {}
 
 # ── ERA validity window used by both pre-validator and range guard ────────────
-_ERA_MIN = 1.50
+_ERA_MIN = 0.50   # ERA élite legítima puede bajar de 1.50 (ej. Sanchez 1.46)
 _ERA_MAX = 8.00
 
 def _pre_validate_for_claude(game_data: dict, sport: str) -> "tuple[dict, list]":
@@ -7985,6 +7985,13 @@ def _pre_validate_for_claude(game_data: dict, sport: str) -> "tuple[dict, list]"
                        f"(fuera de rango {_ERA_MIN}–{_ERA_MAX})")
                 warnings.append(msg)
                 clean[era_key] = "DATO NO VERIFICADO"
+            elif fval < 2.00:
+                # ERA élite confirmada (< 2.00): dato válido, no marcar como sospechoso
+                note_key = era_key + "_elite_note"
+                clean[note_key] = (
+                    f"ERA élite confirmada ({fval:.2f}) — pitcher de primer nivel ✅"
+                )
+                print(f"  ✅  [pre-validate] ERA élite: {era_key}={fval:.2f} (pitcher de primer nivel)")
 
         # Pitcher name validation
         # game_data may have 'pname_home' (raw) or only 'pitcher_home' ("Name (ERA X.XX)")
@@ -8056,9 +8063,10 @@ _CLAUDE_SYSTEM = (
     "2) Que el pitcher esté asignado al equipo correcto, si no veto absoluto. "
     "3) Que el historial H2H no contradiga el pick por más de 3 carreras, si contradice veta. "
     "4) Que la suma RS + RA sea coherente con la dirección del pick. "
-    "5) Que probabilidades mayores a 85% se marquen como sospechosas. "
+    "5) Que probabilidades mayores a 92% se marquen como sospechosas. "
     "6) Que todos los factores apunten en la misma dirección que el pick. "
-    "7) Que ERAs menores a 2.0 tengan muestra suficiente de innings. "
+    "7) ERAs menores a 2.00 son datos válidos de pitchers élite — NO los marques como "
+    "sospechosos. Confirmarlos refuerza el pick (más dominancia del pitcher). "
     "8) Usar Pinnacle como referencia sharp del mercado. "
     "Si cualquier verificación falla, apostar debe ser False. "
     "Responde siempre en JSON con apostar, confianza, razon e inconsistencias."
