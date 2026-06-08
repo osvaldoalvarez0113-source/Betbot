@@ -2609,6 +2609,112 @@ def _build_pinnacle_panel_signal(
     return ""
 
 
+def _apply_pinnacle_calibration(
+    candidates: list,
+    game: dict,
+    home: str,
+) -> "tuple[list, list]":
+    """
+    Post-procesado de candidatos: blendea la probabilidad del modelo con la implícita
+    de Pinnacle y aplica un filtro de divergencia.
+
+    Para cada candidato donde Pinnacle tiene odds disponibles:
+      prob_final = (prob_modelo × 0.4) + (prob_pinnacle × 0.6)
+
+    Pinnacle pesa 60% porque es el mercado sharp más calibrado del mundo.
+    Luego se recalculan EV y stake con la probabilidad ajustada.
+
+    Si |prob_modelo − prob_pinnacle| > 20 pp:
+      - El stake se reduce a la mitad automáticamente.
+      - Se genera un texto de alerta para el panel de expertos.
+
+    Candidatos cuya prob calibrada queda por debajo de PROB_MIN son eliminados.
+
+    Returns (calibrated_candidates, divergence_alerts).
+    """
+    pin_h2h  = _extract_pinnacle_odds(game)
+    pin_tots = _extract_pinnacle_totals(game)
+
+    calibrated  = []
+    div_alerts  = []
+
+    for c in candidates:
+        label_up  = c["label"].upper()
+        is_over   = "OVER"  in label_up
+        is_under  = "UNDER" in label_up
+        is_totals = is_over or is_under
+        is_ml     = "ML"    in label_up and not is_totals
+
+        pin_p = None
+
+        if is_totals and pin_tots:
+            raw_ov  = 1.0 / max(pin_tots["over"],  1.001)
+            raw_un  = 1.0 / max(pin_tots["under"], 1.001)
+            tot_sum = raw_ov + raw_un
+            pin_p   = (raw_ov / tot_sum) if is_over else (raw_un / tot_sum)
+
+        elif is_ml and pin_h2h:
+            raw_h   = 1.0 / max(pin_h2h["home"], 1.001)
+            raw_a   = 1.0 / max(pin_h2h["away"], 1.001)
+            tot_sum = raw_h + raw_a
+            pin_p   = (raw_h / tot_sum) if (home.upper() in label_up) else (raw_a / tot_sum)
+
+        if pin_p is None:
+            calibrated.append(c)
+            continue
+
+        model_p = c["true_prob"]
+        blended = round(model_p * 0.4 + pin_p * 0.6, 4)
+        div_pp  = abs(model_p - pin_p) * 100
+
+        # Recomputar EV y stake con prob calibrada
+        odds      = c["odds"]
+        new_ev    = round((blended * odds - 1) * 100, 1)
+        new_r     = kelly_stake(blended, odds)
+        new_stake = new_r["stake"]
+
+        # Eliminar si la prob calibrada cae bajo el mínimo
+        if blended < PROB_MIN:
+            print(
+                f"   ⏭️  Pinnacle calibración: {c['label']} — "
+                f"prob ajustada {blended:.1%} < {PROB_MIN:.1%} mín — omitido"
+            )
+            continue
+
+        # Divergencia alta → stake ÷ 2 + alerta para el panel
+        if div_pp > 20.0:
+            new_stake = round(new_stake / 2, 2) if new_stake else 0.0
+            alert_txt = (
+                f"ALERTA: Divergencia alta entre modelo ({round(model_p * 100, 1)}%) "
+                f"y Pinnacle ({round(pin_p * 100, 1)}%) en '{c['label']}' — "
+                f"evaluar con precaución extra."
+            )
+            div_alerts.append(alert_txt)
+            print(
+                f"   ⚠️  Pinnacle div {div_pp:.0f}pp: {c['label']} "
+                f"prob {model_p:.1%}→{blended:.1%}  stake {c['stake']}→{new_stake}"
+            )
+        else:
+            print(
+                f"   📌 Pinnacle calib: {c['label']} "
+                f"prob {model_p:.1%}→{blended:.1%} (div {div_pp:.1f}pp)"
+            )
+
+        c = dict(c)   # copia superficial para no mutar el original
+        c["true_prob"]  = blended
+        c["ev_pct"]     = new_ev
+        c["stake"]      = new_stake
+        c["kelly_pct"]  = new_r["kelly_pct"]
+        if div_pp > 20.0:
+            c["stake_warn"] = (
+                (c.get("stake_warn") or "") +
+                f" ⚠️ stake÷2 div Pinnacle {div_pp:.0f}pp"
+            ).strip()
+        calibrated.append(c)
+
+    return calibrated, div_alerts
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ELITE SOURCE 3 — UNDERSTAT xG (SOCCER)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5348,6 +5454,12 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     # Drop any pick whose true probability is below the minimum threshold
     candidates = [c for c in candidates if c["true_prob"] >= PROB_MIN]
 
+    # ── Pinnacle calibration: blend model prob 40% + Pinnacle 60% ─────────
+    # Recomputes EV and stake for every candidate where Pinnacle has odds.
+    # Candidates that fall below PROB_MIN after blending are dropped.
+    # High-divergence picks (>20pp) get stake halved + divergence alert.
+    candidates, _pin_div_alerts = _apply_pinnacle_calibration(candidates, game, home)
+
     if not candidates:
         _best = max(_all_evs, key=lambda x: x[1]) if _all_evs else None
         if _best:
@@ -5417,6 +5529,11 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         _claude_data_g["pinnacle_panel_signal"] = _pin_signal
         _pin_icon = "✅" if "CONFIRMACIÓN" in _pin_signal else "⚠️"
         print(f"   📌 Pinnacle signal: {_pin_icon} {_pin_signal[:80]}…")
+    # ── Alertas de divergencia Pinnacle → panel ────────────────────────────
+    # Generadas por _apply_pinnacle_calibration cuando |modelo−Pinnacle| > 20pp.
+    # Se inyectan como texto en _claude_data_g para que los expertos las vean.
+    if _pin_div_alerts:
+        _claude_data_g["divergence_alerts"] = " | ".join(_pin_div_alerts)
     _claude_sport_g = "MLB" if is_mlb else "SOCCER"
     _top_ev = top3[0]["ev_pct"]
     if _top_ev < 5.0 and not force_panel:
