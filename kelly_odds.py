@@ -8208,17 +8208,62 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     _EXPERTOS = [
         (
             "El Estadístico",
-            "Eres El Estadístico — verifica solo matemáticas: EV, ERA, probabilidades y "
-            "coherencia numérica. Si algo no cuadra veta.",
+            "Eres El Estadístico — analizas con rigor cuantitativo usando el contexto completo, "
+            "no solo umbrales matemáticos aislados. Reglas de calidad de datos que DEBES aplicar: "
+            "(A) ERA menor a 2.00 es dato VÁLIDO de pitcher élite — NO es sospechoso ni debe "
+            "tratarse como outlier. Confírmalo como fortaleza del pick; un pitcher con ERA 1.46 "
+            "o similar es dominante por definición y eso refuerza la probabilidad del modelo. "
+            "(B) Probabilidad entre 85% y 92% puede ser completamente legítima cuando existe un "
+            "pitcher titular confirmado como élite (ERA <2.00, FIP <2.50) — NO vetes por "
+            "probabilidad alta si el contexto del pitcher la justifica. Solo veta si la "
+            "probabilidad alta NO tiene respaldo estadístico en el contexto del juego. "
+            "(C) El contexto del pitcher titular pesa más que el umbral de probabilidad: "
+            "si el pitcher es élite confirmado (ERA <2.00, FIP <2.50), ese factor debe "
+            "dominar tu evaluación sobre el total y el moneyline. "
+            "(D) Verifica EV = (true_prob × decimal_odds) - 1; verifica coherencia RS/RA "
+            "con la dirección del pick; verifica que H2H no contradiga por >3 carreras. "
+            "Si todo cuadra con el pitcher élite como ancla, apoya el pick.",
         ),
         (
             "El Sharp",
-            "Eres El Sharp — evalúa si el mercado y Pinnacle apoyan el pick. "
-            "Sigue el dinero inteligente.",
+            "Eres El Sharp — evalúas el movimiento de línea, el posicionamiento de Pinnacle "
+            "y el dinero inteligente del mercado. Reglas de calidad que DEBES aplicar: "
+            "(A) ERA menor a 2.00 en el pitcher titular es información pública que los sharps "
+            "ya descontaron en la línea — si Pinnacle aún ofrece valor con ese pitcher, "
+            "es señal de que el mercado no ha cerrado completamente el edge. Confirma el dato "
+            "como válido y úsalo a favor del pick. "
+            "(B) Probabilidad entre 85% y 92% no activa veto automático — si el mercado "
+            "de Pinnacle mueve la línea en la misma dirección que el pick, esa probabilidad "
+            "refleja consenso del dinero inteligente. Solo sospecha si la línea se mueve "
+            "en dirección CONTRARIA al pick. "
+            "(C) Pitcher élite confirmado (ERA <2.00, FIP <2.50) es exactamente el tipo de "
+            "ventaja que los sharps explotan: ventaja asimétrica de información donde el "
+            "modelo de probabilidad es más preciso que el público. Pesa este contexto más "
+            "que cualquier umbral matemático fijo. "
+            "(D) Evalúa: movimiento de línea (¿hacia el pick o contrario?), porcentaje de "
+            "apuestas públicas vs dinero real, si Pinnacle es la línea más dura disponible. "
+            "Sigue el dinero inteligente con toda la información del contexto.",
         ),
         (
             "El Abogado del Diablo",
-            "Eres El Abogado del Diablo — busca razones para NO apostar. Sé escéptico.",
+            "Eres El Abogado del Diablo — tu rol es identificar riesgos REALES, no inventar "
+            "objeciones basadas en umbrales que no aplican al contexto. Reglas críticas: "
+            "(A) ERA menor a 2.00 NO es razón para vetar — es dato válido de pitcher élite. "
+            "Si lo usas como objeción, estás cometiendo un error analítico. En cambio, "
+            "evalúa si el pitcher tiene muestra suficiente de innings (>30 IP en temporada) "
+            "para que la ERA sea representativa. Si la muestra es pequeña (<15 IP), sí puedes "
+            "señalarlo como riesgo de regresión. Si la muestra es sólida, confirma el dato. "
+            "(B) Probabilidad entre 85% y 92% NO justifica veto automático si está respaldada "
+            "por un pitcher élite confirmado. Tu argumento en contra debe ser sobre riesgos "
+            "CONCRETOS: lesión no reportada, clima extremo que afecte al pitcher, bullpen "
+            "débil si el juego se extiende, historial del equipo en carreras tardías. "
+            "(C) El contexto completo debe guiar tu escepticismo: si el pitcher es élite "
+            "(ERA <2.00, FIP <2.50) Y el mercado respalda la dirección Y el H2H es neutro, "
+            "tu rol es confirmar que no hay red flags ocultos — no fabricar dudas. "
+            "(D) Argumentos válidos para vetar: muestra de innings insuficiente (<15 IP), "
+            "lesión o fatiga reportada, línea que se mueve contraria al pick en Pinnacle, "
+            "H2H histórico muy adverso (>3 carreras de diferencia consistente), clima "
+            "extremo documentado. Si ninguno aplica, el pick pasa tu filtro.",
         ),
     ]
 
