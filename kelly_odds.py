@@ -1834,6 +1834,10 @@ def fetch_team_streak_mlb(team: str) -> "dict | None":
 
         results  = []
         run_diff = 0
+        total_rs = 0
+        total_ra = 0
+        overs_10 = 0
+        unders_10 = 0
         for g in last10:
             opp    = g["away_team"] if g["home_team"] == team else g["home_team"]
             sc_map = {s["name"]: int(s["score"])
@@ -1842,9 +1846,17 @@ def fetch_team_streak_mlb(team: str) -> "dict | None":
             op_sc  = sc_map.get(opp,  0)
             results.append("W" if my_sc > op_sc else "L")
             run_diff += my_sc - op_sc
+            total_rs += my_sc
+            total_ra += op_sc
+            combined  = my_sc + op_sc
+            if combined > 8.5:
+                overs_10 += 1
+            elif combined < 8.5:
+                unders_10 += 1
 
         wins_10   = results.count("W")
         losses_10 = results.count("L")
+        n10 = max(len(last10), 1)
 
         # Current streak from most recent game
         streak_type = results[0] if results else "L"
@@ -1879,6 +1891,11 @@ def fetch_team_streak_mlb(team: str) -> "dict | None":
             "is_cold":     is_cold,
             "label":       label,
             "emoji":       emoji,
+            "avg_rs":      round(total_rs / n10, 1),
+            "avg_ra":      round(total_ra / n10, 1),
+            "avg_total":   round((total_rs + total_ra) / n10, 1),
+            "overs_10":    overs_10,
+            "unders_10":   unders_10,
         }
         _mlb_streak_cache[ck] = result
         return result
@@ -2547,6 +2564,104 @@ def _extract_pinnacle_totals(game: dict) -> "dict | None":
                             un   = o.get("price")
                     if ov and un and line is not None:
                         return {"line": line, "over": ov, "under": un}
+    return None
+
+
+# ── Line movement detection (session-level opening vs current) ────────────────
+_line_open_cache: dict = {}   # ck → {"total": float, "h_impl": float, "a_impl": float}
+
+def _detect_line_movement(game_obj: dict, home: str, away: str) -> "str | None":
+    """
+    Detect sharp-money line movement by comparing current odds vs first-seen odds
+    within the same bot session.  Returns a human-readable signal string when:
+      • Total (O/U) point moves ≥ 0.5 pts in either direction, OR
+      • ML implied-probability moves ≥ 5 percentage points for either team.
+    On the first call for a given game, stores the snapshot and returns None.
+    """
+    gid   = game_obj.get("id", f"{home}|{away}")
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck    = f"{gid}_{today}"
+
+    # Extract current total point + ML implied probs (prefer Pinnacle, fall back to any)
+    current_total: "float | None" = None
+    h_impl: "float | None"        = None
+    a_impl: "float | None"        = None
+
+    def _amer_to_impl(price: float) -> float:
+        return (100 / (price + 100) * 100) if price > 0 else (abs(price) / (abs(price) + 100) * 100)
+
+    for priority in ("pinnacle", ""):
+        for bk in game_obj.get("bookmakers", []):
+            if priority and priority not in bk.get("key", "").lower():
+                continue
+            for mkt in bk.get("markets", []):
+                if mkt["key"] == "totals" and current_total is None:
+                    for o in mkt.get("outcomes", []):
+                        if o.get("name") == "Over" and o.get("point") is not None:
+                            try:
+                                current_total = float(o["point"])
+                            except Exception:
+                                pass
+                if mkt["key"] == "h2h" and h_impl is None:
+                    for o in mkt.get("outcomes", []):
+                        try:
+                            impl = round(_amer_to_impl(float(o["price"])), 1)
+                            if o["name"] == home:
+                                h_impl = impl
+                            elif o["name"] == away:
+                                a_impl = impl
+                        except Exception:
+                            pass
+        if current_total is not None and h_impl is not None:
+            break
+
+    snapshot: dict = {}
+    if current_total is not None:
+        snapshot["total"] = current_total
+    if h_impl is not None:
+        snapshot["h_impl"] = h_impl
+    if a_impl is not None:
+        snapshot["a_impl"] = a_impl
+
+    if not snapshot:
+        return None
+
+    # First time seen → store snapshot, no movement to report yet
+    if ck not in _line_open_cache:
+        _line_open_cache[ck] = snapshot
+        return None
+
+    prev     = _line_open_cache[ck]
+    signals  = []
+
+    # Total point movement ≥ 0.5
+    if prev.get("total") is not None and current_total is not None:
+        delta = round(current_total - prev["total"], 1)
+        if abs(delta) >= 0.5:
+            direction = "OVER" if delta > 0 else "UNDER"
+            signals.append(
+                f"TOTAL movió {abs(delta):.1f} pts → {direction} "
+                f"(apertura {prev['total']:.1f} → actual {current_total:.1f})"
+            )
+
+    # ML implied probability movement ≥ 5 pp
+    for impl_key, team_name, opp_name in [
+        ("h_impl", home, away),
+        ("a_impl", away, home),
+    ]:
+        old_val = prev.get(impl_key)
+        new_val = h_impl if impl_key == "h_impl" else a_impl
+        if old_val is not None and new_val is not None:
+            delta_pp = round(new_val - old_val, 1)
+            if abs(delta_pp) >= 5.0:
+                direction = team_name if delta_pp > 0 else opp_name
+                signals.append(
+                    f"ML {_es(team_name)}: {abs(delta_pp):.0f}pp → {_es(direction)} "
+                    f"(apertura {old_val:.0f}% → actual {new_val:.0f}%)"
+                )
+
+    if signals:
+        return "⚡ LÍNEA MOVIÓ — dinero sharp detectado: " + " | ".join(signals)
     return None
 
 
@@ -3850,6 +3965,8 @@ def analyze_totals(games, sport_key):
         if edge_val < 5.0:
             print(f"   ⏭️  Panel omitido — edge {edge_val:.1f}% < 5% mínimo ({bet_side} {book_line})")
             continue
+        if is_mlb:
+            _tc_data.update(_enrich_panel_data(_tc_data, g))
         _tc_claude = panel_expertos(_tc_data, _tc_sport)
         if _tc_claude:
             _tcc  = _tc_claude.get("confianza", "N/D")
@@ -5611,6 +5728,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         print(f"   ⏭️  Panel omitido — EV {_top_ev:.1f}% < 5% mínimo ({top3[0]['label']})")
         _claude_result_g = None
     else:
+        if is_mlb:
+            _claude_data_g.update(_enrich_panel_data(_claude_data_g, game))
         _claude_result_g = panel_expertos(_claude_data_g, _claude_sport_g)
 
     if _claude_result_g:
@@ -8777,6 +8896,113 @@ def analyze_with_claude(game_data: dict, sport: str,
         print(f"  ⚠️  Claude API error: {e}")
         _claude_cache[_ck] = None
         return None
+
+
+def _enrich_panel_data(game_data: dict, game_obj: "dict | None" = None) -> dict:
+    """
+    Enrich game_data with Statcast metrics, pitcher trends, team run averages,
+    and line movement before the expert panel deliberates.
+
+    Returns a dict of additional keys to merge into game_data.  All fetches use
+    existing per-day caches so there is no duplicate HTTP overhead.
+
+    Keys injected (all optional — only set when data is available):
+      statcast_pitcher_home / statcast_pitcher_away
+          K/9, Whiff%, Barrel%, xERA from Baseball Savant + MLB Stats API
+      tendencia_pitcher_home / tendencia_pitcher_away
+          ERA últimas 3 salidas + trend label
+      tendencia_equipo_home / tendencia_equipo_away
+          Últimos 10 juegos: record, avg RS, avg RA, OVER/UNDER ratio
+      linea_movimiento
+          Signal string when total moves ≥0.5 pts or ML implied prob moves ≥5pp
+    """
+    enriched: dict = {}
+
+    # ── Parse teams and pitcher names ──────────────────────────────────────────
+    match = game_data.get("match", "")
+    if " vs " not in match:
+        return enriched
+    home, away = match.split(" vs ", 1)
+
+    h_pname, _ = _parse_pitcher(game_data.get("pitcher_home", ""))
+    a_pname, _ = _parse_pitcher(game_data.get("pitcher_away", ""))
+
+    # ── 1. Statcast + K/9 per pitcher ─────────────────────────────────────────
+    for pname, key in [(h_pname, "statcast_pitcher_home"),
+                       (a_pname, "statcast_pitcher_away")]:
+        if not pname or pname in ("TBD", ""):
+            continue
+        parts: list[str] = []
+        try:
+            ps  = fetch_pitcher_stats(pname)
+            k9  = ps.get("k9", "N/A")
+            if k9 not in ("N/A", None, ""):
+                parts.append(f"K/9: {k9}")
+        except Exception:
+            pass
+        try:
+            sc = fetch_statcast_pitcher(pname)
+            if sc:
+                if sc.get("whiff_pct") is not None:
+                    parts.append(f"Whiff%: {sc['whiff_pct']:.1f}%")
+                if sc.get("barrel_pct") is not None:
+                    parts.append(f"Barrel%: {sc['barrel_pct']:.1f}%")
+                if sc.get("xera") is not None:
+                    parts.append(f"xERA: {sc['xera']:.2f}")
+        except Exception:
+            pass
+        if parts:
+            enriched[key] = ", ".join(parts)
+
+    # ── 2. Pitcher recent form (last 3 starts) ────────────────────────────────
+    for pname, key in [(h_pname, "tendencia_pitcher_home"),
+                       (a_pname, "tendencia_pitcher_away")]:
+        if not pname or pname in ("TBD", ""):
+            continue
+        try:
+            pf = fetch_pitcher_recent_form(pname)
+            if pf:
+                eras_str = " → ".join(str(e) for e in pf["eras"])
+                enriched[key] = (
+                    f"{pf['trend']} | ERAs últimas {len(pf['eras'])} salidas: "
+                    f"{eras_str} | Promedio: {pf['avg_era']}"
+                )
+        except Exception:
+            pass
+
+    # ── 3. Team run trend (last 10 games) ─────────────────────────────────────
+    for team, key in [(home, "tendencia_equipo_home"),
+                      (away, "tendencia_equipo_away")]:
+        try:
+            sk = fetch_team_streak_mlb(team)
+            if sk:
+                n    = sk["wins_10"] + sk["losses_10"]
+                over_pct  = round(sk["overs_10"]  / max(n, 1) * 100)
+                under_pct = round(sk["unders_10"] / max(n, 1) * 100)
+                enriched[key] = (
+                    f"Últimos {n}G: {sk['wins_10']}G-{sk['losses_10']}P | "
+                    f"RS: {sk['avg_rs']} prom | RA: {sk['avg_ra']} prom | "
+                    f"Total prom: {sk['avg_total']} carreras | "
+                    f"OVER {sk['overs_10']}/{n} ({over_pct}%) "
+                    f"UNDER {sk['unders_10']}/{n} ({under_pct}%)"
+                )
+        except Exception:
+            pass
+
+    # ── 4. Line movement vs session opening ───────────────────────────────────
+    if game_obj:
+        try:
+            mv = _detect_line_movement(game_obj, home, away)
+            if mv:
+                enriched["linea_movimiento"] = mv
+        except Exception:
+            pass
+
+    if enriched:
+        keys_found = ", ".join(enriched.keys())
+        print(f"   📊 Panel enriquecido: {keys_found}")
+
+    return enriched
 
 
 def panel_expertos(game_data: dict, sport: str) -> "dict | None":
