@@ -2625,9 +2625,13 @@ def _apply_pinnacle_calibration(
     Pinnacle pesa 60% porque es el mercado sharp más calibrado del mundo.
     Luego se recalculan EV y stake con la probabilidad ajustada.
 
-    Si |prob_modelo − prob_pinnacle| > 20 pp:
+    Si |prob_modelo − prob_pinnacle| > 25 pp:
       - El stake se reduce a la mitad automáticamente.
       - Se genera un texto de alerta para el panel de expertos.
+
+    NOTA: Pinnacle opera cerca del 50% porque balancea su libro.
+    Una divergencia de 8–20pp es completamente normal y aceptable.
+    Solo >25pp genera alerta.
 
     Candidatos cuya prob calibrada queda por debajo de PROB_MIN son eliminados.
 
@@ -2682,12 +2686,13 @@ def _apply_pinnacle_calibration(
             )
             continue
 
-        # Divergencia alta → stake ÷ 2 + alerta para el panel
-        if div_pp > 20.0:
+        # Divergencia alta (>25pp) → stake ÷ 2 + alerta para el panel
+        # 8–20pp es normal (Pinnacle balancea su libro); solo >25pp es crítico.
+        if div_pp > 25.0:
             new_stake = round(new_stake / 2, 2) if new_stake else 0.0
             alert_txt = (
-                f"ALERTA: Divergencia alta entre modelo ({round(model_p * 100, 1)}%) "
-                f"y Pinnacle ({round(pin_p * 100, 1)}%) en '{c['label']}' — "
+                f"ALERTA: Divergencia crítica entre modelo ({round(model_p * 100, 1)}%) "
+                f"y Pinnacle ({round(pin_p * 100, 1)}%) en '{c['label']}' ({div_pp:.0f}pp) — "
                 f"evaluar con precaución extra."
             )
             div_alerts.append(alert_txt)
@@ -2696,9 +2701,10 @@ def _apply_pinnacle_calibration(
                 f"prob {model_p:.1%}→{blended:.1%}  stake {c['stake']}→{new_stake}"
             )
         else:
+            _div_tag = "✅ normal" if div_pp <= 20.0 else "⚠️ elevada"
             print(
                 f"   📌 Pinnacle calib: {c['label']} "
-                f"prob {model_p:.1%}→{blended:.1%} (div {div_pp:.1f}pp)"
+                f"prob {model_p:.1%}→{blended:.1%} (div {div_pp:.1f}pp {_div_tag})"
             )
 
         c = dict(c)   # copia superficial para no mutar el original
@@ -2706,7 +2712,7 @@ def _apply_pinnacle_calibration(
         c["ev_pct"]     = new_ev
         c["stake"]      = new_stake
         c["kelly_pct"]  = new_r["kelly_pct"]
-        if div_pp > 20.0:
+        if div_pp > 25.0:
             c["stake_warn"] = (
                 (c.get("stake_warn") or "") +
                 f" ⚠️ stake÷2 div Pinnacle {div_pp:.0f}pp"
@@ -5493,7 +5499,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     # ── Pinnacle calibration: blend model prob 40% + Pinnacle 60% ─────────
     # Recomputes EV and stake for every candidate where Pinnacle has odds.
     # Candidates that fall below PROB_MIN after blending are dropped.
-    # High-divergence picks (>20pp) get stake halved + divergence alert.
+    # High-divergence picks (>25pp) get stake halved + divergence alert.
     candidates, _pin_div_alerts = _apply_pinnacle_calibration(candidates, game, home)
 
     if not candidates:
@@ -5566,8 +5572,9 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         _pin_icon = "✅" if "CONFIRMACIÓN" in _pin_signal else "⚠️"
         print(f"   📌 Pinnacle signal: {_pin_icon} {_pin_signal[:80]}…")
     # ── Alertas de divergencia Pinnacle → panel ────────────────────────────
-    # Generadas por _apply_pinnacle_calibration cuando |modelo−Pinnacle| > 20pp.
-    # Se inyectan como texto en _claude_data_g para que los expertos las vean.
+    # Generadas por _apply_pinnacle_calibration cuando |modelo−Pinnacle| > 25pp.
+    # Divergencias de 8–20pp son normales (Pinnacle balancea su libro).
+    # Solo >25pp se inyecta como alerta al panel de expertos.
     if _pin_div_alerts:
         _claude_data_g["divergence_alerts"] = " | ".join(_pin_div_alerts)
     _claude_sport_g = "MLB" if is_mlb else "SOCCER"
@@ -5592,13 +5599,28 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     # Hard veto: Claude says apostar=False OR confianza=BAJA → block immediately
     # Guard must fire BEFORE any pick is assigned or returned
     # force_panel=True (manual /analizar): skip veto so full analysis is returned
-    if _claude_result_g and not force_panel and (
-            not _claude_result_g.get("apostar", True)
-            or _claude_result_g.get("confianza") == "BAJA"):
-        _veto_why = (f"apostar={_claude_result_g.get('apostar')}, "
-                     f"confianza={_claude_result_g.get('confianza')}")
-        print(f"   ❌ RECHAZADO — Claude vetó el partido ({_veto_why}) → sin pick")
-        return None
+    #
+    # EXCEPCIÓN: EV >15% + divergencia Pinnacle <25pp → bypass del veto.
+    # Pinnacle opera cerca del 50% por balanceo de libro — 8–20pp de divergencia
+    # es normal. Solo >25pp (_pin_div_alerts no vacío) justifica veto por mercado.
+    _top_ev_pct = top3[0]["ev_pct"] if top3 else 0.0
+    _bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts)
+    if _claude_result_g and not force_panel:
+        _apostar_c   = _claude_result_g.get("apostar", True)
+        _confianza_c = _claude_result_g.get("confianza", "MEDIA")
+        _should_veto = (not _apostar_c or _confianza_c == "BAJA")
+        if _should_veto and _bypass_veto:
+            # EV fuerte + divergencia aceptable → no vetar; elevar confianza a MEDIA
+            print(
+                f"   ℹ️  Veto omitido — EV {_top_ev_pct:.1f}% > 15% + div Pinnacle <25pp "
+                f"(apostar={_apostar_c}, confianza={_confianza_c})"
+            )
+            _claude_result_g["apostar"]    = True
+            _claude_result_g["confianza"]  = "MEDIA"
+        elif _should_veto:
+            _veto_why = (f"apostar={_apostar_c}, confianza={_confianza_c}")
+            print(f"   ❌ RECHAZADO — Claude vetó el partido ({_veto_why}) → sin pick")
+            return None
 
     # Feature 7: cap confidence at MEDIA when data is partial (score 50–79)
     if 50 <= _dqs < 80 and _claude_result_g:
@@ -8565,8 +8587,15 @@ _CLAUDE_SYSTEM = (
     "6) Que todos los factores apunten en la misma dirección que el pick. "
     "7) ERAs menores a 2.00 son datos válidos de pitchers élite — NO los marques como "
     "sospechosos. Confirmarlos refuerza el pick (más dominancia del pitcher). "
-    "8) Usar Pinnacle como referencia sharp del mercado. "
-    "Si cualquier verificación falla, apostar debe ser False. "
+    "8) Pinnacle balancea su libro buscando ~50% de acción en cada lado — por eso "
+    "sus probabilidades implícitas siempre rondan el 50%. Una diferencia de 8–20pp "
+    "entre el modelo y Pinnacle es completamente normal y aceptable. Solo una divergencia "
+    ">25pp es una señal de alerta real. Si el EV es >15% y la divergencia con Pinnacle "
+    "es <25pp, el pick es válido para debatir — no lo vetes únicamente por esa diferencia. "
+    "Veta solo si hay red flags concretas: lesión clave del pitcher/titular, clima extremo "
+    "(viento >20 mph hacia afuera o temperatura <40°F), o H2H de los últimos 3 encuentros "
+    "que contradiga el pick por más de 3 carreras. "
+    "Si cualquier verificación falla por razones concretas, apostar debe ser False. "
     "Responde siempre en JSON con apostar, confianza, razon e inconsistencias."
 )
 
@@ -8743,6 +8772,14 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             "información apostó el UNDER con convicción. Si el pick es UNDER, eso es respaldo "
             "externo independiente. Si el pick es OVER, tienes un problema real que debes "
             "articular. El movimiento de línea es evidencia objetiva — nunca la ignores.\n\n"
+            "CONTEXTO CRÍTICO SOBRE PINNACLE: Pinnacle siempre opera cerca del 50% en ambos "
+            "lados porque balancea su libro — recauda el vig independientemente del resultado "
+            "cuando tiene 50% de acción en cada lado. Esto significa que su probabilidad "
+            "implícita ronda el 50% por diseño, no porque crea que el partido es 50/50. "
+            "Una diferencia de 8–20pp entre el modelo y Pinnacle es completamente normal y "
+            "esperada. Solo cuando la divergencia supera 25pp tienes evidencia real de que "
+            "el mercado sharp está en contra del pick. No vetes un pick únicamente porque "
+            "Pinnacle esté en 48–52% — eso no es información, es ruido del balanceo.\n\n"
             "CÓMO FORMAS OPINIÓN:\n"
             "Lees la línea disponible en los datos y la comparas contra la probabilidad del "
             "modelo. Si Pinnacle ofrece 1.95 en un lado donde el modelo dice 58%, hay valor "
@@ -8752,7 +8789,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             "¿El EV del modelo es consistente con el precio de mercado? Tu escepticismo no "
             "es sobre el pick en abstracto — es sobre si el mercado ya sabe lo que el "
             "modelo sabe. Si la línea te confirma el pick, lo respaldas con convicción. "
-            "Si la contradice, lo vetas con razón específica.\n\n"
+            "Si la contradice con divergencia >25pp, lo señalas con razón específica.\n\n"
             "QUÉ CAMBIARÍA TU POSICIÓN:\n"
             "Termina indicando: 'Mi posición cambiaría si [señal de mercado específica, p.ej.: "
             "si Pinnacle moviera la línea más de 0.5 en dirección contraria al pick en las "
