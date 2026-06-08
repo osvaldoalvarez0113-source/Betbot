@@ -4802,10 +4802,6 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                     _side_n = "OVER" if is_over else "UNDER"
                     print(f"   ⏭️  {_tag}: {_side_n} prob {p:.0%} < {_prob_floor:.0%} mín — omitido")
                     continue
-                # Improvement 3c: UNDER gets +3% probability boost (more reliable historically)
-                p_adj = min(0.95, p + 0.03) if not is_over else p
-                if not is_over:
-                    _pitch_notes.append("📊 Modelo prefiere UNDER (más confiable históricamente)")
                 # ── ML ensemble blend ─────────────────────────────────────────────
                 # Get ML probability for this side (OVER or UNDER) from the ensemble.
                 # predict_under_prob() returns P(UNDER wins); convert to the side we're
@@ -4837,20 +4833,19 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                             _ml_p_side = (1.0 - _under_prob_ml) if is_over else _under_prob_ml
                     except Exception:
                         pass   # silently skip ML if anything fails
-                # Improvement 4: blend model probability 70% + historical hit rate 30%
-                # If ML ensemble is available: model×50% + ML×30% + historical×20%
-                # p_kelly used ONLY for Kelly stake sizing (conservative bet sizing)
-                # EV uses p_adj (true model probability) per formula: EV = (true_prob × odds) - 1
+                # Kelly stake uses historical blend for conservative sizing only.
+                # EV always uses the true Poisson probability (p) so all markets
+                # are compared on equal footing — no artificial boost for any side.
                 _hist_rate = 0.526 if not is_over else 0.527
                 if _ml_p_side is not None and _ML_MODULE is not None:
-                    p_kelly = _ML_MODULE.blend_prob(p_adj, _ml_p_side, _hist_rate)
+                    p_kelly = _ML_MODULE.blend_prob(p, _ml_p_side, _hist_rate)
                 else:
-                    p_kelly = round(p_adj * 0.7 + _hist_rate * 0.3, 4)
-                ev = (p_adj * odds - 1) * 100   # EV = (true_prob × decimal_odds) - 1
+                    p_kelly = round(p * 0.7 + _hist_rate * 0.3, 4)
+                ev = (p * odds - 1) * 100   # EV = true Poisson prob × decimal odds − 1
                 r  = kelly_stake(p_kelly, odds)
                 _all_evs.append((side_label, round(ev, 1)))
                 if ev >= EV_MIN_PCT and r["stake"] > 0:
-                    _tot_cands.append({"label": side_label, "true_prob": p_adj, "odds": odds,
+                    _tot_cands.append({"label": side_label, "true_prob": p, "odds": odds,
                                        "book": bk_name, "ev_pct": round(ev, 1),
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
             # Solo el lado con mayor EV va al panel de expertos
@@ -4923,12 +4918,12 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 (f"📉 UNDER {f5_line} F5", False,
                  poisson_ou_prob(f5_exp, f5_line, False), f5_un_odds),
             ]:
-                _ft_p_adj = min(0.95, _ft_p + 0.03) if not _is_f5_ov else _ft_p
-                ev = (_ft_p_adj * _ft_odds - 1) * 100
-                r  = kelly_stake(_ft_p_adj, _ft_odds)
+                # EV uses true Poisson probability — no artificial side boost
+                ev = (_ft_p * _ft_odds - 1) * 100
+                r  = kelly_stake(_ft_p, _ft_odds)
                 _all_evs.append((_ft_lbl, round(ev, 1)))
-                if ev >= EV_MIN_PCT and r["stake"] > 0 and _ft_p_adj >= PROB_MIN_TOTALS:
-                    _f5t_cands.append({"label": _ft_lbl, "true_prob": _ft_p_adj,
+                if ev >= EV_MIN_PCT and r["stake"] > 0 and _ft_p >= PROB_MIN_TOTALS:
+                    _f5t_cands.append({"label": _ft_lbl, "true_prob": _ft_p,
                                        "odds": _ft_odds, "book": f5_book,
                                        "ev_pct": round(ev, 1),
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
