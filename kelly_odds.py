@@ -2497,6 +2497,118 @@ def _pinnacle_analysis(
     )
 
 
+def _extract_pinnacle_totals(game: dict) -> "dict | None":
+    """
+    Extract Pinnacle totals (over/under) odds from a game bookmakers array.
+    Returns {"line": X, "over": price, "under": price} or None if absent.
+    Works for both MLB (carreras) and Soccer (goles).
+    """
+    for bk in game.get("bookmakers", []):
+        if "pinnacle" in bk.get("title", "").lower():
+            for m in bk.get("markets", []):
+                if m.get("key") == "totals":
+                    ov = un = line = None
+                    for o in m.get("outcomes", []):
+                        n = o.get("name", "")
+                        if n == "Over":
+                            ov   = o.get("price")
+                            line = o.get("point")
+                        elif n == "Under":
+                            un   = o.get("price")
+                    if ov and un and line is not None:
+                        return {"line": line, "over": ov, "under": un}
+    return None
+
+
+def _build_pinnacle_panel_signal(
+    pick_label: str,
+    context: dict,
+    game: dict,
+    home: str,
+) -> str:
+    """
+    Compare the pick direction against Pinnacle's current market position.
+
+    Returns a plain-text signal to inject into _claude_data_g["pinnacle_panel_signal"]
+    so all three experts (Marco, Víctor, Elena) receive it before giving their verdict.
+
+    Logic:
+    - Totals picks (OVER/UNDER): compare against Pinnacle's implied totals probability.
+    - ML picks (moneyline):      compare against Pinnacle's implied h2h probability.
+    - Returns "" when no Pinnacle data is available for the pick type.
+    """
+    label_up = pick_label.upper()
+
+    is_over_pick  = "OVER"  in label_up
+    is_under_pick = "UNDER" in label_up
+    is_totals     = is_over_pick or is_under_pick
+    is_ml         = "ML" in label_up and not is_totals
+
+    # ── TOTALS PICKS (game total, F5 total, hits total, goals) ───────────────
+    if is_totals:
+        pin_tot = _extract_pinnacle_totals(game)
+        if pin_tot is None:
+            return ""
+        raw_ov  = 1.0 / max(pin_tot["over"],  1.001)
+        raw_un  = 1.0 / max(pin_tot["under"], 1.001)
+        tot_sum = raw_ov + raw_un
+        pin_p_over  = raw_ov / tot_sum
+        pin_p_under = raw_un / tot_sum
+
+        pick_is_over    = is_over_pick
+        pin_favors_over = pin_p_over > 0.50
+
+        if pick_is_over == pin_favors_over:
+            side    = "OVER"  if pick_is_over  else "UNDER"
+            pin_pct = round((pin_p_over if pick_is_over else pin_p_under) * 100, 1)
+            return (
+                f"CONFIRMACIÓN EXTERNA: El mercado sharp de Pinnacle apoya este pick — "
+                f"Pinnacle implica {pin_pct}% de probabilidad para el {side} "
+                f"(línea {pin_tot['line']}). La probabilidad del modelo está respaldada "
+                f"por dinero profesional, no es error del modelo."
+            )
+        else:
+            side_pin = "OVER"  if pin_favors_over  else "UNDER"
+            pin_pct  = round((pin_p_over if pin_favors_over else pin_p_under) * 100, 1)
+            return (
+                f"ADVERTENCIA: Pinnacle contradice el pick — el mercado sharp de Pinnacle "
+                f"favorece el {side_pin} con {pin_pct}% de probabilidad implícita "
+                f"(línea {pin_tot['line']}). Evaluar con cautela."
+            )
+
+    # ── ML PICKS (moneyline — home or away team) ─────────────────────────────
+    if is_ml:
+        pin_odds = context.get("pinnacle_odds")
+        if not pin_odds:
+            return ""
+        raw_h  = 1.0 / max(pin_odds["home"], 1.001)
+        raw_a  = 1.0 / max(pin_odds["away"], 1.001)
+        tot_h  = raw_h + raw_a
+        pin_ph = raw_h / tot_h
+        pin_pa = raw_a / tot_h
+
+        # Determine if pick targets home or away team from label text
+        pick_is_home = home.upper() in label_up
+        pin_p_pick   = pin_ph if pick_is_home else pin_pa
+        pin_agrees   = pin_p_pick > 0.50
+
+        if pin_agrees:
+            return (
+                f"CONFIRMACIÓN EXTERNA: El mercado sharp de Pinnacle apoya este pick — "
+                f"Pinnacle implica {round(pin_p_pick * 100, 1)}% de probabilidad para "
+                f"este equipo. La probabilidad alta está respaldada por dinero profesional, "
+                f"no es error del modelo."
+            )
+        else:
+            opp_pct = round((1.0 - pin_p_pick) * 100, 1)
+            return (
+                f"ADVERTENCIA: Pinnacle contradice el pick — el mercado sharp de Pinnacle "
+                f"da {opp_pct}% de probabilidad al equipo contrario. Evaluar con cautela."
+            )
+
+    return ""
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ELITE SOURCE 3 — UNDERSTAT xG (SOCCER)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5294,6 +5406,17 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         k: v for k, v in context.items()
         if isinstance(v, (str, int, float, bool, type(None)))
     })
+    # ── Señal Pinnacle: confirmación o advertencia antes del panel ─────────
+    # Compara la dirección del pick contra el mercado sharp de Pinnacle y
+    # añade una cadena de texto que Marco, Víctor y Elena reciben como contexto
+    # previo a dar su veredicto. Si no hay datos de Pinnacle, no se añade nada.
+    _pin_signal = _build_pinnacle_panel_signal(
+        top3[0]["label"], context, game, home
+    )
+    if _pin_signal:
+        _claude_data_g["pinnacle_panel_signal"] = _pin_signal
+        _pin_icon = "✅" if "CONFIRMACIÓN" in _pin_signal else "⚠️"
+        print(f"   📌 Pinnacle signal: {_pin_icon} {_pin_signal[:80]}…")
     _claude_sport_g = "MLB" if is_mlb else "SOCCER"
     _top_ev = top3[0]["ev_pct"]
     if _top_ev < 5.0 and not force_panel:
