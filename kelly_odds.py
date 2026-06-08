@@ -5076,6 +5076,11 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 candidates.append(max(_hits_cands, key=lambda x: x["ev_pct"]))
 
         # ── Ponches del pitcher titular (Strikeout K props) ───────────────────
+        # REGLA K/9: solo se genera candidato de ponches si K/9 confirmado
+        # por MLB Stats API es estrictamente mayor a 8.5.  Sin K/9 confirmado
+        # o con K/9 ≤ 8.5, el prop se bloquea y se intenta fallback a ML.
+        # NUNCA usar estimación por ERA como sustituto de K/9 real.
+        _k9_prop_blocked = False   # True si al menos un K prop fue bloqueado por esta regla
         try:
             _ko_props = _fetch_player_props(game_id)
             for _kp_nm, _kp_era, _kp_sc in [
@@ -5101,12 +5106,24 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 _kp_line  = float(_kp_line)
                 _kp_ov_pr = float(_kp_ov_d.get("price", 1.90))
                 _kp_un_pr = float(_kp_un_d.get("price", 1.90))
-                _kp_k9    = (_kp_sc.get("k9") if _kp_sc and _kp_sc.get("k9") else None)
-                if not _kp_k9:
-                    _kp_k9 = (10.5 if _kp_era < 2.00 else
-                               9.5  if _kp_era < 2.75 else
-                               8.5  if _kp_era < 3.50 else
-                               7.5  if _kp_era < 4.50 else 6.5)
+
+                # K/9 confirmado: MLB Stats API (fetch_pitcher_stats) — fuente real.
+                # Statcast no tiene K/9; la estimación por ERA queda prohibida aquí.
+                _kp_ps  = fetch_pitcher_stats(_kp_nm)
+                _kp_k9_raw = _kp_ps.get("k9", "N/A")
+                try:
+                    _kp_k9_f = float(_kp_k9_raw) if _kp_k9_raw not in ("N/A", None, "") else None
+                except (ValueError, TypeError):
+                    _kp_k9_f = None
+
+                if _kp_k9_f is None or _kp_k9_f <= 8.5:
+                    _why = f"K/9={_kp_k9_f:.1f}" if _kp_k9_f is not None else "K/9 no disponible"
+                    print(f"   ⏭️  K prop {_kp_nm}: {_why} — necesita >8.5 confirmado → preferir ML")
+                    _k9_prop_blocked = True
+                    continue   # bloquear este prop por completo
+
+                # K/9 confirmado y > 8.5 → calcular prop normalmente
+                _kp_k9   = _kp_k9_f
                 _kp_ip   = (6.0 if _kp_era < 3.00 else
                              5.5 if _kp_era < 4.00 else 5.0)
                 _kp_expk = round(_kp_k9 * _kp_ip / 9.0, 2)
@@ -5129,6 +5146,37 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                                            "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
         except Exception as _ke:
             print(f"   ⚠️  K props: {_ke}")
+
+        # ML fallback cuando K prop fue bloqueado por K/9 insuficiente/no confirmado
+        if _k9_prop_blocked:
+            # Equipo con mejor pitcher = menor ERA efectiva
+            _fb_team  = home if h_era_eff <= a_era_eff else away
+            _fb_lbl   = f"🔵 {home} ML" if _fb_team == home else f"🔴 {away} ML"
+            _fb_prob  = p_home if _fb_team == home else p_away
+            # Solo añadir si no está ya en candidatos (ML se evalúa antes de props)
+            _fb_exists = any(_fb_team in c.get("label", "") and " ML" in c.get("label", "")
+                             for c in candidates)
+            if not _fb_exists and _fb_team in h2h_odds:
+                _fb_odds, _fb_book = h2h_odds[_fb_team]
+                _fb_p_c = _cap_prob(_fb_prob)
+                _fb_ev  = (_fb_p_c * _fb_odds - 1) * 100
+                _fb_r   = kelly_stake(_fb_p_c, _fb_odds)
+                if _fb_ev >= EV_MIN_PCT and _fb_r["stake"] > 0 and _fb_p_c >= PROB_MIN_ML:
+                    candidates.append({
+                        "label":      _fb_lbl,
+                        "true_prob":  _fb_p_c,
+                        "odds":       _fb_odds,
+                        "book":       _fb_book,
+                        "ev_pct":     round(_fb_ev, 1),
+                        "stake":      _fb_r["stake"],
+                        "kelly_pct":  _fb_r["kelly_pct"],
+                        "stake_warn": _fb_r.get("stake_warn", ""),
+                    })
+                    print(f"   🔄 ML fallback (K/9 insuficiente): {_fb_lbl} "
+                          f"EV={_fb_ev:.1f}% ERA {h_era_eff:.2f} vs {a_era_eff:.2f}")
+                else:
+                    print(f"   ℹ️  ML fallback {_fb_lbl}: EV={_fb_ev:.1f}% "
+                          f"prob={_fb_p_c:.0%} — no cumple mínimos, omitido")
 
         # Line movement flag
         h_cur = h2h_odds.get(home, (0,))[0]
