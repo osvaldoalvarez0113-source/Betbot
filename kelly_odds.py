@@ -5743,6 +5743,57 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                   f"(mínimo {EV_MIN_PCT:.1f}%)")
         else:
             print(f"   ❌ Sin picks — sin odds válidas para analizar")
+        # ── Auto-panel: cualquier mercado con EV > 15% activa el panel de expertos ──
+        # Incluso sin pick formal el modelo detectó una línea muy ventajosa.
+        # El panel evalúa si vale la pena apostar pese a no superar prob mínima.
+        _aev_mkts = {lbl: m for lbl, m in _all_mkts.items() if m["ev_pct"] > 15.0}
+        if _aev_mkts:
+            _aev_lbl  = max(_aev_mkts, key=lambda l: _aev_mkts[l]["ev_pct"])
+            _aev_m    = _aev_mkts[_aev_lbl]
+            print(f"   🤖 Panel auto-activado — EV {_aev_m['ev_pct']:.1f}% > 15% "
+                  f"en '{_aev_lbl}' (sin umbral de prob)")
+            _aev_data = {
+                "match":     f"{home} vs {away}",
+                "sport":     sport_key,
+                "top_pick":  _aev_lbl,
+                "ev_pct":    _aev_m["ev_pct"],
+                "true_prob": round(_aev_m["prob"] * 100, 1),
+                "odds":      _aev_m["odds"],
+                "stake":     0,
+                "nota":      (
+                    f"Mercado EV>{_aev_m['ev_pct']:.1f}% detectado, no superó umbral de "
+                    f"probabilidad mínima ({PROB_MIN*100:.0f}%). Panel evalúa si merece apostar."
+                ),
+            }
+            _aev_data.update({k: v for k, v in context.items()
+                              if isinstance(v, (str, int, float, bool, type(None)))})
+            if _pin_div_alerts:
+                _aev_data["divergence_alerts"] = " | ".join(_pin_div_alerts)
+            _aev_sport = "MLB" if is_mlb else "SOCCER"
+            if is_mlb:
+                try:
+                    _aev_data.update(_enrich_panel_data(_aev_data, game))
+                except Exception:
+                    pass
+            _aev_panel = panel_expertos(_aev_data, _aev_sport)
+            if _aev_panel:
+                _cc = _aev_panel.get("confianza", "N/D")
+                _ap = "✅" if _aev_panel.get("apostar", True) else "❌"
+                _cr = (_aev_panel.get("razonamiento", "") or "")[:90]
+                print(f"   🤖 Claude (EV>15%): {_cc} | apostar:{_ap} | \"{_cr}\"")
+            return {
+                "game_id":     game_id,
+                "match":       f"{home} vs {away}",
+                "time":        commence,
+                "sport":       sport_key,
+                "is_mlb":      is_mlb,
+                "candidates":  [],
+                "context":     context,
+                "best_label":  _aev_lbl,
+                "best_ev":     _aev_m["ev_pct"],
+                "claude_intel": _aev_panel,
+                "all_markets": _all_mkts,
+            }
         if not force_panel:
             return None
         # force_panel=True (/analizar manual): no hay edge positivo pero
@@ -5757,6 +5808,43 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     # force_panel=True con sin candidatos: devolver resultado con contexto completo
     # (el usuario quiere ver pitchers/stats/clima aunque no haya edge)
     if not top3:
+        _hev_mkts  = {lbl: m for lbl, m in _all_mkts.items() if m["ev_pct"] > 15.0}
+        _hev_panel = None
+        _hev_lbl   = None
+        _hev_ev    = 0.0
+        if _hev_mkts:
+            _hev_lbl  = max(_hev_mkts, key=lambda l: _hev_mkts[l]["ev_pct"])
+            _hev_m    = _hev_mkts[_hev_lbl]
+            _hev_ev   = _hev_m["ev_pct"]
+            print(f"   🤖 Panel auto-activado (force) — EV {_hev_ev:.1f}% > 15% en '{_hev_lbl}'")
+            _hev_data = {
+                "match":     f"{home} vs {away}",
+                "sport":     sport_key,
+                "top_pick":  _hev_lbl,
+                "ev_pct":    _hev_ev,
+                "true_prob": round(_hev_m["prob"] * 100, 1),
+                "odds":      _hev_m["odds"],
+                "stake":     0,
+                "nota":      (
+                    f"Mercado EV>{_hev_ev:.1f}% detectado, no superó umbral de "
+                    f"probabilidad mínima ({PROB_MIN*100:.0f}%). Panel evalúa si merece apostar."
+                ),
+            }
+            _hev_data.update({k: v for k, v in context.items()
+                              if isinstance(v, (str, int, float, bool, type(None)))})
+            if _pin_div_alerts:
+                _hev_data["divergence_alerts"] = " | ".join(_pin_div_alerts)
+            _hev_sport = "MLB" if is_mlb else "SOCCER"
+            if is_mlb:
+                try:
+                    _hev_data.update(_enrich_panel_data(_hev_data, game))
+                except Exception:
+                    pass
+            _hev_panel = panel_expertos(_hev_data, _hev_sport)
+            if _hev_panel:
+                _cc = _hev_panel.get("confianza", "N/D")
+                _ap = "✅" if _hev_panel.get("apostar", True) else "❌"
+                print(f"   🤖 Claude (force EV>15%): {_cc} | apostar:{_ap}")
         return {
             "game_id":     game_id,
             "match":       f"{home} vs {away}",
@@ -5765,9 +5853,9 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             "is_mlb":      is_mlb,
             "candidates":  [],
             "context":     context,
-            "best_label":  None,
-            "best_ev":     0.0,
-            "claude_intel": None,
+            "best_label":  _hev_lbl,
+            "best_ev":     _hev_ev,
+            "claude_intel": _hev_panel,
             "all_markets": _all_mkts,
         }
 
@@ -6365,6 +6453,43 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         has_warning = ("⚠️" in ctx_lines)
 
         # Best pick for action line
+        # Guard: high-EV panel results have candidates=[] — show panel intel without picks
+        if not a.get("candidates"):
+            _hev_lbl_n  = a.get("best_label") or "mercado de alta EV"
+            _hev_ev_n   = a.get("best_ev", 0.0)
+            _ci_n       = a.get("claude_intel") or {}
+            _ap_n       = "✅ APOSTAR" if _ci_n.get("apostar") is True else (
+                          "❌ PASAR" if _ci_n.get("apostar") is False else "⚠️ VERIFICAR")
+            _cc_n       = _ci_n.get("confianza", "N/D")
+            _cr_n       = (_ci_n.get("razonamiento") or "")[:200]
+            _all_mkts_n = a.get("all_markets", {})
+            _mkts_txt   = ""
+            for _lbl, _m in _all_mkts_n.items():
+                _ev_s = f"+{_m['ev_pct']:.1f}%" if _m["ev_pct"] >= 0 else f"{_m['ev_pct']:.1f}%"
+                _mkts_txt += f"  {_lbl}: {round(_m['prob']*100)}% | {_ev_s} | {_m['odds']:.2f} @ {_m['book']}\n"
+            body_hev = (
+                f"{emoji} {match_es}\n"
+                f"⏰ {gt}\n"
+                f"{_DIV}\n"
+                f"⚠️ ALERTA: EV ALTO SIN PICK FORMAL\n"
+                f"{_DIV}\n"
+                f"Mercado con EV >15% detectado: <b>{_hev_lbl_n}</b>\n"
+                f"EV estimado: +{_hev_ev_n:.1f}% — no superó umbral de prob. mínima\n"
+                f"Verificar línea en el libro antes de apostar.\n"
+                f"{_DIV}\n"
+                f"📊 TODOS LOS MERCADOS\n{_DIV}\n"
+                f"{_mkts_txt or '(sin datos de mercados)'}\n"
+                f"{_DIV}\n"
+                f"🤖 Panel de expertos: {_cc_n} | {_ap_n}\n"
+                f"{f'<i>{_cr_n}</i>' if _cr_n else ''}\n"
+                f"{_DIV2}"
+            )
+            _send_ntfy(body_hev, priority=3)
+            if alerted is not None:
+                alerted[match_key_ana] = float(_hev_ev_n)
+            print(f"  📢 Alerta EV>15% enviada: {match_es}")
+            continue
+
         best = a["candidates"][0]
         best_clean = (best["label"]
                       .replace("🔵 ", "").replace("🔴 ", "").replace("🤝 ", "")
@@ -6747,12 +6872,14 @@ def build_analizar_text(result: dict) -> list:
                 f"   Stake: ${c['stake']:.0f}\n"
             )
     else:
-        p1 += (
-            "⚠️ <b>Sin picks con edge positivo</b>\n"
-            "   El modelo no encuentra valor en la línea actual.\n"
-            "   Revisa el contexto de arriba y decide según tu criterio.\n"
-            "   (Apostar sin edge esperado es -EV a largo plazo)\n"
-        )
+        _any_pos_ev = any(m["ev_pct"] > 0 for m in all_mkts.values())
+        if not _any_pos_ev:
+            p1 += (
+                "⚠️ <b>Sin picks con edge positivo</b>\n"
+                "   El modelo no encuentra valor en la línea actual.\n"
+                "   Revisa el contexto de arriba y decide según tu criterio.\n"
+                "   (Apostar sin edge esperado es -EV a largo plazo)\n"
+            )
 
     # ─── PARTE 2: Panel de expertos + recomendación ───────────────────────────
     experts   = ci.get("_expertos_detalle") or []
@@ -6784,15 +6911,34 @@ def build_analizar_text(result: dict) -> list:
                 f"Stake: <b>${best.get('stake', 0):.0f}</b> @ {best.get('book','?')}\n"
                 f"EV: +{best.get('ev_pct', 0):.1f}%  |  Prob: {round(best.get('true_prob', 0)*100)}%\n"
             )
+        elif all_mkts:
+            # High-EV panel mode — no formal pick but panel evaluated a high-EV market
+            _hev_lbl_r = result.get("best_label") or ""
+            _hev_ev_r  = result.get("best_ev", 0.0)
+            if _hev_lbl_r:
+                p2 += (
+                    f"Mercado analizado: <b>{_hev_lbl_r}</b>\n"
+                    f"EV detectado: +{_hev_ev_r:.1f}% — <i>no superó umbral de prob mínima</i>\n"
+                    f"⚠️ Apostar solo si la línea ha mejorado o confirmas la cuota en el libro.\n"
+                )
         if panel_razon:
             p2 += f"<i>{panel_razon}</i>\n"
     else:
-        p2 += (
-            "📋 <b>RECOMENDACIÓN: ⚠️ SIN PICKS CON EDGE</b>\n"
-            "El modelo no encontró valor en la línea actual.\n"
-            "El contexto de arriba tiene toda la info disponible.\n"
-            "Usa tu criterio para decidir si apostar.\n"
-        )
+        _any_pos_ev_r = any(m["ev_pct"] > 0 for m in all_mkts.values())
+        if _any_pos_ev_r:
+            p2 += (
+                "📋 <b>MERCADOS CON EV POSITIVO DETECTADOS</b>\n"
+                "Ningún mercado superó el umbral de probabilidad mínima.\n"
+                "Los mercados con EV positivo están listados en la sección de arriba.\n"
+                "Verifica la línea en el libro antes de considerar una apuesta.\n"
+            )
+        else:
+            p2 += (
+                "📋 <b>RECOMENDACIÓN: ⚠️ SIN PICKS CON EDGE</b>\n"
+                "El modelo no encontró valor en la línea actual.\n"
+                "El contexto de arriba tiene toda la info disponible.\n"
+                "Usa tu criterio para decidir si apostar.\n"
+            )
 
     return [p1, p2]
 
