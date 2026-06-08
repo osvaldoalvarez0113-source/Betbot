@@ -12472,6 +12472,38 @@ def run_scan():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # ── Guard: previene arranque dual del proceso principal ───────────────────
+    # En Railway, durante un redeploy puede haber un breve solapamiento entre
+    # la instancia antigua y la nueva. Este lock avisa en logs si eso ocurre.
+    _MAIN_LOCK = "/tmp/betbot_main.lock"
+    _MAIN_PID  = os.getpid()
+    try:
+        if os.path.exists(_MAIN_LOCK):
+            try:
+                with open(_MAIN_LOCK) as _mf:
+                    _prev_pid = int(_mf.read().strip() or 0)
+            except (ValueError, OSError):
+                _prev_pid = 0
+            if _prev_pid and _prev_pid != _MAIN_PID:
+                try:
+                    os.kill(_prev_pid, 0)
+                    print(f"⚠️  BetBot: instancia anterior (PID {_prev_pid}) aún activa — "
+                          f"Railway debería terminarla pronto. Continuando arranque.")
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass  # proceso anterior ya muerto → lock obsoleto
+        with open(_MAIN_LOCK, "w") as _mf:
+            _mf.write(str(_MAIN_PID))
+        import atexit as _main_atexit
+        _main_atexit.register(lambda: (
+            os.path.exists(_MAIN_LOCK) and
+            open(_MAIN_LOCK).read().strip() == str(_MAIN_PID) and
+            os.remove(_MAIN_LOCK)
+        ))
+        print(f"🔒 BetBot Pro lock adquirido (PID {_MAIN_PID})")
+    except Exception as _mle:
+        print(f"⚠️  Main lock: {_mle} — continuando")
+    # ──────────────────────────────────────────────────────────────────────────
+
     if not HAS_STATSAPI:
         print("⚠️  MLB-statsapi not found — install via: pip install MLB-statsapi")
     print("🤖 BetBot Pro — starting...")

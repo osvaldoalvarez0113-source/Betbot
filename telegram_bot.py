@@ -32,6 +32,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 CHATID_FILE      = "telegram_chat_id.txt"
 TRACKER_FILE     = "paper_trades.json"
 CLV_FILE         = "clv_tracker.json"
+LOCK_FILE        = "/tmp/betbot_telegram.lock"   # previene error 409 por instancias duplicadas
 
 # ── Diagnóstico al cargar el módulo ────────────────────────────
 if TELEGRAM_TOKEN:
@@ -464,6 +465,18 @@ def _polling_loop():
     global _last_scan_time
     print("  📱 Telegram polling activo")
     offset = 0
+
+    # Drenar actualizaciones pendientes antes de entrar al loop principal.
+    # Evita procesar comandos viejos acumulados durante el downtime.
+    try:
+        _drain = _api("getUpdates", {"timeout": 0}, timeout=8)
+        if _drain.get("ok") and _drain.get("result"):
+            offset = _drain["result"][-1]["update_id"] + 1
+            print(f"  🧹 Telegram: {len(_drain['result'])} actualizaciones pendientes descartadas "
+                  f"(offset → {offset})")
+    except Exception as _dr_err:
+        print(f"  ⚠️  Telegram drain: {_dr_err}")
+
     while True:
         try:
             resp = _api("getUpdates", {
@@ -471,13 +484,26 @@ def _polling_loop():
                 "timeout":         30,
                 "allowed_updates": json.dumps(["message"]),
             }, timeout=40)
-            if resp.get("ok"):
-                for update in resp.get("result", []):
-                    offset = update["update_id"] + 1
-                    try:
-                        _dispatch(update)
-                    except Exception as _de:
-                        print(f"  ⚠️  Telegram dispatch error: {_de}")
+            if not resp:
+                time.sleep(5)
+                continue
+            # Error 409 Conflict: otra instancia está haciendo polling
+            if not resp.get("ok"):
+                err_code = resp.get("error_code", 0)
+                if err_code == 409:
+                    print("  ⛔ Telegram 409 Conflict detectado — "
+                          "otra instancia activa. Esperando 30 s antes de reintentar…")
+                    time.sleep(30)
+                    continue
+                # Cualquier otro error no-ok → esperar y reintentar
+                time.sleep(10)
+                continue
+            for update in resp.get("result", []):
+                offset = update["update_id"] + 1
+                try:
+                    _dispatch(update)
+                except Exception as _de:
+                    print(f"  ⚠️  Telegram dispatch error: {_de}")
         except Exception as e:
             print(f"  ⚠️  Telegram polling error: {e}")
             time.sleep(10)
@@ -502,6 +528,55 @@ def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None, get_
         print("  ⚠️  Telegram: TELEGRAM_TOKEN no configurado — bot desactivado")
         print("       Obtén un token en @BotFather y agrégalo en Railway como TELEGRAM_TOKEN")
         return
+
+    # ── Lock: una sola instancia de polling (previene error 409) ──────────────
+    _my_pid = os.getpid()
+    try:
+        if os.path.exists(LOCK_FILE):
+            try:
+                with open(LOCK_FILE) as _lf:
+                    _old_pid = int(_lf.read().strip() or 0)
+            except (ValueError, OSError):
+                _old_pid = 0
+            if _old_pid and _old_pid != _my_pid:
+                try:
+                    os.kill(_old_pid, 0)   # señal 0 = solo verifica si el proceso existe
+                    # Proceso anterior sigue vivo → otra instancia está haciendo polling
+                    print(f"  ⛔ Telegram: instancia duplicada detectada (PID {_old_pid}) — "
+                          f"polling omitido para evitar error 409. "
+                          f"La instancia anterior terminará sola.")
+                    return
+                except (ProcessLookupError, PermissionError, OSError):
+                    # Lock obsoleto (proceso muerto) → reemplazamos
+                    print(f"  🔄 Telegram: lock obsoleto (PID {_old_pid} ya no existe) — "
+                          f"tomando control")
+        with open(LOCK_FILE, "w") as _lf:
+            _lf.write(str(_my_pid))
+        import atexit as _atexit
+        def _release_lock():
+            try:
+                if os.path.exists(LOCK_FILE):
+                    with open(LOCK_FILE) as _ck:
+                        if _ck.read().strip() == str(_my_pid):
+                            os.remove(LOCK_FILE)
+            except Exception:
+                pass
+        _atexit.register(_release_lock)
+        print(f"  🔒 Telegram: lock adquirido (PID {_my_pid})")
+    except Exception as _le:
+        print(f"  ⚠️  Telegram: no se pudo gestionar lock: {_le} — continuando de todas formas")
+
+    # ── Limpiar webhook + cola pendiente (drop_pending_updates) ───────────────
+    # Elimina cualquier webhook activo y descarta la cola de updates acumulados.
+    # Esto previene el error 409 y evita que el bot procese comandos viejos.
+    try:
+        _dw = _api("deleteWebhook", {"drop_pending_updates": "true"})
+        if _dw.get("ok"):
+            print("  🧹 Telegram: webhook eliminado y cola de updates limpiada")
+        else:
+            print(f"  ⚠️  Telegram: deleteWebhook respondió: {_dw.get('description', '?')}")
+    except Exception as _dwe:
+        print(f"  ⚠️  Telegram: deleteWebhook falló: {_dwe}")
 
     _analyze_fn    = analyze_fn
     _get_odds_fn   = get_odds_fn
