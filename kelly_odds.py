@@ -4194,8 +4194,8 @@ def poisson_runline_prob(home_exp, away_exp, home_spread, max_runs=15):
 # STAT RANGE VALIDATION (Feature 3)
 # ══════════════════════════════════════════════════════════════════════════════
 _STAT_RANGES: dict = {
-    "era":         (0.50, 8.00),   # 0.50 mínimo — ERA élite legítima (ej. 1.46 Sanchez)
-    "fip":         (0.50, 8.00),   # mismo criterio que ERA
+    "era":         (0.50, 15.00),  # 0.50 mínimo — ERA élite legítima (ej. 1.46 Sanchez); 15.00 máximo — ERAs altas como 9.50 son reales en pitchers con mal desempeño
+    "fip":         (0.50, 15.00),  # mismo criterio que ERA
     "ops":         (0.500, 1.100),
     "bullpen_era": (1.00, 7.00),   # bullpens élite pueden bajar de 2.00
     "win_pct":     (0.20, 0.80),
@@ -8499,7 +8499,7 @@ _claude_cache: dict = {}
 
 # ── ERA validity window used by both pre-validator and range guard ────────────
 _ERA_MIN = 0.50   # ERA élite legítima puede bajar de 1.50 (ej. Sanchez 1.46)
-_ERA_MAX = 8.00
+_ERA_MAX = 15.00  # ERAs altas como 9.50 son datos reales — no descartar como inválidos
 
 def _pre_validate_for_claude(game_data: dict, sport: str) -> "tuple[dict, list]":
     """
@@ -8509,7 +8509,7 @@ def _pre_validate_for_claude(game_data: dict, sport: str) -> "tuple[dict, list]"
                       "DATO NO VERIFICADO" marker so Claude can flag them.
       - warnings    : list of human-readable warning strings logged to console.
     Checks performed:
-      1. ERA values (era_home, era_away, bullpen ERA markers) must be 1.50–8.00.
+      1. ERA values (era_home, era_away, bullpen ERA markers) must be 0.50–15.00.
       2. Pitcher names must be present and non-TBD.
       3. Bullpen data tagged as unverified in _data_quality → marked.
     """
