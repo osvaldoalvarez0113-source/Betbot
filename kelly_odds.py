@@ -6686,7 +6686,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                 f"{f'<i>{_cr_n}</i>' if _cr_n else ''}\n"
                 f"{_DIV2}"
             )
-            _send_ntfy(body_hev, priority=3)
+            ntfy_post("⚠️ EV ALTO | " + match_es, body_hev, "high")
             if alerted is not None:
                 alerted[match_key_ana] = float(_hev_ev_n)
             print(f"  📢 Alerta EV>15% enviada: {match_es}")
@@ -8434,6 +8434,7 @@ def check_results():
                     result=result,
                     profit_loss=profit_loss,
                 )
+                refresh_bankroll()
             except Exception as ex:
                 print(f"  ⚠️  bankroll log error: {ex}")
 
@@ -11944,12 +11945,11 @@ def _fetch_confirmed_lineup(home: str, away: str, commence: str) -> "dict | None
             return _lineup_cache[cache_key]
 
         game_date = commence[:10]
-        url  = (
-            f"{MLB_BASE}/schedule"
-            f"?sportId=1&date={game_date}"
-            f"&hydrate=lineups,probablePitcher"
-        )
-        data = _mlb_get(url)
+        data = _mlb_rest("/schedule", {
+            "sportId": 1,
+            "date": game_date,
+            "hydrate": "lineups,probablePitcher",
+        })
 
         result = None
         for date_block in data.get("dates", []):
@@ -14108,6 +14108,15 @@ if __name__ == "__main__":
                 _poll_ntfy_confirmations()
             except Exception as e:
                 print(f"  ⚠️  poll_confirmations error: {e}")
+
+            try:
+                detect_and_notify_parlays(all_full_analyses)
+            except Exception as _pe:
+                print(f"  ⚠️  Parlay detector error: {_pe}")
+            try:
+                _check_cross_game_correlations(all_full_analyses)
+            except Exception as _ce:
+                print(f"  ⚠️  Cross-game error: {_ce}")
 
             print(f"\n⏳ Next scan in {INTERVAL // 60} min...")
             time.sleep(INTERVAL)
