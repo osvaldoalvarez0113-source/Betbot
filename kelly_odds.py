@@ -5201,7 +5201,15 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
 
         # ── F5 ML (primera mitad — moneyline primeras 5 entradas) ────────────
         # F5 odds se obtienen por endpoint de evento (no en get_odds principal)
-        _f5_data = _fetch_f5_odds(game_id)
+        # GUARDIA DE API: solo pedir si ya hay al menos un candidato con EV > 3%.
+        # Si no hay valor en ML/totals/spreads, es improbable que F5/hits/props
+        # lo tengan — ahorra ~60-70% de llamadas al Odds API por scan.
+        _has_early_ev = any(c.get("ev_pct", 0) > 3.0 for c in candidates)
+        if not _has_early_ev:
+            print(f"   ⏭️  F5/props skip — sin candidatos EV>3% en ML/totals/spreads")
+            _f5_data = {}
+        else:
+            _f5_data = _fetch_f5_odds(game_id)
         f5_h2h = _extract_f5_h2h_best(_f5_data)
         if f5_h2h:
             _era_diff_f5 = a_era_eff - h_era_eff   # positivo = pitcher local mejor
@@ -5295,9 +5303,14 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         # por MLB Stats API es estrictamente mayor a 8.5.  Sin K/9 confirmado
         # o con K/9 ≤ 8.5, el prop se bloquea y se intenta fallback a ML.
         # NUNCA usar estimación por ERA como sustituto de K/9 real.
+        # GUARDIA DE API: reusar _has_early_ev del bloque F5 — si sigue sin
+        # candidatos con EV>3%, no hay razón para gastar una llamada en K props.
         _k9_prop_blocked = False   # True si al menos un K prop fue bloqueado por esta regla
         try:
-            _ko_props = _fetch_player_props(game_id)
+            if not _has_early_ev:
+                _ko_props = {}
+            else:
+                _ko_props = _fetch_player_props(game_id)
             for _kp_nm, _kp_era, _kp_sc in [
                 (h_pname, h_era_eff, h_statcast),
                 (a_pname, a_era_eff, a_statcast),
@@ -13225,7 +13238,8 @@ def _fetch_player_props(event_id: str) -> dict:
     """Fetch pitcher strikeout + batter props from Odds API for a specific game event."""
     if not API_KEY or not event_id:
         return {}
-    ck = f"props_{event_id}"
+    _today = datetime.now().strftime("%Y-%m-%d")
+    ck = f"props_{event_id}_{_today}"
     if ck in _props_cache:
         return _props_cache[ck]
     try:
@@ -13263,7 +13277,8 @@ def _fetch_f5_odds(event_id: str) -> dict:
     """
     if not API_KEY or not event_id:
         return {}
-    ck = f"f5_{event_id}"
+    _today = datetime.now().strftime("%Y-%m-%d")
+    ck = f"f5_{event_id}_{_today}"
     if ck in _f5_odds_cache:
         return _f5_odds_cache[ck]
     try:
