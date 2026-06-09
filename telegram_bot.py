@@ -334,6 +334,7 @@ def _cmd_analizar(chat_id: str, args: str):
         try:
             games = _get_odds_fn(sport)
             if not games:
+                print(f"  [analizar] {sport}: sin juegos disponibles (API vacía o error)")
                 continue
             for g in games:
                 gh = g.get("home_team", "").lower()
@@ -348,7 +349,8 @@ def _cmd_analizar(chat_id: str, args: str):
                     break
             if game_found:
                 break
-        except Exception:
+        except Exception as _gse:
+            print(f"  [analizar] excepción buscando en {sport}: {_gse}")
             continue
 
     if not game_found:
