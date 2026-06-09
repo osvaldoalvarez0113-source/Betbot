@@ -4388,10 +4388,13 @@ def _extract_h2h_best(game):
 def _extract_spread_best(game):
     """
     Best decimal odds per team in spreads market (run line / handicap).
+    Only considers US-licensed books (US_BOOKS_ONLY whitelist).
     Returns {name: (point, price, book)}.
     """
     best = {}
     for bk in game.get("bookmakers", []):
+        if not _is_us_book(bk["title"]):
+            continue   # skip non-US international books
         for m in bk.get("markets", []):
             if m["key"] == "spreads":
                 for o in m.get("outcomes", []):
