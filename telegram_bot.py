@@ -309,6 +309,15 @@ def _cmd_estado(chat_id: str):
     ))
 
 
+def _team_words_match(query: str, team: str) -> bool:
+    """True si cada palabra de `query` aparece como subcadena en `team` (case-insensitive).
+    Ejemplo: _team_words_match("guardians", "Cleveland Guardians") → True
+             _team_words_match("red sox",   "Boston Red Sox")      → True
+    """
+    t = team.lower()
+    return all(w in t for w in query.lower().split())
+
+
 def _cmd_analizar(chat_id: str, args: str):
     if not args or " vs " not in args.lower():
         _send(chat_id,
@@ -337,13 +346,12 @@ def _cmd_analizar(chat_id: str, args: str):
                 print(f"  [analizar] {sport}: sin juegos disponibles (API vacía o error)")
                 continue
             for g in games:
-                gh = g.get("home_team", "").lower()
-                ga = g.get("away_team", "").lower()
-                if (home_q in gh or gh in home_q) and (away_q in ga or ga in away_q):
-                    game_found  = g
-                    sport_found = sport
-                    break
-                if (away_q in gh or gh in away_q) and (home_q in ga or ga in home_q):
+                gh = g.get("home_team", "")
+                ga = g.get("away_team", "")
+                # Orden normal: home_q → local, away_q → visitante
+                # Orden inverso: home_q → visitante, away_q → local
+                if ((_team_words_match(home_q, gh) and _team_words_match(away_q, ga)) or
+                        (_team_words_match(away_q, gh) and _team_words_match(home_q, ga))):
                     game_found  = g
                     sport_found = sport
                     break
