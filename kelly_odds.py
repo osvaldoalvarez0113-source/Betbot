@@ -33,7 +33,38 @@ CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
 CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-haiku-4-5-20251001")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO       = os.environ.get("GITHUB_REPO",  "osvaldoalvarez0113-source/Betbot")
-BANKROLL = 1000
+BANKROLL_DEFAULT = 1000.0
+
+def _load_live_bankroll() -> float:
+    """
+    Read the current bankroll from bankroll_log.csv (most recent entry).
+    Falls back to BANKROLL_DEFAULT if no log exists yet.
+    """
+    try:
+        if os.path.isfile("bankroll_log.csv"):
+            import csv as _csv
+            last_balance = BANKROLL_DEFAULT
+            with open("bankroll_log.csv", "r", newline="", encoding="utf-8") as _f:
+                rows = list(_csv.DictReader(_f))
+            if rows:
+                for row in reversed(rows):
+                    bal = float(row.get("balance") or row.get("bankroll") or 0)
+                    if bal > 0:
+                        last_balance = bal
+                        break
+            return last_balance
+    except Exception as _e:
+        print(f"  ⚠️  _load_live_bankroll error: {_e}")
+    return BANKROLL_DEFAULT
+
+BANKROLL = _load_live_bankroll()
+
+def refresh_bankroll():
+    """Reload BANKROLL from bankroll_log.csv. Call after each auto-resolved result."""
+    global BANKROLL
+    BANKROLL = _load_live_bankroll()
+    print(f"  💰 Bankroll actualizado: ${BANKROLL:,.2f}")
+
 FRACTION = 0.25
 MIN_EDGE  = 2.0
 MIN_STAKE            = 10.00  # never alert if Kelly stake < $10
@@ -717,15 +748,6 @@ def ntfy_post(title, body, priority="default"):
 # MODULE 3 — MATH MODELS (declared first; used by other modules)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def load_elo_ratings():
-    if os.path.exists(ELO_FILE):
-        try:
-            with open(ELO_FILE) as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
 def save_elo_ratings(ratings):
     with open(ELO_FILE, "w") as f:
         json.dump(ratings, f, indent=2)
@@ -1127,6 +1149,69 @@ def fetch_team_pitching_ra(team_id):
     except Exception:
         return None
 
+def analyze_nrfi(home_team: str, away_team: str,
+                 hp_name: str, ap_name: str,
+                 hp_era: float, ap_era: float,
+                 home_ops: str, away_ops: str,
+                 home_k9: float = 0.0, away_k9: float = 0.0) -> dict:
+    """
+    Analyze NRFI (No Run First Inning) / YRFI (Yes Run First Inning) market.
+    Returns bet ('NRFI'|'YRFI'|'SKIP'), confidence, reason, ev_est.
+    """
+    score   = 0
+    reasons = []
+
+    if hp_era < 3.00:
+        score += 3; reasons.append(f"Lanzador local élite ({hp_era:.2f} prom. carreras)")
+    elif hp_era < 4.00:
+        score += 1; reasons.append(f"Lanzador local sólido ({hp_era:.2f})")
+    elif hp_era > 5.00:
+        score -= 2; reasons.append(f"⚠️ Lanzador local débil ({hp_era:.2f})")
+
+    if ap_era < 3.00:
+        score += 3; reasons.append(f"Lanzador visitante élite ({ap_era:.2f})")
+    elif ap_era < 4.00:
+        score += 1; reasons.append(f"Lanzador visitante sólido ({ap_era:.2f})")
+    elif ap_era > 5.00:
+        score -= 2; reasons.append(f"⚠️ Lanzador visitante débil ({ap_era:.2f})")
+
+    if home_k9 > 9.5:
+        score += 1; reasons.append(f"Lanzador local: muchos ponches/9 innings ({home_k9:.1f})")
+    if away_k9 > 9.5:
+        score += 1; reasons.append(f"Lanzador visitante: muchos ponches/9 innings ({away_k9:.1f})")
+
+    try:
+        if float(home_ops or 0) > 0.800:
+            score -= 1; reasons.append(f"Ofensiva local peligrosa ({home_ops})")
+        if float(away_ops or 0) > 0.800:
+            score -= 1; reasons.append(f"Ofensiva visitante peligrosa ({away_ops})")
+    except Exception:
+        pass
+
+    if score >= 5:
+        bet = "NRFI"; confidence = "ALTA"
+        true_prob = 0.68
+        ev_est = round((true_prob * 1.741 - 1) * 100, 1)
+    elif score >= 2:
+        bet = "NRFI"; confidence = "MEDIA"
+        true_prob = 0.60
+        ev_est = round((true_prob * 1.741 - 1) * 100, 1)
+    elif score <= -3:
+        bet = "YRFI"; confidence = "ALTA"
+        true_prob = 0.52
+        ev_est = round((true_prob * 2.05 - 1) * 100, 1)
+    elif score <= -1:
+        bet = "YRFI"; confidence = "MEDIA"
+        true_prob = 0.48
+        ev_est = round((true_prob * 2.05 - 1) * 100, 1)
+    else:
+        return {"bet": "SKIP", "confidence": "BAJA",
+                "reason": "Sin ventaja clara en el primer inning.", "ev_est": 0.0}
+
+    reason = " | ".join(reasons) if reasons else "Análisis de lanzadores"
+    return {"bet": bet, "confidence": confidence, "reason": reason, "ev_est": ev_est}
+
+
 def morning_report_mlb():
     print("\n📋 MLB Morning Report...")
     games = fetch_mlb_games_today()
@@ -1188,35 +1273,83 @@ def morning_report_mlb():
             win_prob_away = 1 - win_prob_home
 
             # Recommendation
+            # Replaced below after computing home_es_r / away_es_r
+            rec = ""
+
+            # Spanish recommendation
+            home_es_r = _es(home); away_es_r = _es(away)
             if win_prob_home >= 0.60:
-                rec = f"BET HOME {home} ML (conf: HIGH)"
+                rec = f"✅ APOSTAR LOCAL — {home_es_r} ML (confianza: ALTA)"
             elif win_prob_away >= 0.60:
-                rec = f"BET AWAY {away} ML (conf: HIGH)"
+                rec = f"✅ APOSTAR VISITANTE — {away_es_r} ML (confianza: ALTA)"
             elif win_prob_home >= 0.55:
-                rec = f"LEAN HOME {home} ML (conf: MEDIUM)"
+                rec = f"➡️ INCLINACIÓN LOCAL — {home_es_r} ML (confianza: MEDIA)"
             elif win_prob_away >= 0.55:
-                rec = f"LEAN AWAY {away} ML (conf: MEDIUM)"
+                rec = f"➡️ INCLINACIÓN VISITANTE — {away_es_r} ML (confianza: MEDIA)"
             else:
-                rec = "NO BET (too close)"
+                rec = "⏸️ SIN APUESTA — demasiado parejo"
+
+            _rs_h = home_bat['rs_pg'] if home_bat['rs_pg'] is not None else 'Sin datos'
+            _ra_h = home_bat['ra_pg'] if home_bat['ra_pg'] is not None else 'Sin datos'
+            _rs_a = away_bat['rs_pg'] if away_bat['rs_pg'] is not None else 'Sin datos'
+            _ra_a = away_bat['ra_pg'] if away_bat['ra_pg'] is not None else 'Sin datos'
 
             body = (
-                f"{away} @ {home}  |  {gtime[:16] if gtime != 'TBD' else 'TBD'}\n"
-                f"Pitchers:\n"
-                f"  {hp_name} (H): ERA {hp_stats['era']} | WHIP {hp_stats['whip']} | K/9 {hp_stats['k9']}\n"
-                f"  {ap_name} (A): ERA {ap_stats['era']} | WHIP {ap_stats['whip']} | K/9 {ap_stats['k9']}\n"
-                f"Batting:\n"
-                f"  {home}: AVG {home_bat['avg']} | OPS {home_bat['ops']} | "
-                f"RS/j {home_bat['rs_pg'] if home_bat['rs_pg'] is not None else 'N/D'} | "
-                f"RA/j {home_bat['ra_pg'] if home_bat['ra_pg'] is not None else 'N/D'}\n"
-                f"  {away}: AVG {away_bat['avg']} | OPS {away_bat['ops']} | "
-                f"RS/j {away_bat['rs_pg'] if away_bat['rs_pg'] is not None else 'N/D'} | "
-                f"RA/j {away_bat['ra_pg'] if away_bat['ra_pg'] is not None else 'N/D'}\n"
-                f"Win Prob: {home} {win_prob_home:.1%} | {away} {win_prob_away:.1%}\n"
-                f"Pythagorean: {home} {py_home:.1%}\n"
+                f"{away_es_r} @ {home_es_r}  |  {gtime[:16] if gtime != 'TBD' else 'TBD'}\n"
+                f"Lanzadores abridores:\n"
+                f"  {hp_name} (Local): Promedio de carreras {hp_stats['era']} | "
+                f"Base-runners por entrada {hp_stats['whip']} | "
+                f"Ponches por 9 innings {hp_stats['k9']}\n"
+                f"  {ap_name} (Visitante): Promedio de carreras {ap_stats['era']} | "
+                f"Base-runners por entrada {ap_stats['whip']} | "
+                f"Ponches por 9 innings {ap_stats['k9']}\n"
+                f"Estadísticas ofensivas:\n"
+                f"  {home_es_r}: Promedio al bate {home_bat['avg']} | "
+                f"Eficiencia ofensiva {home_bat['ops']} | "
+                f"Carreras anotadas/juego {_rs_h} | Carreras permitidas/juego {_ra_h}\n"
+                f"  {away_es_r}: Promedio al bate {away_bat['avg']} | "
+                f"Eficiencia ofensiva {away_bat['ops']} | "
+                f"Carreras anotadas/juego {_rs_a} | Carreras permitidas/juego {_ra_a}\n"
+                f"Probabilidad de Victoria: {home_es_r} {win_prob_home:.1%} | {away_es_r} {win_prob_away:.1%}\n"
+                f"Modelo Pitágoras: {home_es_r} {py_home:.1%}\n"
                 f">>> {rec}"
             )
-            ntfy_post(f"MLB Preview: {away} @ {home}", body, "default")
+            ntfy_post(f"MLB Preview: {away_es_r} @ {home_es_r}", body, "default")
             print(f"  ✉️  Sent MLB preview: {away} @ {home}")
+
+            # Task 5 — NRFI/YRFI analysis after pitcher data is available
+            try:
+                _hp_era = float(hp_stats.get("era") or 4.50)
+                _ap_era = float(ap_stats.get("era") or 4.50)
+                _hp_k9  = float(hp_stats.get("k9")  or 0.0)
+                _ap_k9  = float(ap_stats.get("k9")  or 0.0)
+                _nrfi   = analyze_nrfi(
+                    home, away, hp_name, ap_name,
+                    _hp_era, _ap_era,
+                    str(home_bat.get("ops", "0")),
+                    str(away_bat.get("ops", "0")),
+                    _hp_k9, _ap_k9,
+                )
+                if _nrfi["bet"] != "SKIP" and _nrfi["confidence"] in ("ALTA", "MEDIA"):
+                    _nrfi_body = (
+                        f"⚾ {away_es_r} @ {home_es_r}\n"
+                        f"{'─'*28}\n"
+                        f"Apuesta: <b>{_nrfi['bet']}</b> ({_nrfi['confidence']})\n"
+                        f"EV estimado: +{_nrfi['ev_est']:.1f}%\n"
+                        f"{'─'*28}\n"
+                        f"{_nrfi['reason']}\n"
+                        f"{'─'*28}\n"
+                        f"⚠️ Usar odds reales de Bovada/Betonline antes de apostar.\n"
+                        f"   {_nrfi['bet']} típico: {'(-135) decimal 1.741' if _nrfi['bet'] == 'NRFI' else '(+105) decimal 2.05'}"
+                    )
+                    ntfy_post(
+                        f"⚾ NRFI/YRFI | {away_es_r} @ {home_es_r}",
+                        _nrfi_body, "default"
+                    )
+                    print(f"  ⚾ NRFI/YRFI: {_nrfi['bet']} {_nrfi['confidence']} "
+                          f"EV+{_nrfi['ev_est']:.1f}% — {away} @ {home}")
+            except Exception as _ne:
+                print(f"  ⚠️  NRFI error: {_ne}")
 
             game_key = f"{away}@{home}"
             lineups[game_key] = {"home_pitcher": hp_name, "away_pitcher": ap_name}
@@ -1239,6 +1372,23 @@ def fetch_world_cup_games():
         return r.json() if r.status_code == 200 else {}
     except Exception:
         return {}
+
+def _elo_to_goals(elo_home: float, elo_away: float) -> tuple:
+    """
+    Convert ELO ratings to expected goals per team using a log-ratio model.
+    Based on WC historical scoring rates (avg ~1.3 goals/team/game).
+    Returns (avg_goals_home, avg_goals_away).
+    """
+    BASE_GOALS = 1.30
+    HOME_BOOST = 0.10
+    ELO_SCALE  = 500.0
+    elo_ratio = (elo_home - elo_away) / ELO_SCALE
+    avg_h = BASE_GOALS * (1.0 + elo_ratio) + HOME_BOOST
+    avg_a = BASE_GOALS * (1.0 - elo_ratio)
+    avg_h = max(0.40, min(3.50, avg_h))
+    avg_a = max(0.40, min(3.50, avg_a))
+    return round(avg_h, 2), round(avg_a, 2)
+
 
 def morning_report_world_cup():
     print("\n🌍 World Cup Morning Report...")
@@ -1273,27 +1423,46 @@ def morning_report_world_cup():
             elo_home = elo_win_prob(home_name, away_name)
             elo_away = 1.0 - elo_home
 
-            # Poisson model (WC average: ~1.3 goals per team per game, slight home boost)
-            avg_h = 1.35; avg_a = 1.25
+            # ELO-adjusted Poisson model
+            elo_home_val = _elo_for(home_name)
+            elo_away_val = _elo_for(away_name)
+            avg_h, avg_a = _elo_to_goals(elo_home_val, elo_away_val)
             p_win, p_draw, p_loss = poisson_match_probs(avg_h, avg_a)
 
             # Blend ELO + Poisson
             win_h = 0.5 * elo_home + 0.5 * p_win
             win_a = 0.5 * elo_away + 0.5 * p_loss
 
-            # Recommendation
+            # Task 10: team form
+            form_home = fetch_wc_team_form(home_name)
+            form_away = fetch_wc_team_form(away_name)
+            form_home_txt = (
+                f"GF {form_home['goals_for']} | GC {form_home['goals_against']} "
+                f"({form_home['matches']} partidos)"
+                if form_home else "Sin datos"
+            )
+            form_away_txt = (
+                f"GF {form_away['goals_for']} | GC {form_away['goals_against']} "
+                f"({form_away['matches']} partidos)"
+                if form_away else "Sin datos"
+            )
+
+            # Spanish rec
             if win_h >= 0.55:
-                rec = f"LEAN HOME {home_name} (conf: MEDIUM)"
+                rec = f"➡️ INCLINACIÓN LOCAL — {home_es} (confianza: MEDIA)"
             elif win_a >= 0.55:
-                rec = f"LEAN AWAY {away_name} (conf: MEDIUM)"
+                rec = f"➡️ INCLINACIÓN VISITANTE — {away_es} (confianza: MEDIA)"
             else:
-                rec = "DRAW possible — consider DNB or no bet"
+                rec = "⏸️ EMPATE posible — considera DNB o sin apuesta"
 
             body = (
                 f"{away_es} vs {home_es}  |  {game_time} UTC\n"
+                f"Goles esperados: {home_es} {avg_h} | {away_es} {avg_a}\n"
                 f"Poisson model: Local {p_win:.1%} | Empate {p_draw:.1%} | Visitante {p_loss:.1%}\n"
                 f"ELO: {home_es} {elo_home:.1%} | {away_es} {elo_away:.1%}\n"
                 f"Mixto: {home_es} {win_h:.1%} | {away_es} {win_a:.1%}\n"
+                f"Forma reciente {home_es}: {form_home_txt}\n"
+                f"Forma reciente {away_es}: {form_away_txt}\n"
                 f">>> {rec}"
             )
             ntfy_post(f"🌍 Vista previa: {away_es} vs {home_es}", body, "default")
@@ -1506,7 +1675,7 @@ def check_lineup_changes():
                     msg = (
                         f"Game: {away} @ {home}\n"
                         f"{side} ({label}): {prev_p} → {now_p}\n"
-                        f"Reassess your morning projection."
+                        f"Recalcula tu proyección del partido."
                     )
                     ntfy_post(f"PITCHER CHANGE: {away} @ {home}", msg, "urgent")
                     print(f"  🚨 Pitcher change: {away} @ {home} — {prev_p} → {now_p}")
@@ -11951,6 +12120,36 @@ def _parlay_bet_type(label: str) -> str:
     return ""
 
 
+_CORRELATED_PAIRS: list = [
+    ("strikeout_prop", "over",  "totals",     "under", "K alto + Under son correlacionados — menos carreras cuando el pitcher domina"),
+    ("strikeout_prop", "under", "totals",     "over",  "K bajo + Over son correlacionados — más carreras cuando hay mal pitcheo"),
+    ("h2h",           None,    "spreads",    None,    "Moneyline + línea de carreras del mismo equipo son redundantes"),
+    ("h2h",           None,    "h2h_first5", None,    "Moneyline partido completo + primer tiempo comparten resultado"),
+]
+
+def _check_correlated_legs(legs: list) -> str:
+    """
+    Given a list of parlay leg dicts (each with 'market_type', 'direction'),
+    return a warning string if any pair is correlated, or '' if all clear.
+    """
+    for i, leg_a in enumerate(legs):
+        for leg_b in legs[i + 1:]:
+            for ma, da, mb, db, warn in _CORRELATED_PAIRS:
+                a_match  = (leg_a.get("market_type", "") == ma and
+                            (da is None or leg_a.get("direction", "") == da))
+                b_match  = (leg_b.get("market_type", "") == mb and
+                            (db is None or leg_b.get("direction", "") == db))
+                if a_match and b_match:
+                    return f"⚠️ PARLAY CORRELACIONADO: {warn}"
+                a_match2 = (leg_a.get("market_type", "") == mb and
+                            (db is None or leg_a.get("direction", "") == db))
+                b_match2 = (leg_b.get("market_type", "") == ma and
+                            (da is None or leg_b.get("direction", "") == da))
+                if a_match2 and b_match2:
+                    return f"⚠️ PARLAY CORRELACIONADO: {warn}"
+    return ""
+
+
 def _extract_parlay_candidates(analysis: dict) -> list:
     """
     Extract parlay-eligible picks from one full analysis.
@@ -12001,7 +12200,9 @@ def _send_parlay_alert(p: dict):
         parts = match.split(" vs ", 1)
         return f"{_es(parts[0])} vs {_es(parts[1])}" if len(parts) == 2 else match
 
+    corr_warn = p.get("corr_warning", "")
     body = (
+        f"{corr_warn + chr(10) if corr_warn else ''}"
         f"🔗 Pierna 1:\n"
         f"   {_strip(l1['label'])} | {_pair(l1['match'])}\n"
         f"   Prob: {round(l1['true_prob']*100):.0f}%"
@@ -12097,6 +12298,15 @@ def detect_and_notify_parlays(all_analyses: list):
 
     if not best_parlay:
         return
+
+    # Correlated parlay guard — prepend warning if legs are correlated
+    _corr_legs = [
+        {"market_type": best_parlay["leg1"].get("bet_type",""),
+         "direction":   best_parlay["leg1"].get("direction","")},
+        {"market_type": best_parlay["leg2"].get("bet_type",""),
+         "direction":   best_parlay["leg2"].get("direction","")},
+    ]
+    best_parlay["corr_warning"] = _check_correlated_legs(_corr_legs)
 
     pk = (f"parlay_{best_parlay['leg1']['game_id']}_"
           f"{best_parlay['leg2']['game_id']}")
@@ -12692,6 +12902,31 @@ def _save_line_history():
     _line_history.clear()
     _line_history.update(pruned)
 
+def _check_reverse_line_movement(game_id: str, home_team: str, away_team: str,
+                                  prev_ml_home: float, curr_ml_home: float,
+                                  prev_total: float, curr_total: float) -> list:
+    """
+    Detect reverse line movement patterns.
+    Returns list of alert strings (empty = no RLM detected).
+    """
+    alerts = []
+    if prev_ml_home and curr_ml_home:
+        if prev_ml_home < -180 and curr_ml_home > prev_ml_home + 0.05:
+            alerts.append(
+                f"🔄 MOVIMIENTO INVERSO (GANADOR): El público apuesta {_es(home_team)} "
+                f"pero la línea se mueve en su contra. Posible dinero sharp en {_es(away_team)}."
+            )
+    if prev_total and curr_total:
+        park_factor = MLB_PARK_FACTORS.get(home_team, 1.0)
+        if park_factor > 1.05 and curr_total < prev_total - 0.3:
+            alerts.append(
+                f"🔄 MOVIMIENTO INVERSO (TOTAL): Estadio favorece bateadores "
+                f"pero la línea bajó {prev_total} → {curr_total}. "
+                f"Sharp money en UNDER."
+            )
+    return alerts
+
+
 def _track_line_history(game_id: str, home: str, away: str,
                          total: float, ml_home: float, ml_away: float):
     """
@@ -12702,6 +12937,26 @@ def _track_line_history(game_id: str, home: str, away: str,
     """
     now_s = datetime.now(ET).isoformat()
     entry = {"time": now_s, "total": total, "ml_home": ml_home, "ml_away": ml_away}
+
+    # RLM check — compare against previous entry before appending
+    _prev_entries = _line_history.get(game_id, [])
+    if _prev_entries:
+        _prev = _prev_entries[-1]
+        _rlm_alerts = _check_reverse_line_movement(
+            game_id, home, away,
+            _prev.get("ml_home", 0.0), ml_home,
+            _prev.get("total",   0.0), total,
+        )
+        for _rlm_msg in _rlm_alerts:
+            print(f"  🔄 RLM: {_rlm_msg[:120]}")
+            try:
+                ntfy_post(
+                    f"🔄 MOVIMIENTO INVERSO | {_es(away)} @ {_es(home)}",
+                    _rlm_msg, priority="high"
+                )
+            except Exception:
+                pass
+
     _line_history.setdefault(game_id, []).append(entry)
 
     entries = _line_history[game_id]
