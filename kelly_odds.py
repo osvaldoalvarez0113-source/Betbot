@@ -7054,20 +7054,29 @@ def build_analizar_text(result: dict) -> list:
     p1 += f"{_DIV}\n📊 TODOS LOS MERCADOS\n{_DIV}\n"
     _has_k = False
     if all_mkts:
-        for lbl, m in all_mkts.items():
-            bk = m.get("book", "")
-            # Safety net: skip any market whose book is not US-accessible.
-            # "Props" is an internal marker for K/hit props (no single-book origin).
-            if bk != "Props" and not _is_us_book(bk):
-                continue
-            # ✅ only when the label was a formal pick AND the book is US-accessible
-            is_pick = lbl in cand_lbs
-            edge    = " ✅" if is_pick else ""
-            ev_s    = f"+{m['ev_pct']:.1f}%" if m["ev_pct"] >= 0 else f"{m['ev_pct']:.1f}%"
-            prob_pc = round(m["prob"] * 100)
-            p1 += f"  {lbl}: {prob_pc}% | {ev_s} | {m['odds']:.2f} @ {bk}{edge}\n"
-            if "⚡" in lbl:
-                _has_k = True
+        _mkts_shown = 0
+        try:
+            for lbl, m in all_mkts.items():
+                bk = m.get("book", "")
+                # Safety net: skip any market whose book is not US-accessible.
+                # "Props" is an internal marker for K/hit props (no single-book origin).
+                if bk != "Props" and not _is_us_book(bk):
+                    continue
+                # ✅ only when the label was a formal pick AND the book is US-accessible
+                is_pick  = lbl in cand_lbs
+                edge     = " ✅" if is_pick else ""
+                ev_s     = f"+{m['ev_pct']:.1f}%" if m.get("ev_pct", 0) >= 0 else f"{m['ev_pct']:.1f}%"
+                prob_pc  = round(m.get("prob", 0) * 100)
+                odds_val = m.get("odds", 0)
+                p1 += f"  {lbl}: {prob_pc}% | {ev_s} | {odds_val:.2f} @ {bk}{edge}\n"
+                _mkts_shown += 1
+                if "⚡" in lbl:
+                    _has_k = True
+        except Exception as _mle:
+            print(f"  ⚠️  build_analizar_text markets loop: {_mle}")
+        # Fallback: all existing markets were from non-US books and got filtered
+        if _mkts_shown == 0:
+            p1 += "  ℹ️ Sin línea disponible en libros USA para este partido.\n"
         if not _has_k and is_mlb:
             p1 += "  ⚡ Props K: sin K/9 confirmado >8.5 — se prefiere ML\n"
     elif cands:
