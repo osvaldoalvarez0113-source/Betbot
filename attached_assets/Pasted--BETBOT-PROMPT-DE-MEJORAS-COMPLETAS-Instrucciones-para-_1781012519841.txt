@@ -1,0 +1,428 @@
+# BETBOT — PROMPT DE MEJORAS COMPLETAS
+
+## Instrucciones para el Replit Agent (Remy)
+
+Implement ALL of the following improvements to `kelly_odds.py` in a single session.
+Read this entire document before starting. Do NOT skip any task.
+After completing ALL tasks, run the bot to verify no errors, then make a git commit.
+
+-----
+
+## TASK 1 — FIX: REMOVE DUPLICATE `load_elo_ratings()` FUNCTION
+
+There are TWO definitions of `load_elo_ratings()` in the file.
+
+- The FIRST definition (the old one, ~line 400) does NOT seed WC2026 teams.
+- The SECOND definition (the correct one, ~line 450) seeds all WC2026 teams from `_WC2026_ELO_SEED`.
+
+**Action:** Delete the FIRST (old) definition completely. Keep only the second one.
+This prevents Python from using dead code and removes the confusion.
+
+-----
+
+## TASK 2 — FIX: DYNAMIC BANKROLL (no more hardcoded $1,000)
+
+Currently `BANKROLL = 1000` is hardcoded and never updates when bets win or lose.
+
+**Action:** Implement a live bankroll loader at startup and after each auto-result.
+
+```python
+# At the top of the file, replace:
+#   BANKROLL = 1000
+# With:
+BANKROLL_DEFAULT = 1000.0
+
+def _load_live_bankroll() -> float:
+    """
+    Read the current bankroll from bankroll_log.csv (most recent entry).
+    Falls back to BANKROLL_DEFAULT if no log exists yet.
+    """
+    try:
+        if os.path.isfile(BANKROLL_LOG_FILE):
+            import csv as _csv
+            last_balance = BANKROLL_DEFAULT
+            with open(BANKROLL_LOG_FILE, "r", newline="", encoding="utf-8") as _f:
+                rows = list(_csv.DictReader(_f))
+            if rows:
+                # Find the most recent row with a 'balance' field
+                for row in reversed(rows):
+                    bal = float(row.get("balance") or row.get("bankroll") or 0)
+                    if bal > 0:
+                        last_balance = bal
+                        break
+            return last_balance
+    except Exception as _e:
+        print(f"  ⚠️  _load_live_bankroll error: {_e}")
+    return BANKROLL_DEFAULT
+
+BANKROLL = _load_live_bankroll()
+```
+
+Also add a function `refresh_bankroll()` that calls `_load_live_bankroll()` and updates the global `BANKROLL` — call it:
+
+- Once at startup after auto-results module runs
+- After each auto-resolved result is written to bankroll_log.csv
+
+-----
+
+## TASK 3 — FIX: MORNING MLB REPORT FULLY IN SPANISH
+
+The `morning_report_mlb()` function has English text in its body strings that bypasses translation.
+
+**Action:** Replace all English strings inside the `body = (...)` block in `morning_report_mlb()`:
+
+|English (current)     |Spanish (replace with)              |
+|----------------------|------------------------------------|
+|`"Pitchers:\n"`       |`"Lanzadores abridores:\n"`         |
+|`"(H):"`              |`"(Local):"`                        |
+|`"(A):"`              |`"(Visitante):"`                    |
+|`"ERA"`               |`"Promedio de carreras"`            |
+|`"WHIP"`              |`"Base-runners por entrada"`        |
+|`"K/9"`               |`"Ponches por 9 innings"`           |
+|`"Batting:\n"`        |`"Estadísticas ofensivas:\n"`       |
+|`"AVG"`               |`"Promedio al bate"`                |
+|`"OPS"`               |`"Eficiencia ofensiva"`             |
+|`"RS/j"`              |`"Carreras anotadas/juego"`         |
+|`"RA/j"`              |`"Carreras permitidas/juego"`       |
+|`"Win Prob:"`         |`"Probabilidad de Victoria:"`       |
+|`"Pythagorean:"`      |`"Modelo Pitágoras:"`               |
+|`"BET HOME"`          |`"✅ APOSTAR LOCAL"`                 |
+|`"BET AWAY"`          |`"✅ APOSTAR VISITANTE"`             |
+|`"LEAN HOME"`         |`"➡️ INCLINACIÓN LOCAL"`             |
+|`"LEAN AWAY"`         |`"➡️ INCLINACIÓN VISITANTE"`         |
+|`"NO BET (too close)"`|`"⏸️ SIN APUESTA — demasiado parejo"`|
+|`"conf: HIGH"`        |`"confianza: ALTA"`                 |
+|`"conf: MEDIUM"`      |`"confianza: MEDIA"`                |
+|`"N/D"`               |`"Sin datos"`                       |
+
+Also fix `check_lineup_changes()` — the `msg` body uses English:
+
+- `"Reassess your morning projection."` → `"Recalcula tu proyección del partido."`
+
+-----
+
+## TASK 4 — IMPROVEMENT: ELO-ADJUSTED WORLD CUP POISSON MODEL
+
+Currently `morning_report_world_cup()` uses the same static `avg_h = 1.35; avg_a = 1.25` for every match regardless of team strength. This means Argentina vs. Indonesia and Germany vs. France get the same projection.
+
+**Action:** Add this function before `morning_report_world_cup()`:
+
+```python
+def _elo_to_goals(elo_home: float, elo_away: float) -> tuple:
+    """
+    Convert ELO ratings to expected goals per team using a log-ratio model.
+    Based on WC historical scoring rates (avg ~1.3 goals/team/game).
+    
+    Returns (avg_goals_home, avg_goals_away).
+    """
+    BASE_GOALS = 1.30
+    HOME_BOOST = 0.10          # slight venue advantage in WC neutral-site games
+    ELO_SCALE  = 500.0         # controls sensitivity: ±500 ELO ≈ ±30% goals
+
+    elo_ratio = (elo_home - elo_away) / ELO_SCALE
+
+    avg_h = BASE_GOALS * (1.0 + elo_ratio) + HOME_BOOST
+    avg_a = BASE_GOALS * (1.0 - elo_ratio)
+
+    # Hard caps: realistic WC range
+    avg_h = max(0.40, min(3.50, avg_h))
+    avg_a = max(0.40, min(3.50, avg_a))
+
+    return round(avg_h, 2), round(avg_a, 2)
+```
+
+Then in `morning_report_world_cup()`, replace:
+
+```python
+avg_h = 1.35; avg_a = 1.25
+```
+
+With:
+
+```python
+elo_home_val = _elo_for(home_name)
+elo_away_val = _elo_for(away_name)
+avg_h, avg_a = _elo_to_goals(elo_home_val, elo_away_val)
+```
+
+Also add to the body string the projected goals line:
+
+```
+f"Goles esperados: {home_es} {avg_h} | {away_es} {avg_a}\n"
+```
+
+-----
+
+## TASK 5 — NEW FEATURE: NRFI/YRFI MARKET (No/Yes Run First Inning)
+
+This is a popular Bovada market. We already have all the data needed.
+
+**Action:** Add the following function:
+
+```python
+def analyze_nrfi(home_team: str, away_team: str,
+                 hp_name: str, ap_name: str,
+                 hp_era: float, ap_era: float,
+                 home_ops: str, away_ops: str,
+                 home_k9: float = 0.0, away_k9: float = 0.0) -> dict:
+    """
+    Analyze NRFI (No Run First Inning) / YRFI (Yes Run First Inning) market.
+    
+    Logic:
+    - Both pitchers ERA < 3.00 → strong NRFI lean
+    - Both pitchers ERA < 4.00 → NRFI lean
+    - Either pitcher ERA > 5.00 → YRFI lean
+    - K/9 > 9.5 for both → NRFI boost
+    - OPS > .800 for either team → YRFI boost
+    
+    Returns:
+      bet: "NRFI" | "YRFI" | "SKIP"
+      confidence: "ALTA" | "MEDIA" | "BAJA"
+      reason: explanation string in Spanish
+      ev_est: estimated EV% at typical odds (-135 NRFI / +105 YRFI)
+    """
+    score = 0   # positive = NRFI, negative = YRFI
+
+    reasons = []
+
+    # Pitcher ERA scoring
+    if hp_era < 3.00: score += 3; reasons.append(f"Lanzador local élite ({hp_era:.2f} prom. carreras)")
+    elif hp_era < 4.00: score += 1; reasons.append(f"Lanzador local sólido ({hp_era:.2f})")
+    elif hp_era > 5.00: score -= 2; reasons.append(f"⚠️ Lanzador local débil ({hp_era:.2f})")
+
+    if ap_era < 3.00: score += 3; reasons.append(f"Lanzador visitante élite ({ap_era:.2f})")
+    elif ap_era < 4.00: score += 1; reasons.append(f"Lanzador visitante sólido ({ap_era:.2f})")
+    elif ap_era > 5.00: score -= 2; reasons.append(f"⚠️ Lanzador visitante débil ({ap_era:.2f})")
+
+    # K/9 scoring (high K rate → batters struggle in 1st inning)
+    if home_k9 > 9.5: score += 1; reasons.append(f"Lanzador local: muchos ponches/9 innings ({home_k9:.1f})")
+    if away_k9 > 9.5: score += 1; reasons.append(f"Lanzador visitante: muchos ponches/9 innings ({away_k9:.1f})")
+
+    # OPS scoring (high OPS → teams score in 1st inning more often)
+    try:
+        if float(home_ops or 0) > 0.800: score -= 1; reasons.append(f"Ofensiva local peligrosa ({home_ops})")
+        if float(away_ops or 0) > 0.800: score -= 1; reasons.append(f"Ofensiva visitante peligrosa ({away_ops})")
+    except Exception:
+        pass
+
+    # Decision
+    if score >= 5:
+        bet = "NRFI"; confidence = "ALTA"
+        # Estimate EV at -135 NRFI odds (decimal 1.741) → true prob needed ~60%
+        true_prob = 0.68
+        ev_est = round((true_prob * 1.741 - 1) * 100, 1)
+    elif score >= 2:
+        bet = "NRFI"; confidence = "MEDIA"
+        true_prob = 0.60
+        ev_est = round((true_prob * 1.741 - 1) * 100, 1)
+    elif score <= -3:
+        bet = "YRFI"; confidence = "ALTA"
+        # Typical YRFI odds +105 (decimal 2.05) → true prob ~50%
+        true_prob = 0.52
+        ev_est = round((true_prob * 2.05 - 1) * 100, 1)
+    elif score <= -1:
+        bet = "YRFI"; confidence = "MEDIA"
+        true_prob = 0.48
+        ev_est = round((true_prob * 2.05 - 1) * 100, 1)
+    else:
+        return {"bet": "SKIP", "confidence": "BAJA", "reason": "Sin ventaja clara en el primer inning.", "ev_est": 0.0}
+
+    reason = " | ".join(reasons) if reasons else "Análisis de lanzadores"
+    return {"bet": bet, "confidence": confidence, "reason": reason, "ev_est": ev_est}
+```
+
+Then call `analyze_nrfi()` from within the main MLB scan when pitcher data is available.
+If `bet != "SKIP"` and `confidence in ("ALTA", "MEDIA")`:
+
+- Send an ntfy notification titled `"⚾ NRFI/YRFI | {away} @ {home}"`
+- Include: bet direction, confidence, estimated EV, reasons
+- Use the same two-layer format as other alerts
+
+-----
+
+## TASK 6 — IMPROVEMENT: CORRELATED PARLAY PROTECTION
+
+When building auto-parlays, some market combinations are correlated and reduce the true value of the parlay.
+
+**Action:** Add this validation function:
+
+```python
+_CORRELATED_PAIRS: list = [
+    # (market_type_a, direction_a, market_type_b, direction_b, warning)
+    ("strikeout_prop", "over",  "totals",    "under", "K alto + Under son correlacionados — menos carreras cuando el pitcher domina"),
+    ("strikeout_prop", "under", "totals",    "over",  "K bajo + Over son correlacionados — más carreras cuando hay mal pitcheo"),
+    ("h2h",           None,    "spreads",   None,    "Moneyline + línea de carreras del mismo equipo son redundantes"),
+    ("h2h",           None,    "h2h_first5",None,    "Moneyline partido completo + primer tiempo comparten resultado"),
+]
+
+def _check_correlated_legs(legs: list) -> str:
+    """
+    Given a list of parlay leg dicts (each with 'market_type', 'team', 'direction'),
+    return a warning string if any pair is correlated, or "" if all clear.
+    """
+    for i, leg_a in enumerate(legs):
+        for leg_b in legs[i+1:]:
+            for ma, da, mb, db, warn in _CORRELATED_PAIRS:
+                a_match = (leg_a.get("market_type","") == ma and
+                           (da is None or leg_a.get("direction","") == da))
+                b_match = (leg_b.get("market_type","") == mb and
+                           (db is None or leg_b.get("direction","") == db))
+                if a_match and b_match:
+                    return f"⚠️ PARLAY CORRELACIONADO: {warn}"
+                # Check reverse order
+                a_match2 = (leg_a.get("market_type","") == mb and
+                            (db is None or leg_a.get("direction","") == db))
+                b_match2 = (leg_b.get("market_type","") == ma and
+                            (da is None or leg_b.get("direction","") == da))
+                if a_match2 and b_match2:
+                    return f"⚠️ PARLAY CORRELACIONADO: {warn}"
+    return ""
+```
+
+In the parlay construction logic, call `_check_correlated_legs(legs)` before sending the parlay alert.
+If it returns a non-empty warning:
+
+- Do NOT skip the parlay (Osvaldo decides)
+- DO prepend the warning message to the ntfy body so Osvaldo sees it clearly
+
+-----
+
+## TASK 7 — IMPROVEMENT: REVERSE LINE MOVEMENT ALERTS
+
+When the line moves against the expected direction (public betting one side, but sharp money moves the line the other way), it’s a strong signal.
+
+**Action:** Add this logic inside the line history tracking module (where `_line_history` is updated):
+
+```python
+def _check_reverse_line_movement(game_id: str, home_team: str, away_team: str,
+                                  prev_ml_home: float, curr_ml_home: float,
+                                  prev_total: float, curr_total: float) -> list:
+    """
+    Detect reverse line movement patterns.
+    Returns list of alert strings (empty = no RLM detected).
+    
+    RLM logic (approximation without public % data):
+    - If home team is a heavy favorite (ML < -200) and line SHORTENS further → public bet,
+      but if line LENGTHENS (favorite pays more) → sharp fade signal.
+    - If total moves DOWN despite home team being hitter-friendly park → sharp UNDER signal.
+    """
+    alerts = []
+
+    # Moneyline RLM: heavy favorite getting worse odds (sharps fading)
+    if prev_ml_home and curr_ml_home:
+        if prev_ml_home < -180 and curr_ml_home > prev_ml_home + 0.05:
+            # Favorite's odds lengthened — public on them but sharps fading
+            alerts.append(
+                f"🔄 MOVIMIENTO INVERSO (GANADOR): El público apuesta {_es(home_team)} "
+                f"pero la línea se mueve en su contra. Posible dinero sharp en {_es(away_team)}."
+            )
+
+    # Total RLM: line moved DOWN in a hitter-friendly park
+    if prev_total and curr_total:
+        park_factor = MLB_PARK_FACTORS.get(home_team, 1.0)
+        if park_factor > 1.05 and curr_total < prev_total - 0.3:
+            alerts.append(
+                f"🔄 MOVIMIENTO INVERSO (TOTAL): Estadio favorece bateadores "
+                f"pero la línea bajó {prev_total} → {curr_total}. "
+                f"Sharp money en UNDER."
+            )
+
+    return alerts
+```
+
+Call this function whenever `_line_history` is updated with a new scan entry.
+If alerts are returned, send them via ntfy with priority `"high"`.
+Title: `"🔄 MOVIMIENTO INVERSO | {away} @ {home}"`
+
+-----
+
+## TASK 8 — VERIFY AND COMPLETE: ALL 7 MLB MARKETS
+
+Verify that these 7 markets are fully implemented and analyzed in the main scan:
+
+1. `h2h` — Moneyline (ganador del partido)
+1. `spreads` — Línea de carreras (run line ±1.5)
+1. `totals` — Total de carreras (over/under)
+1. `h2h_first5` — Moneyline primeros 5 innings (F5 ML)
+1. `totals_first5` — Total primeros 5 innings (F5 total)
+1. `batter_hits` — Total de hits del equipo (hit totals)
+1. `pitcher_strikeouts` — Total de ponches del lanzador (K props)
+
+For each market:
+
+- Confirm it is being fetched from The Odds API using the correct market key
+- Confirm EV is being calculated correctly: `EV = true_prob × decimal_odds − 1`
+- Confirm it appears in the all_markets display in `/analizar` command
+- If any market is missing or broken, implement it following the same pattern as `totals`
+
+For **F5 markets** specifically:
+
+- F5 true probability should use only the starting pitcher stats (first 5 innings)
+- Adjust team RS/RA to ~60% of full-game values for F5 calculations
+- F5 total line is typically 55-60% of the full game total
+
+For **hit totals** (`batter_hits`):
+
+- Project hits using: `expected_hits = team_AVG × 27 / (1 + (pitcher_WHIP - 1.2))`
+- Compare against the book’s hit line to find edge
+
+For **strikeout props** (`pitcher_strikeouts`):
+
+- Project Ks using: `expected_k = pitcher_K9 × (innings_expected / 9) × (1 + opp_team_K_rate_adjustment)`
+- Compare against the book’s K line to find edge
+
+-----
+
+## TASK 9 — IMPROVE: `/bankroll` TELEGRAM COMMAND DISPLAY
+
+The `/bankroll` command should show a complete financial snapshot.
+
+**Action:** Update the `/bankroll` handler to display:
+
+```
+💰 ESTADO DEL BANKROLL
+━━━━━━━━━━━━━━━━━━━━
+💵 Bankroll actual:  $X,XXX.XX
+📈 Ganancia de hoy:  +$XX.XX
+📊 Esta semana:      +$XXX.XX
+🏆 Total acumulado:  +$XXX.XX
+━━━━━━━━━━━━━━━━━━━━
+📋 Récord: XX ganadas – XX perdidas – XX empujadas
+📉 Tasa de acierto: XX.X%
+💹 ROI total: +X.X%
+━━━━━━━━━━━━━━━━━━━━
+Última apuesta registrada: [descripción]
+```
+
+Read this data from `bankroll_log.csv` and `bets_log.csv`.
+
+-----
+
+## TASK 10 — QUALITY: ADD TEAM-SPECIFIC FORM TO WORLD CUP ALERTS
+
+The World Cup morning report should include recent team form when available.
+
+**Action:** In `morning_report_world_cup()`, after getting ELO values, call `_get_wc_form_espn()`
+(which already exists in the codebase) for both teams. If form data is available, include it in the
+ntfy body:
+
+```
+f"Forma reciente {home_es}: {form_data_home}\n"
+f"Forma reciente {away_es}: {form_data_away}\n"
+```
+
+-----
+
+## FINAL REQUIREMENTS
+
+1. **All user-facing text** (ntfy and Telegram) must be in conversational Spanish. No English abbreviations.
+1. **Do NOT change** the Kelly criterion formula or any bankroll protection rules.
+1. **Do NOT change** the edge filter (≥5% for auto-alerts).
+1. **Do NOT change** the expert panel configuration (Haiku model, 2-of-3 consensus).
+1. **Maintain all existing safety features**: daily exposure cap 15%, single bet cap 5%, minimum bet $10.
+1. **Test** the bot runs without errors after all changes.
+1. **Make a git commit** with message: `"feat: comprehensive improvements — dynamic bankroll, NRFI market, ELO-Poisson WC, correlated parlay guard, RLM alerts, full Spanish reports"`
+
+-----
+
+*Prompt prepared by Claude (Anthropic) | Betbot audit June 2026*
