@@ -176,22 +176,67 @@ def _cmd_picks(chat_id: str):
 
 
 def _cmd_bankroll(chat_id: str):
+    import csv as _csv
     trades   = _load_json(TRACKER_FILE, {"picks": [], "bankroll": 1000.0})
     bankroll = trades.get("bankroll", 1000.0)
     picks    = trades.get("picks", [])
-    wins     = sum(1 for p in picks if p.get("estado") == "WIN")
-    loses    = sum(1 for p in picks if p.get("estado") == "LOSS")
-    pushes   = sum(1 for p in picks if p.get("estado") == "PUSH")
-    pend     = sum(1 for p in picks if p.get("estado") == "PENDING")
-    ganancia = bankroll - 1000.0
-    signo    = "+" if ganancia >= 0 else ""
-    emoji    = "📈" if ganancia >= 0 else "📉"
+    wins_l   = [p for p in picks if p.get("estado") == "WIN"]
+    loses_l  = [p for p in picks if p.get("estado") == "LOSS"]
+    pushes_l = [p for p in picks if p.get("estado") == "PUSH"]
+    pend_l   = [p for p in picks if p.get("estado") == "PENDING"]
+
+    # Financial stats
+    ganancia_total = sum(p.get("ganancia", 0) or 0 for p in picks)
+    total_apost    = sum(p.get("stake", 0) or 0 for p in picks
+                        if p.get("estado") not in ("PENDING",))
+    roi            = (ganancia_total / total_apost * 100) if total_apost > 0 else 0.0
+    win_rate       = (len(wins_l) / (len(wins_l) + len(loses_l)) * 100
+                      if (wins_l or loses_l) else 0.0)
+
+    # Today's gains from bets_log.csv
+    today_str  = datetime.now().strftime("%Y-%m-%d")
+    hoy        = 0.0
+    semana     = 0.0
+    last_bet   = "—"
+    try:
+        if os.path.isfile(BETS_LOG_FILE):
+            with open(BETS_LOG_FILE, newline="", encoding="utf-8") as _f:
+                rows = list(_csv.DictReader(_f))
+            from datetime import date, timedelta
+            week_start = date.today() - timedelta(days=date.today().weekday())
+            for row in rows:
+                row_date = (row.get("date") or row.get("timestamp") or "")[:10]
+                gain     = float(row.get("ganancia") or row.get("profit") or 0)
+                if row_date == today_str:
+                    hoy += gain
+                if row_date >= str(week_start):
+                    semana += gain
+            if rows:
+                _lr = rows[-1]
+                last_bet = (f"{_lr.get('pick','?')} @ {_lr.get('book','?')} "
+                            f"— ${float(_lr.get('stake',0)):.0f}")
+    except Exception:
+        pass
+
+    signo_t = "+" if ganancia_total >= 0 else ""
+    signo_h = "+" if hoy >= 0 else ""
+    signo_s = "+" if semana >= 0 else ""
+    emoji   = "📈" if ganancia_total >= 0 else "📉"
+    div     = "━" * 20
+
     _send(chat_id, (
-        f"{emoji} <b>Bankroll Paper Trade</b>\n\n"
-        f"Balance: <b>${bankroll:.2f}</b>\n"
-        f"Inicio:   $1,000.00\n"
-        f"Neto:     <b>{signo}${ganancia:.2f}</b>\n\n"
-        f"W: {wins} | L: {loses} | P: {pushes} | Pending: {pend}"
+        f"💰 <b>ESTADO DEL BANKROLL</b>\n"
+        f"{div}\n"
+        f"💵 Bankroll actual:  <b>${bankroll:,.2f}</b>\n"
+        f"📈 Ganancia de hoy:  {signo_h}${hoy:.2f}\n"
+        f"📊 Esta semana:      {signo_s}${semana:.2f}\n"
+        f"🏆 Total acumulado:  {signo_t}${ganancia_total:.2f}\n"
+        f"{div}\n"
+        f"📋 Récord: {len(wins_l)} ganadas – {len(loses_l)} perdidas – {len(pushes_l)} empujadas\n"
+        f"📉 Tasa de acierto: {win_rate:.1f}%\n"
+        f"💹 ROI total: {roi:+.1f}%\n"
+        f"{div}\n"
+        f"Última apuesta registrada: {last_bet}"
     ))
 
 
