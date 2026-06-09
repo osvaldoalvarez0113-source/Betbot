@@ -236,9 +236,39 @@ US_BOOKS_ONLY = {
     "pointsbet",
 }
 
+# Hard blocklist — books whose names accidentally match US_BOOKS_ONLY substrings
+# (e.g. "PointsBet AU" contains "pointsbet") or are known international books.
+_NON_US_BOOKS: frozenset = frozenset({
+    # PointsBet regional variants (non-US)
+    "pointsbet au", "pointsbet nz", "pointsbet ca",
+    # UK / Ireland
+    "888sport", "coral", "ladbrokes", "william hill",
+    "paddy power", "betfair", "sky bet", "bet victor",
+    "boyle sports", "sportnation", "unibet",
+    # Continental Europe
+    "bet365", "betsson", "winamax", "bwin", "unibet",
+    "betclick", "betclic", "tipico", "interwetten",
+    # Australia
+    "sportsbet", "tab", "neds", "betr", "bluebet",
+    "beteasy", "palmerbet", "topbetta",
+    # International / sharp
+    "pinnacle",                       # sharp book, not US-licensed
+    # Other known international
+    "betway", "betway esports", "888 sport",
+    "10bet", "1xbet", "22bet", "melbet",
+})
+
 def _is_us_book(title: str) -> bool:
-    """Return True only if the bookmaker is on the US-only whitelist."""
-    t = (title or "").lower()
+    """
+    Return True only if the bookmaker is a US-licensed book.
+    Uses a two-step check:
+      1. Hard-block any book on the _NON_US_BOOKS list (catches false-positive
+         substring matches like 'PointsBet AU' containing 'pointsbet').
+      2. Allow only books whose lowercased name is a substring-match of US_BOOKS_ONLY.
+    """
+    t = (title or "").lower().strip()
+    if t in _NON_US_BOOKS:
+        return False
     return any(us in t for us in US_BOOKS_ONLY)
 
 OPENWEATHER_KEY   = os.environ.get("OPENWEATHER_API_KEY", "")
@@ -7025,10 +7055,17 @@ def build_analizar_text(result: dict) -> list:
     _has_k = False
     if all_mkts:
         for lbl, m in all_mkts.items():
-            edge    = " ✅" if lbl in cand_lbs else ""
+            bk = m.get("book", "")
+            # Safety net: skip any market whose book is not US-accessible.
+            # "Props" is an internal marker for K/hit props (no single-book origin).
+            if bk != "Props" and not _is_us_book(bk):
+                continue
+            # ✅ only when the label was a formal pick AND the book is US-accessible
+            is_pick = lbl in cand_lbs
+            edge    = " ✅" if is_pick else ""
             ev_s    = f"+{m['ev_pct']:.1f}%" if m["ev_pct"] >= 0 else f"{m['ev_pct']:.1f}%"
             prob_pc = round(m["prob"] * 100)
-            p1 += f"  {lbl}: {prob_pc}% | {ev_s} | {m['odds']:.2f} @ {m['book']}{edge}\n"
+            p1 += f"  {lbl}: {prob_pc}% | {ev_s} | {m['odds']:.2f} @ {bk}{edge}\n"
             if "⚡" in lbl:
                 _has_k = True
         if not _has_k and is_mlb:
