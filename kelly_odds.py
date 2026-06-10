@@ -71,9 +71,9 @@ MIN_STAKE            = 10.00  # never alert if Kelly stake < $10
 MIN_BET              = 10.00  # hard floor — identical to MIN_STAKE
 MAX_SINGLE_BET_PCT   = 0.05   # hard cap: 5% of bankroll per single bet
 MAX_DAILY_EXPO_PCT   = 0.15   # hard cap: 15% of bankroll queued per day
-PROB_CAP             = 0.80   # max single-bet prob; anything higher → cap at 75%
-PROB_CAP_CEIL        = 0.75   # value used after capping (realistic MLB ceiling)
-PROB_CAP_PARLAY      = 0.75   # max probability for any parlay leg
+PROB_CAP             = 0.72   # max single-bet prob; anything higher → cap at 70%
+PROB_CAP_CEIL        = 0.70   # value used after capping (realistic MLB ceiling)
+PROB_CAP_PARLAY      = 0.68   # max probability for any parlay leg
 PREMIUM_MULT      = 1.5     # Module P: stake multiplier for PREMIUM alerts
 PREMIUM_MAX_STAKE = 100.0   # Module P: max PREMIUM bet size ($)
 INTERVAL  = 600       # 10-minute main scan (API limit-friendly)
@@ -2473,6 +2473,22 @@ def fetch_probable_pitchers_today():
                     'home_id':   home_p.get('id'),
                     'away_id':   away_p.get('id'),
                 }
+                for _pid_r, _era_key in [('home_id', 'home_era'), ('away_id', 'away_era')]:
+                    _pid_v = result[key].get(_pid_r)
+                    if _pid_v:
+                        try:
+                            _ip_data = _mlb_rest(f'/people/{_pid_v}/stats',
+                                                  {'stats': 'season', 'group': 'pitching', 'season': MLB_YEAR})
+                            _ip_splits = (_ip_data.get('stats', [{}])[0].get('splits', [{}]) or [{}])
+                            _ip_stat = _ip_splits[-1].get('stat', {}) if _ip_splits else {}
+                            _ip_val = float(_ip_stat.get('inningsPitched', '60') or '60')
+                            _era_orig = result[key][_era_key]
+                            _era_reg = _regressed_era(_era_orig, _ip_val)
+                            if abs(_era_reg - _era_orig) > 0.15:
+                                print(f"  📊 ERA regresada: {_era_orig:.2f} → {_era_reg:.2f} ({_ip_val:.0f} inn)")
+                            result[key][_era_key] = _era_reg
+                        except Exception:
+                            pass
     except Exception as e:
         print(f'  ⚠️  Pitcher fetch error: {e}')
 
@@ -2520,6 +2536,41 @@ def _lookup_pitcher_data(home, away, pitchers):
 
     return best_val
 
+_pitcher_vs_team_cache: dict = {}
+def fetch_pitcher_vs_team(pitcher_id, opponent_team_name: str) -> "dict | None":
+    if not pitcher_id or not opponent_team_name:
+        return None
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck = f"pvt_{pitcher_id}_{opponent_team_name}_{today}"
+    if ck in _pitcher_vs_team_cache:
+        return _pitcher_vs_team_cache[ck]
+    try:
+        opp_id = _team_id(opponent_team_name)
+        if not opp_id:
+            return None
+        data = _mlb_rest(f"/people/{pitcher_id}/stats", {
+            "stats": "vsTeamSeason", "group": "pitching",
+            "season": MLB_YEAR, "opposingTeamId": opp_id,
+        })
+        splits = (data.get("stats", [{}])[0].get("splits", []) if data and data.get("stats") else [])
+        if not splits:
+            _pitcher_vs_team_cache[ck] = None
+            return None
+        stat = splits[-1].get("stat", {})
+        games = int(stat.get("gamesPlayed", 0) or 0)
+        if games < 1:
+            _pitcher_vs_team_cache[ck] = None
+            return None
+        era_v = float(stat.get("era", 0) or 0)
+        ip_v = _parse_ip(stat.get("inningsPitched", "0") or "0")
+        result = {"era": era_v, "games": games, "ip": ip_v}
+        _pitcher_vs_team_cache[ck] = result
+        print(f"  📊 Pitcher vs {opponent_team_name}: ERA {era_v:.2f} ({games}G)")
+        return result
+    except Exception:
+        _pitcher_vs_team_cache[ck] = None
+        return None
+
 def pitcher_run_adjustment(home_era, away_era):
     """
     Signed run-total adjustment from starter quality.
@@ -2539,6 +2590,38 @@ def pitcher_run_adjustment(home_era, away_era):
         elif era > 4.50:
             adj += 0.2
     return round(adj, 1)
+
+def _regressed_era(season_era: float, innings_pitched: float, career_era: float = 4.20) -> float:
+    if innings_pitched >= 60:
+        return round(season_era * 0.90 + career_era * 0.10, 2)
+    elif innings_pitched >= 30:
+        return round(season_era * 0.50 + career_era * 0.50, 2)
+    else:
+        return round(season_era * 0.20 + career_era * 0.80, 2)
+
+def _day_game_adj(commence: str) -> tuple:
+    try:
+        _game_et = datetime.fromisoformat(commence.replace("Z", "+00:00")).astimezone(ET)
+        if _game_et.hour < 16:
+            return -0.35, f"🌞 Juego diurno ({_game_et.strftime('%I:%M %p ET')}): -0.35 carreras"
+    except Exception:
+        pass
+    return 0.0, ""
+
+def _lineup_impact(missing_list: list, order_dict: dict) -> float:
+    impact = 0.0
+    for missing_name in missing_list:
+        missing_last = missing_name.split()[-1].lower()
+        for slot, player_name in order_dict.items():
+            if missing_last in player_name.lower():
+                slot_int = int(slot)
+                if slot_int <= 4: impact -= 0.55
+                elif slot_int <= 7: impact -= 0.30
+                else: impact -= 0.15
+                break
+        else:
+            impact -= 0.35
+    return round(impact, 2)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ELITE SOURCE 1 — BASEBALL SAVANT / STATCAST
@@ -3541,6 +3624,45 @@ def fetch_wind(lat, lon):
     except Exception:
         return None
 
+_hourly_weather_cache: dict = {}
+def fetch_wind_forecast(lat: float, lon: float, game_hour_utc: int) -> "dict | None":
+    if not OPENWEATHER_KEY:
+        return None
+    city_key = f"forecast_{lat:.2f},{lon:.2f}_{game_hour_utc}"
+    cached = _hourly_weather_cache.get(city_key)
+    if cached:
+        age_min = (datetime.now(pytz.utc) - cached['fetched_at']).total_seconds() / 60
+        if age_min < 60:
+            return cached
+    try:
+        r = requests.get('https://api.openweathermap.org/data/2.5/forecast',
+                         params={'lat': lat, 'lon': lon, 'appid': OPENWEATHER_KEY,
+                                 'units': 'imperial', 'cnt': 16}, timeout=8)
+        if r.status_code != 200:
+            return fetch_wind(lat, lon)
+        forecasts = r.json().get('list', [])
+        best = None; best_diff = 999
+        for fc in forecasts:
+            fc_hour = datetime.utcfromtimestamp(fc['dt']).hour
+            diff = abs(fc_hour - game_hour_utc)
+            if diff < best_diff:
+                best_diff = diff; best = fc
+        if not best:
+            return fetch_wind(lat, lon)
+        w = best.get('wind', {})
+        speed = round(float(w.get('speed', 0)), 1)
+        deg = float(w.get('deg', 0))
+        temp_f = best.get('main', {}).get('temp', None)
+        if 225 <= deg <= 315: label = 'OUT'
+        elif 45 <= deg <= 135: label = 'IN'
+        else: label = 'CROSS'
+        result = {'speed': speed, 'deg': deg, 'label': label,
+                  'temp_f': temp_f, 'fetched_at': datetime.now(pytz.utc), 'source': 'forecast'}
+        _hourly_weather_cache[city_key] = result
+        return result
+    except Exception:
+        return fetch_wind(lat, lon)
+
 def wind_run_adj(wind):
     """
     Return (signed_adjustment: float, description: str).
@@ -3591,6 +3713,37 @@ def get_book_total(game):
                 elif fallback is None:
                     fallback = entry
     return preferred or fallback
+
+def get_alternate_totals(game: dict, standard_line: float) -> list:
+    alt_lines = []
+    for bk in game.get("bookmakers", []):
+        if not _is_us_book(bk["title"]):
+            continue
+        for m in bk.get("markets", []):
+            if m.get("key") != "totals":
+                continue
+            by_name = {o["name"]: o for o in m.get("outcomes", [])}
+            if "Over" not in by_name or "Under" not in by_name:
+                continue
+            line = float(by_name["Over"].get("point", 0))
+            if line == standard_line:
+                continue
+            diff = abs(line - standard_line)
+            if diff > 2.5:
+                continue
+            alt_lines.append({
+                "line": line,
+                "over_odds": float(by_name["Over"]["price"]),
+                "under_odds": float(by_name["Under"]["price"]),
+                "book": bk["title"],
+                "diff_from_standard": round(line - standard_line, 1),
+            })
+    seen = {}
+    for a in alt_lines:
+        k = a["line"]
+        if k not in seen or max(a["over_odds"], a["under_odds"]) > max(seen[k]["over_odds"], seen[k]["under_odds"]):
+            seen[k] = a
+    return sorted(seen.values(), key=lambda x: abs(x["diff_from_standard"]))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODULES A9–A11: PARK TENDENCIES · BULLPEN ERA · PITCHER REST DAYS
@@ -4780,12 +4933,44 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                   f"{a_pname} xERA={a_era_eff:.2f}")
 
         park_city      = MLB_PARK_CITIES.get(home)
-        wind           = fetch_wind(park_city[1], park_city[2]) if park_city else None
+        _game_hour_utc = 0
+        try:
+            _game_hour_utc = datetime.fromisoformat(commence.replace("Z", "+00:00")).hour
+        except Exception:
+            pass
+        wind           = fetch_wind_forecast(park_city[1], park_city[2], _game_hour_utc) if park_city else None
         w_adj, w_label = wind_run_adj(wind)
 
         half_adj = pitch_adj / 2
         home_exp = max(0.1, home_exp + half_adj + w_adj / 2)
         away_exp = max(0.1, away_exp + half_adj + w_adj / 2)
+
+        _day_adj, _day_label = _day_game_adj(commence)
+        home_exp = max(0.1, home_exp + _day_adj / 2)
+        away_exp = max(0.1, away_exp + _day_adj / 2)
+
+        _pvt_home = None
+        _pvt_away = None
+        try:
+            if p_data.get("home_id"):
+                _pvt_home = fetch_pitcher_vs_team(p_data["home_id"], away)
+            if p_data.get("away_id"):
+                _pvt_away = fetch_pitcher_vs_team(p_data["away_id"], home)
+            if _pvt_home and _pvt_home["games"] >= 2:
+                era_diff_h = _pvt_home["era"] - h_era
+                if era_diff_h > 1.5:
+                    away_exp = min(away_exp + 0.4, 12.0)
+                    print(f"   ⚠️  {h_pname} historically worse vs {away}: ERA {_pvt_home['era']:.2f}")
+                elif era_diff_h < -1.5:
+                    away_exp = max(0.1, away_exp - 0.3)
+            if _pvt_away and _pvt_away["games"] >= 2:
+                era_diff_a = _pvt_away["era"] - a_era
+                if era_diff_a > 1.5:
+                    home_exp = min(home_exp + 0.4, 12.0)
+                elif era_diff_a < -1.5:
+                    home_exp = max(0.1, home_exp - 0.3)
+        except Exception as _pvte:
+            print(f"  ⚠️  pitcher_vs_team error: {_pvte}")
 
         # ── MLB A4: FIP ────────────────────────────────────────────────────
         h_pid = p_data.get("home_id")
@@ -4817,30 +5002,26 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             (home, lr_matchup_h, a_pname, a_hand, True),
             (away, lr_matchup_a, h_pname, h_hand, False),
         ]:
-            if matchup and matchup.get("avg"):
-                avg     = matchup["avg"]
+            if matchup and (matchup.get("avg") or matchup.get("ops")):
+                _ops_lr = matchup.get("ops", 0.0) or 0.0
+                _avg_lr = matchup.get("avg", 0.230) or 0.230
                 hand_es = ("zurdo" if hand == "L" else
                            "diestro" if hand == "R" else "ambidiestro")
-                if avg < 0.220:
-                    if is_home_ln:
-                        home_exp = max(0.1, home_exp - 0.4)
-                    else:
-                        away_exp = max(0.1, away_exp - 0.4)
-                    lr_notes.append({"lineup": lineup, "pitcher": pname,
-                                     "hand": hand_es, "avg": avg,
-                                     "verdict": "débil", "favor": "pitcher ✅"})
-                elif avg > 0.260:
-                    if is_home_ln:
-                        home_exp = min(home_exp + 0.4, 12.0)
-                    else:
-                        away_exp = min(away_exp + 0.4, 12.0)
-                    lr_notes.append({"lineup": lineup, "pitcher": pname,
-                                     "hand": hand_es, "avg": avg,
-                                     "verdict": "fuerte", "favor": "bateadores ⚠️"})
+                if _ops_lr > 0 and _ops_lr < 0.680:
+                    adj_lr = -0.5; verdict_lr = "débil"; favor_lr = "pitcher ✅"
+                elif _ops_lr > 0 and _ops_lr > 0.800:
+                    adj_lr = +0.5; verdict_lr = "fuerte"; favor_lr = "bateadores ⚠️"
+                elif _avg_lr < 0.220:
+                    adj_lr = -0.3; verdict_lr = "débil"; favor_lr = "pitcher ✅"
+                elif _avg_lr > 0.270:
+                    adj_lr = +0.3; verdict_lr = "fuerte"; favor_lr = "bateadores ⚠️"
                 else:
-                    lr_notes.append({"lineup": lineup, "pitcher": pname,
-                                     "hand": hand_es, "avg": avg,
-                                     "verdict": "normal", "favor": "neutral"})
+                    adj_lr = 0.0; verdict_lr = "normal"; favor_lr = "neutral"
+                if adj_lr != 0:
+                    if is_home_ln: home_exp = max(0.1, min(home_exp + adj_lr, 12.0))
+                    else: away_exp = max(0.1, min(away_exp + adj_lr, 12.0))
+                lr_notes.append({"lineup": lineup, "pitcher": pname, "hand": hand_es,
+                                 "avg": _avg_lr, "ops": _ops_lr, "verdict": verdict_lr, "favor": favor_lr})
 
         # ── MLB A6: H2H last 5 meetings ────────────────────────────────────
         h2h_data = None
@@ -4896,15 +5077,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         if _lineup and _lineup.get("confirmed"):
             h_miss = _lineup.get("home_missing", [])
             a_miss = _lineup.get("away_missing", [])
-            # Cleanup or 3-hole absent → -0.5 runs; 2+ key players absent → -0.8
-            if len(h_miss) >= 2:
-                home_exp = max(0.1, home_exp - 0.8)
-            elif len(h_miss) == 1:
-                home_exp = max(0.1, home_exp - 0.5)
-            if len(a_miss) >= 2:
-                away_exp = max(0.1, away_exp - 0.8)
-            elif len(a_miss) == 1:
-                away_exp = max(0.1, away_exp - 0.5)
+            h_impact = _lineup_impact(h_miss, _lineup.get("home_order", {}))
+            a_impact = _lineup_impact(a_miss, _lineup.get("away_order", {}))
+            if h_impact != 0: home_exp = max(0.1, home_exp + h_impact)
+            if a_impact != 0: away_exp = max(0.1, away_exp + a_impact)
         # ──────────────────────────────────────────────────────────────────
 
         # Level 2B: Pitcher fatigue adjustment (MLB only)
@@ -5180,6 +5356,27 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             # Solo el lado con mayor EV va al panel de expertos
             if _tot_cands:
                 candidates.append(max(_tot_cands, key=lambda x: x["ev_pct"]))
+
+        if totals_data and candidates:
+            _std_line = totals_data[0]
+            _alt_lines = get_alternate_totals(game, _std_line)
+            _adj_total_ref = adj_total if is_mlb else (home_exp + away_exp)
+            for _alt in _alt_lines[:3]:
+                _alt_side = "UNDER" if _alt["diff_from_standard"] > 0 else "OVER"
+                _alt_odds = _alt["under_odds"] if _alt_side == "UNDER" else _alt["over_odds"]
+                _alt_p = poisson_ou_prob(_adj_total_ref, _alt["line"], _alt_side == "OVER")
+                _alt_ev = (_alt_p * _alt_odds - 1) * 100
+                if _alt_ev > 8.0 and _alt_p >= PROB_MIN_TOTALS:
+                    _alt_lbl = f"{'📉' if _alt_side == 'UNDER' else '📈'} {_alt_side} {_alt['line']} (alt)"
+                    _alt_r = kelly_stake(_alt_p, _alt_odds)
+                    if _alt_r["stake"] > 0:
+                        candidates.append({
+                            "label": _alt_lbl, "true_prob": _alt_p,
+                            "odds": _alt_odds, "book": _alt["book"],
+                            "ev_pct": round(_alt_ev, 1), "stake": _alt_r["stake"],
+                            "kelly_pct": _alt_r["kelly_pct"],
+                        })
+                        print(f"   📊 Línea alternativa: {_alt_lbl} EV+{_alt_ev:.1f}%")
 
         # Run line
         for team, is_home in [(home, True), (away, False)]:
@@ -6152,9 +6349,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     # Bypass solo si: EV>15% + divergencia Pinnacle aceptable + al menos 1 experto votó sí.
     # Con 0/3 votos el veto es ABSOLUTO sin importar el EV — unanimidad en contra
     # indica un riesgo que el modelo de valor no captura.
-    _votos_panel = (_claude_result_g.get("_votos_favor", 1)
-                    if _claude_result_g else 1)
-    _bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts and _votos_panel >= 1)
+    _votos_panel = (_claude_result_g.get("_votos_favor", 0)
+                    if _claude_result_g else 0)
+    _top_prob = top3[0]["true_prob"] if top3 else 1.0
+    _bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts and _votos_panel >= 1 and _top_prob < 0.80)
     if _claude_result_g and not force_panel:
         _apostar_c   = _claude_result_g.get("apostar", True)
         _confianza_c = _claude_result_g.get("confianza", "MEDIA")
@@ -6826,11 +7024,6 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         clean = best_clean
         title = f"🔍 {match_es} | Mejor: {clean} +{a['best_ev']}%"
         ntfy_post(title, body, "high")
-        if _tg_broadcast_fn:
-            try:
-                _tg_broadcast_fn(a)
-            except Exception as _tbe:
-                print(f"  ⚠️  Telegram broadcast error: {_tbe}")
         alerted_game_analysis.add(a["game_id"])
         if alerted is not None:
             alerted[match_key_ana] = float(a.get("best_ev", 0))
@@ -9836,9 +10029,10 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     factores_neg  = []
     inconsistencias = []
 
-    for nombre, extra in _EXPERTOS:
+    for i, (nombre, extra) in enumerate(_EXPERTOS):
+        _panel_model = CLAUDE_PANEL_MODEL if i == 2 else "claude-haiku-4-5-20251001"
         res = analyze_with_claude(game_data, sport, _extra_system=extra,
-                                  _model=CLAUDE_PANEL_MODEL)
+                                  _model=_panel_model)
         if res is None:
             print(f"   🎓 {nombre}: no disponible")
             resultados.append(None)
@@ -9941,9 +10135,19 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             "Yankees en casa contra un bullpen cansado. Apuesta Yankees ML en FanDuel, no más de $20.'\n\n"
             "Responde en máximo 3 oraciones cortas. No más."
         )
-        _syn = analyze_with_claude(game_data, sport,
-                                   _extra_system=_synthesis_prompt,
-                                   _model=CLAUDE_MODEL)
+        try:
+            _syn_client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
+            _syn_msg = _syn_client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=120,
+                system=(_CLAUDE_SYSTEM + "\n\n" + _synthesis_prompt),
+                messages=[{"role": "user", "content": json.dumps(game_data, default=str, ensure_ascii=False)[:2000]}],
+            )
+            _syn_raw = _syn_msg.content[0].text.strip()
+            _syn = {"razonamiento": _syn_raw}
+        except Exception as _syne:
+            print(f"  ⚠️  Synthesis error: {_syne}")
+            _syn = None
         _syn_text = (_syn.get("razonamiento", "") or "").strip() if _syn else ""
     else:
         _syn_text = ""
@@ -11835,11 +12039,6 @@ def send_night_summary():
                 f"💰 Bankroll: ${current:,.2f}"
             )
             ntfy_post("🌙 RESUMEN DEL DÍA", body, "default")
-            if _tg_broadcast_fn:
-                try:
-                    _tg_broadcast_fn(body)
-                except Exception:
-                    pass
             print("  🌙 Resumen nocturno: sin picks hoy")
             return
 
@@ -11896,11 +12095,6 @@ def send_night_summary():
             f"   en el reporte de las 8 AM"
         )
         ntfy_post("🌙 RESUMEN DEL DÍA", body, "default")
-        if _tg_broadcast_fn:
-            try:
-                _tg_broadcast_fn(body)
-            except Exception:
-                pass
         print(f"  🌙 Resumen nocturno enviado ({len(today_bets)} picks)")
     except Exception as e:
         print(f"  ⚠️  send_night_summary error: {e}")
@@ -12398,559 +12592,6 @@ def detect_and_notify_parlays(all_analyses: list):
     _send_parlay_alert(best_parlay)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# MODULE: LIVE BETTING — DESACTIVADO
-# El bot solo analiza picks PRE-PARTIDO. No se envían alertas durante partidos.
-# Para reactivar: descomentar este bloque y restaurar la llamada run_live_scan().
-# ═══════════════════════════════════════════════════════════════════════════════
-#
-#
-# # ═══════════════════════════════════════════════════════════════════════════════
-# # MODULE: LIVE BETTING  (MLB + Soccer World Cup)
-# # ═══════════════════════════════════════════════════════════════════════════════
-#
-# _LIVE_MIN_EDGE       = 5.0   # higher bar than pre-game 3%
-# _LIVE_MAX_INNING     = 6     # skip games entering 7th inning or later
-# _LIVE_MAX_SOCCER_MIN = 75    # skip games at or past 75th minute
-# _live_alerted: set   = set() # session-level dedup (resets on Railway restart)
-#
-#
-# def _fetch_mlb_live_games() -> list:
-#     """Return all in-progress MLB games today with linescore hydration."""
-#     today = datetime.now(ET).strftime("%Y-%m-%d")
-#     url   = (f"https://statsapi.mlb.com/api/v1/schedule"
-#              f"?sportId=1&date={today}&hydrate=linescore")
-#     try:
-#         resp = requests.get(url, timeout=10)
-#         resp.raise_for_status()
-#         data = resp.json()
-#     except Exception as _e:
-#         print(f"  ⚠️  Live MLB schedule fetch: {_e}")
-#         return []
-#     live = []
-#     for date_entry in data.get("dates", []):
-#         for g in date_entry.get("games", []):
-#             if g.get("status", {}).get("abstractGameState") == "Live":
-#                 live.append(g)
-#     return live
-#
-#
-# def _fetch_mlb_game_live_feed(game_pk: int) -> dict:
-#     """Fetch live game feed for pitch count + pitcher stats."""
-#     url = (f"https://statsapi.mlb.com/api/v1.1/game/{game_pk}/feed/live"
-#            f"?fields=liveData,linescore,defense,pitcher,boxscore,teams,"
-#            f"pitchers,players,stats,pitching,numberOfPitches,earnedRuns,"
-#            f"inningsPitched,person,fullName")
-#     try:
-#         resp = requests.get(url, timeout=10)
-#         resp.raise_for_status()
-#         return resp.json()
-#     except Exception:
-#         return {}
-#
-#
-# def _parse_mlb_live_state(g: dict, feed: dict) -> dict:
-#     """Extract live state fields from schedule game dict + live feed dict."""
-#     ls           = g.get("linescore", {})
-#     teams        = g.get("teams", {})
-#     home         = teams.get("home", {}).get("team", {}).get("name", "?")
-#     away         = teams.get("away", {}).get("team", {}).get("name", "?")
-#     home_runs    = ls.get("teams", {}).get("home", {}).get("runs", 0) or 0
-#     away_runs    = ls.get("teams", {}).get("away", {}).get("runs", 0) or 0
-#     inning       = ls.get("currentInning", 0) or 0
-#     inning_state = ls.get("inningState", "Top")   # "Top" or "Bottom"
-#
-#     pitcher_name    = "?"
-#     pitches_thrown  = 0
-#     innings_pitched = 0.0
-#     pitcher_runs    = 0
-#
-#     if feed:
-#         box = feed.get("liveData", {}).get("boxscore", {})
-#         if box:
-#             # Top of inning → home team is pitching; Bottom → away
-#             pitching_side = "home" if inning_state == "Top" else "away"
-#             team_box      = box.get("teams", {}).get(pitching_side, {})
-#             pitchers_list = team_box.get("pitchers", [])
-#             players_info  = team_box.get("players", {})
-#             if pitchers_list:
-#                 cur_pid    = pitchers_list[-1]
-#                 player_key = f"ID{cur_pid}"
-#                 player     = players_info.get(player_key, {})
-#                 p_stats    = player.get("stats", {}).get("pitching", {})
-#                 pitches_thrown  = p_stats.get("numberOfPitches", 0) or 0
-#                 pitcher_runs    = p_stats.get("earnedRuns",      0) or 0
-#                 ip_raw          = p_stats.get("inningsPitched",  "0.0")
-#                 try:
-#                     innings_pitched = float(ip_raw)
-#                 except Exception:
-#                     innings_pitched = 0.0
-#                 pitcher_name = (player.get("person", {}).get("fullName")
-#                                 or pitcher_name)
-#
-#     return {
-#         "game_pk":       g.get("gamePk"),
-#         "home":          home,
-#         "away":          away,
-#         "home_runs":     home_runs,
-#         "away_runs":     away_runs,
-#         "total_runs":    home_runs + away_runs,
-#         "inning":        inning,
-#         "inning_state":  inning_state,
-#         "pitcher_name":  pitcher_name,
-#         "pitches_thrown": pitches_thrown,
-#         "innings_pitched": innings_pitched,
-#         "pitcher_runs":  pitcher_runs,
-#     }
-#
-#
-# def _match_odds_game(home: str, away: str, odds_games: list):
-#     """Fuzzy-match a live game to an Odds-API game dict by team name."""
-#     home_l = home.lower()
-#     away_l = away.lower()
-#     for og in odds_games:
-#         oh = og.get("home_team", "").lower()
-#         oa = og.get("away_team", "").lower()
-#         h_ok = any(w in oh for w in home_l.split() if len(w) > 3) or \
-#                any(w in home_l for w in oh.split() if len(w) > 3)
-#         a_ok = any(w in oa for w in away_l.split() if len(w) > 3) or \
-#                any(w in away_l for w in oa.split() if len(w) > 3)
-#         if h_ok and a_ok:
-#             return og
-#     return None
-#
-#
-# def _analyze_live_mlb(state: dict, odds_games: list):
-#     """
-#     Apply 4 live MLB rules. Returns alert dict or None.
-#       Rule 1: Early innings (1-3), score 0-0 → UNDER still has value
-#       Rule 2: Starter struggling (40+ pitches in ≤2 inn) → OVER (bullpen)
-#       Rule 3: Dominant starter (0 ER, <30 pitches, 3+ inn) → UNDER
-#       Rule 4: Score changed significantly → recalculate OVER/UNDER
-#     """
-#     inning = state["inning"]
-#     if inning < 1 or inning > _LIVE_MAX_INNING:
-#         return None
-#
-#     total_runs = state["total_runs"]
-#     pitches    = state["pitches_thrown"]
-#     innings_p  = state["innings_pitched"]
-#     p_runs     = state["pitcher_runs"]
-#
-#     og = _match_odds_game(state["home"], state["away"], odds_games)
-#     if not og:
-#         return None
-#     totals = get_book_total(og)
-#     if not totals:
-#         return None
-#     live_line, live_over_odds, live_under_odds, best_book = totals
-#
-#     # Innings remaining: count as half-inning fractions
-#     remaining = max(0.5, 9 - inning + (1 if state["inning_state"] == "Top" else 0.5))
-#     runs_to_line = round(live_line - total_runs, 1)
-#
-#     alert_label = alert_prob = alert_odds = None
-#     alert_note  = ""
-#     rule_fired  = ""
-#
-#     # ── Rule 1: Early (1-3 inn), 0-0 → UNDER ────────────────────────────
-#     if inning <= 3 and total_runs == 0 and live_under_odds:
-#         exp_rem    = 0.80 * remaining
-#         prob_under = poisson_ou_prob(exp_rem, runs_to_line - 0.5, False)
-#         ev = (prob_under * live_under_odds - 1) * 100
-#         if ev >= _LIVE_MIN_EDGE:
-#             alert_label = f"UNDER {live_line}"
-#             alert_prob  = prob_under
-#             alert_odds  = live_under_odds
-#             alert_note  = f"🔵 Juego 0-0 en {inning}° inn — pitchers controlando"
-#             rule_fired  = "early_scoreless"
-#
-#     # ── Rule 2: Starter struggling (40+ pitches, ≤2 inn) → OVER ─────────
-#     if not alert_label and pitches >= 40 and innings_p <= 2.0 \
-#             and inning <= 3 and live_over_odds:
-#         exp_rem   = 1.30 * remaining
-#         prob_over = poisson_ou_prob(exp_rem, runs_to_line - 0.5, True)
-#         ev = (prob_over * live_over_odds - 1) * 100
-#         if ev >= _LIVE_MIN_EDGE:
-#             alert_label = f"OVER {live_line}"
-#             alert_prob  = prob_over
-#             alert_odds  = live_over_odds
-#             alert_note  = (f"🔴 {state['pitcher_name']}: {pitches} pitches "
-#                            f"en {innings_p:.1f} inn — bullpen pronto")
-#             rule_fired  = "starter_struggling"
-#
-#     # ── Rule 3: Dominant starter (0 ER, <30 pitches, 3+ inn) → UNDER ────
-#     if not alert_label and p_runs == 0 and pitches < 30 \
-#             and innings_p >= 3.0 and live_under_odds:
-#         exp_rem    = 0.65 * remaining
-#         prob_under = poisson_ou_prob(exp_rem, runs_to_line - 0.5, False)
-#         ev = (prob_under * live_under_odds - 1) * 100
-#         if ev >= _LIVE_MIN_EDGE:
-#             alert_label = f"UNDER {live_line}"
-#             alert_prob  = prob_under
-#             alert_odds  = live_under_odds
-#             alert_note  = (f"🔵 {state['pitcher_name']}: {pitches} pitches "
-#                            f"| 0 carreras — dominando")
-#             rule_fired  = "dominant_starter"
-#
-#     # ── Rule 4: Score changed (2+ runs) — recalculate OVER/UNDER ─────────
-#     if not alert_label and total_runs >= 2 and inning <= 5:
-#         exp_rem = 0.90 * remaining
-#         p_over  = poisson_ou_prob(exp_rem, runs_to_line - 0.5, True)
-#         p_under = poisson_ou_prob(exp_rem, runs_to_line - 0.5, False)
-#         if p_over >= p_under and live_over_odds:
-#             ev = (p_over * live_over_odds - 1) * 100
-#             if ev >= _LIVE_MIN_EDGE:
-#                 alert_label = f"OVER {live_line}"
-#                 alert_prob  = p_over
-#                 alert_odds  = live_over_odds
-#                 alert_note  = f"🟡 {total_runs} carreras anotadas — OVER sigue vivo"
-#                 rule_fired  = "score_update"
-#         elif p_under > p_over and live_under_odds:
-#             ev = (p_under * live_under_odds - 1) * 100
-#             if ev >= _LIVE_MIN_EDGE:
-#                 alert_label = f"UNDER {live_line}"
-#                 alert_prob  = p_under
-#                 alert_odds  = live_under_odds
-#                 alert_note  = f"🟡 {total_runs} carreras anotadas — UNDER sigue vivo"
-#                 rule_fired  = "score_update"
-#
-#     if not alert_label:
-#         return None
-#
-#     ev_final = round((alert_prob * alert_odds - 1) * 100, 1)
-#     stake    = max(15.0, min(50.0,
-#                   round(kelly_stake(alert_prob, alert_odds)["stake"], 0)))
-#
-#     return {
-#         "sport":        "MLB",
-#         "home":         state["home"],
-#         "away":         state["away"],
-#         "home_runs":    state["home_runs"],
-#         "away_runs":    state["away_runs"],
-#         "total_runs":   total_runs,
-#         "inning":       inning,
-#         "inning_state": state["inning_state"],
-#         "label":        alert_label,
-#         "prob":         alert_prob,
-#         "odds":         alert_odds,
-#         "ev":           ev_final,
-#         "note":         alert_note,
-#         "rule":         rule_fired,
-#         "line":         live_line,
-#         "stake":        stake,
-#         "book":         best_book,
-#         "pitcher":      state["pitcher_name"],
-#         "pitches":      pitches,
-#         "runs_to_line": runs_to_line,
-#         "remaining":    remaining,
-#     }
-#
-#
-# def _send_live_mlb_alert(a: dict):
-#     """Format and fire a live MLB ntfy alert (priority=urgent)."""
-#     inn_ord = {1:"1er",2:"2do",3:"3er",4:"4to",5:"5to",6:"6to"}
-#     inn_str = inn_ord.get(a["inning"], f"{a['inning']}°")
-#
-#     h_r, a_r = a["home_runs"], a["away_runs"]
-#     if h_r > a_r:
-#         score_str = f"{h_r}-{a_r} {_es(a['home'])}"
-#     elif a_r > h_r:
-#         score_str = f"{a_r}-{h_r} {_es(a['away'])}"
-#     else:
-#         score_str = f"{h_r}-{a_r}"
-#
-#     body = (
-#         f"⏱️ {inn_str} inning | {score_str}\n"
-#         f"{'━'*26}\n"
-#         f"🎯 APUESTA EN VIVO:\n"
-#         f"{a['label']} (quedan ~{a['remaining']:.0f} inn)\n"
-#         f"Carreras actuales: {a['total_runs']}\n"
-#         f"Necesita: {a['runs_to_line']:.1f}+ más para OVER\n"
-#         f"\n"
-#         f"{a['note']}\n"
-#         f"\n"
-#         f"💰 ${a['stake']:.0f} @ {a['odds']:.2f} — {a['book'].title()}\n"
-#         f"EV estimado: +{a['ev']:.1f}%\n"
-#         f"{'━'*26}\n"
-#         f"🟢 APOSTAR AHORA — ventana corta\n"
-#         f"⚡ APOSTAR EN 5 MIN MAX"
-#     )
-#     title = f"⚡ LIVE MLB | {_es(a['away'])} vs {_es(a['home'])} | {a['label']}"
-#     print(f"\n  ⚡ LIVE MLB — {a['away']} vs {a['home']} | {a['label']} "
-#           f"| EV +{a['ev']:.1f}% | {inn_str} inn.")
-#     ntfy_post(title, body, priority="urgent")
-#
-#
-# # ── Soccer Live (World Cup via ESPN public API) ──────────────────────────────
-#
-# def _fetch_soccer_live_games() -> list:
-#     """Fetch in-progress FIFA World Cup games from the ESPN public scoreboard."""
-#     url = ("https://site.api.espn.com/apis/site/v2/sports/soccer"
-#            "/fifa.world/scoreboard")
-#     try:
-#         resp = requests.get(url, timeout=10)
-#         resp.raise_for_status()
-#         events = resp.json().get("events", [])
-#     except Exception as _e:
-#         print(f"  ⚠️  Live soccer fetch: {_e}")
-#         return []
-#
-#     live = []
-#     for ev in events:
-#         st = ev.get("status", {})
-#         if st.get("type", {}).get("state") != "in":
-#             continue
-#         comps  = ev.get("competitions", [{}])[0]
-#         clist  = comps.get("competitors", [])
-#         home_c = next((c for c in clist if c.get("homeAway") == "home"), {})
-#         away_c = next((c for c in clist if c.get("homeAway") == "away"), {})
-#
-#         clock = st.get("displayClock", "0:00")
-#         try:
-#             minute = int(clock.split(":")[0])
-#         except Exception:
-#             minute = 0
-#
-#         # Red cards (ESPN event type id "5")
-#         details = comps.get("details", [])
-#         home_id = home_c.get("id", "")
-#         away_id = away_c.get("id", "")
-#         red_h = sum(1 for d in details
-#                     if d.get("type", {}).get("id") == "5"
-#                     and d.get("team", {}).get("id") == home_id)
-#         red_a = sum(1 for d in details
-#                     if d.get("type", {}).get("id") == "5"
-#                     and d.get("team", {}).get("id") == away_id)
-#
-#         try:
-#             home_score = int(home_c.get("score", 0))
-#             away_score = int(away_c.get("score", 0))
-#         except Exception:
-#             home_score = away_score = 0
-#
-#         live.append({
-#             "home":       home_c.get("team", {}).get("displayName", "?"),
-#             "away":       away_c.get("team", {}).get("displayName", "?"),
-#             "home_score": home_score,
-#             "away_score": away_score,
-#             "minute":     minute,
-#             "red_h":      red_h,
-#             "red_a":      red_a,
-#         })
-#     return live
-#
-#
-# def _analyze_live_soccer(state: dict, odds_games: list):
-#     """
-#     Apply 3 soccer live rules. Returns alert dict or None.
-#       Rule 1: 0-0 after 30 min → UNDER 2.5 value
-#       Rule 2: 1-0 or 0-1 by 70 min → ML comeback for trailing team
-#       Rule 3: Red card → UNDER value increases (10 vs 11)
-#     """
-#     minute = state["minute"]
-#     if minute < 1 or minute >= _LIVE_MAX_SOCCER_MIN:
-#         return None
-#
-#     home_score  = state["home_score"]
-#     away_score  = state["away_score"]
-#     total_score = home_score + away_score
-#     remaining   = max(5, 90 - minute)
-#
-#     og = _match_odds_game(state["home"], state["away"], odds_games)
-#     if not og:
-#         return None
-#
-#     totals   = get_book_total(og)
-#     h2h_odds = _extract_h2h_best(og)
-#     og_home  = og.get("home_team", state["home"])
-#     og_away  = og.get("away_team", state["away"])
-#
-#     live_line = live_over_odds = live_under_odds = None
-#     if totals:
-#         live_line, live_over_odds, live_under_odds, _ = totals
-#
-#     ml_home = h2h_odds.get(og_home, (None,))[0]
-#     ml_away = h2h_odds.get(og_away, (None,))[0]
-#
-#     alert_label = alert_prob = alert_odds = None
-#     alert_note  = ""
-#     rule_fired  = ""
-#
-#     # ── Rule 1: 0-0 after 30 min → UNDER ─────────────────────────────────
-#     if total_score == 0 and minute >= 30 and live_line and live_under_odds:
-#         exp_goals  = 1.10 * (remaining / 60.0)
-#         prob_under = poisson_ou_prob(exp_goals, live_line, False)
-#         ev = (prob_under * live_under_odds - 1) * 100
-#         if ev >= _LIVE_MIN_EDGE:
-#             alert_label = f"UNDER {live_line}"
-#             alert_prob  = prob_under
-#             alert_odds  = live_under_odds
-#             alert_note  = f"🔵 0-0 tras {minute}' — UNDER sube de valor"
-#             rule_fired  = "scoreless_30"
-#
-#     # ── Rule 2: One goal (1-0), trailing team comeback ────────────────────
-#     if not alert_label and total_score == 1 and minute <= 70:
-#         trailing_home = away_score > home_score
-#         comeback_name = state["home"] if trailing_home else state["away"]
-#         comeback_odds = ml_home if trailing_home else ml_away
-#         if comeback_odds and comeback_odds > 1.5:
-#             frac_rem  = remaining / 90.0
-#             prob_back = 0.25 * frac_rem
-#             ev = (prob_back * comeback_odds - 1) * 100
-#             if ev >= _LIVE_MIN_EDGE:
-#                 alert_label = f"{comeback_name} ML (remontada)"
-#                 alert_prob  = prob_back
-#                 alert_odds  = comeback_odds
-#                 alert_note  = (f"🟡 {comeback_name} perdiendo 1-0 en {minute}' "
-#                                f"— ventana abierta")
-#                 rule_fired  = "comeback"
-#
-#     # ── Rule 3: Red card → UNDER increases ───────────────────────────────
-#     if not alert_label and (state["red_h"] > 0 or state["red_a"] > 0) \
-#             and live_line and live_under_odds:
-#         exp_goals  = 0.80 * (remaining / 60.0)
-#         prob_under = poisson_ou_prob(exp_goals, live_line - total_score, False)
-#         ev = (prob_under * live_under_odds - 1) * 100
-#         if ev >= _LIVE_MIN_EDGE:
-#             rc_side = "local" if state["red_h"] > 0 else "visitante"
-#             alert_label = f"UNDER {live_line}"
-#             alert_prob  = prob_under
-#             alert_odds  = live_under_odds
-#             alert_note  = (f"🟥 Tarjeta roja ({rc_side}) en {minute}' "
-#                            f"— 10 vs 11, UNDER sube de valor")
-#             rule_fired  = "red_card"
-#
-#     if not alert_label:
-#         return None
-#
-#     ev_final = round((alert_prob * alert_odds - 1) * 100, 1)
-#     stake    = max(10.0, min(30.0,
-#                   round(kelly_stake(alert_prob, alert_odds)["stake"], 0)))
-#
-#     return {
-#         "sport":      "SOCCER",
-#         "home":       state["home"],
-#         "away":       state["away"],
-#         "home_score": home_score,
-#         "away_score": away_score,
-#         "minute":     minute,
-#         "label":      alert_label,
-#         "prob":       alert_prob,
-#         "odds":       alert_odds,
-#         "ev":         ev_final,
-#         "note":       alert_note,
-#         "rule":       rule_fired,
-#         "stake":      stake,
-#     }
-#
-#
-# def _send_live_soccer_alert(a: dict):
-#     """Format and fire a live soccer ntfy alert (priority=urgent)."""
-#     score_str = f"{a['away_score']}-{a['home_score']}"
-#     body = (
-#         f"⏱️ Minuto {a['minute']}' | {_es(a['away'])} {score_str} {_es(a['home'])}\n"
-#         f"{'━'*26}\n"
-#         f"🎯 APUESTA EN VIVO:\n"
-#         f"{a['label']}\n"
-#         f"\n"
-#         f"{a['note']}\n"
-#         f"\n"
-#         f"💰 ${a['stake']:.0f} @ {a['odds']:.2f} | EV +{a['ev']:.1f}%\n"
-#         f"{'━'*26}\n"
-#         f"🟢 APOSTAR AHORA — ventana corta\n"
-#         f"⚡ APOSTAR EN 5 MIN MAX"
-#     )
-#     title = (f"⚡ LIVE ⚽ | {_es(a['away'])} vs {_es(a['home'])} "
-#              f"| {a['label']}")
-#     print(f"\n  ⚡ LIVE SOC — {a['away']} vs {a['home']} | {a['label']} "
-#           f"| EV +{a['ev']:.1f}% | {a['minute']}'")
-#     ntfy_post(title, body, priority="urgent")
-#
-#
-# def run_live_scan(pre_game_matches: set, odds_by_sport: dict):
-#     """
-#     Called each scan cycle after pre-game analysis finishes.
-#     Fetches in-progress MLB and WC soccer games, applies live rules,
-#     and fires urgent ntfy alerts for qualifying opportunities.
-#
-#     pre_game_matches : set of "home|away" strings alerted pre-game this scan.
-#     odds_by_sport    : {sport_key: [game_dicts]} from the current scan.
-#     """
-#     print("\n  ⚡ Live scan iniciando...")
-#
-#     # ── MLB ────────────────────────────────────────────────────────────────
-#     live_mlb = _fetch_mlb_live_games()
-#     if not live_mlb:
-#         print("  — Sin juegos MLB en vivo")
-#     else:
-#         mlb_odds = odds_by_sport.get("baseball_mlb", [])
-#         print(f"  ⚡ {len(live_mlb)} juego(s) MLB en vivo")
-#         for g in live_mlb:
-#             game_pk = g.get("gamePk")
-#             try:
-#                 feed  = _fetch_mlb_game_live_feed(game_pk)
-#                 state = _parse_mlb_live_state(g, feed)
-#
-#                 if state["inning"] > _LIVE_MAX_INNING:
-#                     print(f"  ⏭  {state['away']} vs {state['home']} "
-#                           f"— {state['inning']}° inn (muy tarde, >6)")
-#                     continue
-#
-#                 # Skip game if we already sent a pre-game alert for it today
-#                 home_key = state["home"].split()[-1].lower()
-#                 if any(home_key in pm.lower() for pm in pre_game_matches):
-#                     print(f"  ⏭  {state['away']} vs {state['home']} "
-#                           f"— ya analizado en pre-game hoy")
-#                     continue
-#
-#                 alert = _analyze_live_mlb(state, mlb_odds)
-#                 if not alert:
-#                     print(f"  — {state['away']} vs {state['home']} "
-#                           f"| {state['inning']}° inn "
-#                           f"| {state['total_runs']} carreras — sin valor")
-#                     continue
-#
-#                 live_key = f"live_mlb_{game_pk}_{alert['rule']}"
-#                 if live_key in _live_alerted:
-#                     continue
-#                 _live_alerted.add(live_key)
-#                 _send_live_mlb_alert(alert)
-#
-#             except Exception as _le:
-#                 print(f"  ⚠️  Live MLB {game_pk}: {_le}")
-#
-#     # ── Soccer (World Cup only) ────────────────────────────────────────────
-#     soccer_odds = odds_by_sport.get("soccer_fifa_world_cup", [])
-#     if soccer_odds and is_in_season("soccer_fifa_world_cup"):
-#         live_soc = _fetch_soccer_live_games()
-#         if live_soc:
-#             print(f"  ⚡ {len(live_soc)} partido(s) WC en vivo")
-#             for state in live_soc:
-#                 try:
-#                     if state["minute"] >= _LIVE_MAX_SOCCER_MIN:
-#                         print(f"  ⏭  {state['away']} vs {state['home']} "
-#                               f"— {state['minute']}' (muy tarde, >75)")
-#                         continue
-#
-#                     alert = _analyze_live_soccer(state, soccer_odds)
-#                     if not alert:
-#                         continue
-#
-#                     live_key = (f"live_soc_{state['home']}_{state['away']}"
-#                                 f"_{alert['rule']}")
-#                     if live_key in _live_alerted:
-#                         continue
-#                     _live_alerted.add(live_key)
-#                     _send_live_soccer_alert(alert)
-#
-#                 except Exception as _le:
-#                     print(f"  ⚠️  Live soccer {state.get('home','?')}: {_le}")
-#
-#     print("  ⚡ Live scan completo.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # CORE — MAIN SCAN
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -13945,19 +13586,6 @@ def run_scan():
     except Exception as _fbe:
         print(f"  ⚠️  Futures check error: {_fbe}")
 
-    # Live betting scan — runs after pre-game analysis each cycle
-    # LIVE SCAN DESACTIVADO — el bot solo opera pre-partido
-    # Para reactivar: descomentar el bloque run_live_scan y el módulo LIVE BETTING
-    # try:
-    #     _pre_matches = set()
-    #     for _fa in all_full_analyses:
-    #         _m = _fa.get("match", "")
-    #         if " vs " in _m:
-    #             _h, _a = _m.split(" vs ", 1)
-    #             _pre_matches.add(f"{_h.strip()}|{_a.strip()}")
-    #     run_live_scan(_pre_matches, current_games_by_sport)
-    # except Exception as _lse:
-    #     print(f"  ⚠️  Live scan error: {_lse}")
 
     # Module P: PREMIUM alerts — sent once after all sports are collected
     for pb in all_premiums:
@@ -14143,15 +13771,6 @@ if __name__ == "__main__":
                 _poll_ntfy_confirmations()
             except Exception as e:
                 print(f"  ⚠️  poll_confirmations error: {e}")
-
-            try:
-                detect_and_notify_parlays(all_full_analyses)
-            except Exception as _pe:
-                print(f"  ⚠️  Parlay detector error: {_pe}")
-            try:
-                _check_cross_game_correlations(all_full_analyses)
-            except Exception as _ce:
-                print(f"  ⚠️  Cross-game error: {_ce}")
 
             print(f"\n⏳ Next scan in {INTERVAL // 60} min...")
             time.sleep(INTERVAL)
