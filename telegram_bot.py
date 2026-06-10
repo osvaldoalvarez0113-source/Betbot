@@ -638,15 +638,10 @@ def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None, get_
     _build_text_fn = build_text_fn
     _get_hoy_fn    = get_hoy_fn
 
-    # Wire auto-broadcast back into kelly_odds for auto-alerts
-    try:
-        import sys
-        _ko = sys.modules.get("__main__") or sys.modules.get("kelly_odds")
-        if _ko and hasattr(_ko, "_tg_broadcast_fn"):
-            _ko._tg_broadcast_fn = _broadcast_to_all
-            print("  📤 Telegram: auto-broadcast conectado (alertas, resumen, parlays)")
-    except Exception as _wbe:
-        print(f"  ⚠️  Telegram: no se pudo conectar broadcast: {_wbe}")
+    # Auto-broadcast a Telegram deshabilitado intencionalmente.
+    # Las alertas automáticas van solo a ntfy. Telegram responde únicamente
+    # a comandos manuales del usuario (/analizar, /picks, /estado, etc.).
+    print("  📵 Telegram: auto-broadcast deshabilitado — solo respuestas a comandos manuales")
 
     # Load authorized chat IDs from env + file
     _authorized_ids.update(_load_authorized())
