@@ -7106,7 +7106,10 @@ def _market_reason(label: str, ctx: dict, home_team: str = "") -> str:
             if pin_p > 0.52:
                 favor = "a favor" if is_home else "en contra"
                 pin_line = f" Pinnacle {round(pin_p*100)}% ({favor})."
-        return f"→ Pitcher rival ERA {era_opp:.2f} vs ERA {era_fav:.2f} local.{pin_line}"
+        if is_home:
+            return f"→ Tu pitcher ERA {era_fav:.2f} vs rival ERA {era_opp:.2f}.{pin_line}"
+        else:
+            return f"→ Tu pitcher ERA {era_fav:.2f} vs pitcher local ERA {era_opp:.2f}.{pin_line}"
     if "RL" in u:
         diff = abs(h_era - a_era)
         return f"→ Diferencia ERA {diff:.1f} puntos respalda la línea de carreras."
