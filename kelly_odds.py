@@ -10130,7 +10130,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
                 model=CLAUDE_MODEL,
                 max_tokens=120,
                 system="Eres un experto en apuestas deportivas. Responde SOLO en español conversacional, máximo 2 oraciones cortas. NUNCA uses JSON, NUNCA uses bloques de código, NUNCA uses comillas. Habla como un amigo directo.",
-                messages=[{"role": "user", "content": json.dumps(game_data, default=str, ensure_ascii=False)[:2000]}],
+                messages=[{"role": "user", "content": _synthesis_prompt if _expert_lines else json.dumps(game_data, default=str, ensure_ascii=False)[:1000]}],
             )
             _syn_raw = _syn_msg.content[0].text.strip()
             _syn_raw = _syn_raw.replace("```json", "").replace("```", "").replace("{", "").replace("}", "").replace('"apostar":', "").replace('"confianza":', "").replace('"razonamiento":', "").strip().strip('"').strip()
@@ -13589,6 +13589,15 @@ def run_scan():
         check_closing_lines(current_games_by_sport)
     except Exception as e:
         print(f"  ⚠️  CLV check error: {e}")
+
+    try:
+        detect_and_notify_parlays(all_full_analyses)
+    except Exception as _pe:
+        print(f"  ⚠️  Parlay detector error: {_pe}")
+    try:
+        _check_cross_game_correlations(all_full_analyses)
+    except Exception as _ce:
+        print(f"  ⚠️  Cross-game error: {_ce}")
 
     # Lineup check every 15 min (every 3rd 10-min scan)
     lineup_scan_counter += 1
