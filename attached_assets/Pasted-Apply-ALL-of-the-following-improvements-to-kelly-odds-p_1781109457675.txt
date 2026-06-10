@@ -1,0 +1,348 @@
+Apply ALL of the following improvements to kelly_odds.py in one session. Go through each section completely before moving to the next.
+
+## SECTION 1: CRITICAL BUG FIXES
+
+Fix 1 — Remove duplicate parlay/correlation calls from main while loop:
+In the main while True loop at the bottom of the file (inside if __name__ == "__main__":), find and DELETE these lines:
+try:
+    detect_and_notify_parlays(all_full_analyses)
+except Exception as _pe:
+    print(f"  ⚠️  Parlay detector error: {_pe}")
+try:
+    _check_cross_game_correlations(all_full_analyses)
+except Exception as _ce:
+    print(f"  ⚠️  Cross-game error: {_ce}")
+Keep only the identical calls that are already INSIDE run_scan(). The ones in the main loop cause NameError because all_full_analyses is a local variable inside run_scan().
+
+Fix 2 — Fix _votos_favor default value:
+Find: _votos_panel = (_claude_result_g.get("_votos_favor", 1)
+Replace with: _votos_panel = (_claude_result_g.get("_votos_favor", 0)
+
+Fix 3 — Disable automatic Telegram broadcasts:
+In notify_game_analysis(), find and DELETE:
+if _tg_broadcast_fn:
+    try:
+        _tg_broadcast_fn(a)
+    except Exception as _tbe:
+        print(f"  ⚠️  Telegram broadcast error: {_tbe}")
+In send_night_summary(), find and DELETE:
+if _tg_broadcast_fn:
+    try:
+        _tg_broadcast_fn(body)
+    except Exception:
+        pass
+Telegram should only respond to manual commands like /analizar. Never broadcast automatically.
+
+Fix 4 — Fix synthesis length with max_tokens:
+In panel_expertos(), find the final synthesis call:
+_syn = analyze_with_claude(game_data, sport,
+                           _extra_system=_synthesis_prompt,
+                           _model=CLAUDE_MODEL)
+Replace it with:
+try:
+    _syn_client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
+    _syn_msg = _syn_client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=120,
+        system=(_CLAUDE_SYSTEM + "\n\n" + _synthesis_prompt),
+        messages=[{"role": "user", "content": json.dumps(game_data, default=str, ensure_ascii=False)[:2000]}],
+    )
+    _syn_raw = _syn_msg.content[0].text.strip()
+    _syn = {"razonamiento": _syn_raw}
+except Exception as _syne:
+    print(f"  ⚠️  Synthesis error: {_syne}")
+    _syn = None
+
+Fix 5 — Lower PROB_CAP from 0.80 to 0.72:
+Find: PROB_CAP = 0.80 and PROB_CAP_CEIL = 0.75
+Replace with: PROB_CAP = 0.72 and PROB_CAP_CEIL = 0.70
+Find: PROB_CAP_PARLAY = 0.75
+Replace with: PROB_CAP_PARLAY = 0.68
+
+Fix 6 — Add true_prob < 0.80 to bypass_veto:
+Find: _bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts and _votos_panel >= 1)
+Replace with:
+_top_prob = top3[0]["true_prob"] if top3 else 1.0
+_bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts and _votos_panel >= 1 and _top_prob < 0.80)
+
+## SECTION 2: MODEL IMPROVEMENTS
+
+Improvement 1 — Day game run adjustment:
+Add this helper near the other stat helpers:
+def _day_game_adj(commence: str) -> tuple:
+    try:
+        _game_et = datetime.fromisoformat(commence.replace("Z", "+00:00")).astimezone(ET)
+        if _game_et.hour < 16:
+            return -0.35, f"🌞 Juego diurno ({_game_et.strftime('%I:%M %p ET')}): -0.35 carreras"
+    except Exception:
+        pass
+    return 0.0, ""
+
+In analyze_game_full() MLB section, after wind adjustment, add:
+_day_adj, _day_label = _day_game_adj(commence)
+home_exp = max(0.1, home_exp + _day_adj / 2)
+away_exp = max(0.1, away_exp + _day_adj / 2)
+Add "day_game_label": _day_label to context dict.
+
+Improvement 2 — Fix L/R matchup to use OPS instead of AVG:
+In analyze_game_full() MLB section, in the L/R matchup block, replace the avg < 0.220 / avg > 0.260 logic with:
+_ops_lr = matchup.get("ops", 0.0) or 0.0
+_avg_lr = matchup.get("avg", 0.230) or 0.230
+if _ops_lr > 0 and _ops_lr < 0.680:
+    adj_lr = -0.5; verdict_lr = "débil"; favor_lr = "pitcher ✅"
+elif _ops_lr > 0 and _ops_lr > 0.800:
+    adj_lr = +0.5; verdict_lr = "fuerte"; favor_lr = "bateadores ⚠️"
+elif _avg_lr < 0.220:
+    adj_lr = -0.3; verdict_lr = "débil"; favor_lr = "pitcher ✅"
+elif _avg_lr > 0.270:
+    adj_lr = +0.3; verdict_lr = "fuerte"; favor_lr = "bateadores ⚠️"
+else:
+    adj_lr = 0.0; verdict_lr = "normal"; favor_lr = "neutral"
+if adj_lr != 0:
+    if is_home_ln: home_exp = max(0.1, min(home_exp + adj_lr, 12.0))
+    else: away_exp = max(0.1, min(away_exp + adj_lr, 12.0))
+lr_notes.append({"lineup": lineup, "pitcher": pname, "hand": hand_es,
+                 "avg": _avg_lr, "ops": _ops_lr, "verdict": verdict_lr, "favor": favor_lr})
+
+Improvement 3 — ERA early season regression to mean:
+Add this function near the other stat helpers:
+def _regressed_era(season_era: float, innings_pitched: float, career_era: float = 4.20) -> float:
+    if innings_pitched >= 60:
+        return round(season_era * 0.90 + career_era * 0.10, 2)
+    elif innings_pitched >= 30:
+        return round(season_era * 0.50 + career_era * 0.50, 2)
+    else:
+        return round(season_era * 0.20 + career_era * 0.80, 2)
+
+In fetch_probable_pitchers_today(), after computing h_era and a_era for each game, add regression:
+for _pid_r, _era_key in [('home_id', 'home_era'), ('away_id', 'away_era')]:
+    _pid_v = result[key].get(_pid_r)
+    if _pid_v:
+        try:
+            _ip_data = _mlb_rest(f'/people/{_pid_v}/stats',
+                                  {'stats': 'season', 'group': 'pitching', 'season': MLB_YEAR})
+            _ip_splits = (_ip_data.get('stats', [{}])[0].get('splits', [{}]) or [{}])
+            _ip_stat = _ip_splits[-1].get('stat', {}) if _ip_splits else {}
+            _ip_val = float(_ip_stat.get('inningsPitched', '60') or '60')
+            _era_orig = result[key][_era_key]
+            _era_reg = _regressed_era(_era_orig, _ip_val)
+            if abs(_era_reg - _era_orig) > 0.15:
+                print(f"  📊 ERA regresada: {_era_orig:.2f} → {_era_reg:.2f} ({_ip_val:.0f} inn)")
+            result[key][_era_key] = _era_reg
+        except Exception:
+            pass
+
+Improvement 4 — Batting order weight by position:
+Replace the fixed -0.8 / -0.5 lineup adjustments in analyze_game_full() with this function:
+def _lineup_impact(missing_list: list, order_dict: dict) -> float:
+    impact = 0.0
+    for missing_name in missing_list:
+        missing_last = missing_name.split()[-1].lower()
+        for slot, player_name in order_dict.items():
+            if missing_last in player_name.lower():
+                slot_int = int(slot)
+                if slot_int <= 4: impact -= 0.55
+                elif slot_int <= 7: impact -= 0.30
+                else: impact -= 0.15
+                break
+        else:
+            impact -= 0.35
+    return round(impact, 2)
+
+Then use it:
+if _lineup and _lineup.get("confirmed"):
+    h_miss = _lineup.get("home_missing", [])
+    a_miss = _lineup.get("away_missing", [])
+    h_impact = _lineup_impact(h_miss, _lineup.get("home_order", {}))
+    a_impact = _lineup_impact(a_miss, _lineup.get("away_order", {}))
+    if h_impact != 0: home_exp = max(0.1, home_exp + h_impact)
+    if a_impact != 0: away_exp = max(0.1, away_exp + a_impact)
+
+Improvement 5 — Hourly weather forecast instead of current weather:
+Add this function near fetch_wind():
+_hourly_weather_cache: dict = {}
+def fetch_wind_forecast(lat: float, lon: float, game_hour_utc: int) -> "dict | None":
+    if not OPENWEATHER_KEY:
+        return None
+    city_key = f"forecast_{lat:.2f},{lon:.2f}_{game_hour_utc}"
+    cached = _hourly_weather_cache.get(city_key)
+    if cached:
+        age_min = (datetime.now(pytz.utc) - cached['fetched_at']).total_seconds() / 60
+        if age_min < 60:
+            return cached
+    try:
+        r = requests.get('https://api.openweathermap.org/data/2.5/forecast',
+                         params={'lat': lat, 'lon': lon, 'appid': OPENWEATHER_KEY,
+                                 'units': 'imperial', 'cnt': 16}, timeout=8)
+        if r.status_code != 200:
+            return fetch_wind(lat, lon)
+        forecasts = r.json().get('list', [])
+        best = None; best_diff = 999
+        for fc in forecasts:
+            fc_hour = datetime.utcfromtimestamp(fc['dt']).hour
+            diff = abs(fc_hour - game_hour_utc)
+            if diff < best_diff:
+                best_diff = diff; best = fc
+        if not best:
+            return fetch_wind(lat, lon)
+        w = best.get('wind', {})
+        speed = round(float(w.get('speed', 0)), 1)
+        deg = float(w.get('deg', 0))
+        temp_f = best.get('main', {}).get('temp', None)
+        if 225 <= deg <= 315: label = 'OUT'
+        elif 45 <= deg <= 135: label = 'IN'
+        else: label = 'CROSS'
+        result = {'speed': speed, 'deg': deg, 'label': label,
+                  'temp_f': temp_f, 'fetched_at': datetime.now(pytz.utc), 'source': 'forecast'}
+        _hourly_weather_cache[city_key] = result
+        return result
+    except Exception:
+        return fetch_wind(lat, lon)
+
+In analyze_game_full() MLB section, replace fetch_wind(park_city[1], park_city[2]) with:
+_game_hour_utc = 0
+try:
+    _game_hour_utc = datetime.fromisoformat(commence.replace("Z", "+00:00")).hour
+except Exception:
+    pass
+wind = fetch_wind_forecast(park_city[1], park_city[2], _game_hour_utc) if park_city else None
+
+Improvement 6 — Pitcher vs specific team this season:
+Add this function near the other pitcher stat functions:
+_pitcher_vs_team_cache: dict = {}
+def fetch_pitcher_vs_team(pitcher_id, opponent_team_name: str) -> "dict | None":
+    if not pitcher_id or not opponent_team_name:
+        return None
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck = f"pvt_{pitcher_id}_{opponent_team_name}_{today}"
+    if ck in _pitcher_vs_team_cache:
+        return _pitcher_vs_team_cache[ck]
+    try:
+        opp_id = _team_id(opponent_team_name)
+        if not opp_id:
+            return None
+        data = _mlb_rest(f"/people/{pitcher_id}/stats", {
+            "stats": "vsTeamSeason", "group": "pitching",
+            "season": MLB_YEAR, "opposingTeamId": opp_id,
+        })
+        splits = (data.get("stats", [{}])[0].get("splits", []) if data and data.get("stats") else [])
+        if not splits:
+            _pitcher_vs_team_cache[ck] = None
+            return None
+        stat = splits[-1].get("stat", {})
+        games = int(stat.get("gamesPlayed", 0) or 0)
+        if games < 1:
+            _pitcher_vs_team_cache[ck] = None
+            return None
+        era_v = float(stat.get("era", 0) or 0)
+        ip_v = _parse_ip(stat.get("inningsPitched", "0") or "0")
+        result = {"era": era_v, "games": games, "ip": ip_v}
+        _pitcher_vs_team_cache[ck] = result
+        print(f"  📊 Pitcher vs {opponent_team_name}: ERA {era_v:.2f} ({games}G)")
+        return result
+    except Exception:
+        _pitcher_vs_team_cache[ck] = None
+        return None
+
+In analyze_game_full() MLB section, after fetching p_data, add:
+_pvt_home = None
+_pvt_away = None
+try:
+    if p_data.get("home_id"):
+        _pvt_home = fetch_pitcher_vs_team(p_data["home_id"], away)
+    if p_data.get("away_id"):
+        _pvt_away = fetch_pitcher_vs_team(p_data["away_id"], home)
+    if _pvt_home and _pvt_home["games"] >= 2:
+        era_diff_h = _pvt_home["era"] - h_era
+        if era_diff_h > 1.5:
+            away_exp = min(away_exp + 0.4, 12.0)
+            print(f"   ⚠️  {h_pname} historically worse vs {away}: ERA {_pvt_home['era']:.2f}")
+        elif era_diff_h < -1.5:
+            away_exp = max(0.1, away_exp - 0.3)
+    if _pvt_away and _pvt_away["games"] >= 2:
+        era_diff_a = _pvt_away["era"] - a_era
+        if era_diff_a > 1.5:
+            home_exp = min(home_exp + 0.4, 12.0)
+        elif era_diff_a < -1.5:
+            home_exp = max(0.1, home_exp - 0.3)
+except Exception as _pvte:
+    print(f"  ⚠️  pitcher_vs_team error: {_pvte}")
+
+## SECTION 3: COST OPTIMIZATION
+
+Improvement 7 — Panel cost: Haiku for Marco/Víctor, Sonnet for Elena + synthesis:
+In panel_expertos(), find the for loop over _EXPERTOS and change the model per expert:
+for i, (nombre, extra) in enumerate(_EXPERTOS):
+    _panel_model = CLAUDE_PANEL_MODEL if i == 2 else "claude-haiku-4-5-20251001"
+    res = analyze_with_claude(game_data, sport, _extra_system=extra, _model=_panel_model)
+
+## SECTION 4: CODE CLEANUP
+
+Cleanup 1 — Remove commented live betting code:
+Find and DELETE the entire commented block starting with:
+# === MODULE: LIVE BETTING — DESACTIVADO
+and ending after the last commented function. This removes approximately 350 lines of dead code.
+Also remove the commented run_live_scan call block in run_scan().
+
+Cleanup 2 — Add alternate totals lines check:
+Add this function near get_book_total():
+def get_alternate_totals(game: dict, standard_line: float) -> list:
+    alt_lines = []
+    for bk in game.get("bookmakers", []):
+        if not _is_us_book(bk["title"]):
+            continue
+        for m in bk.get("markets", []):
+            if m.get("key") != "totals":
+                continue
+            by_name = {o["name"]: o for o in m.get("outcomes", [])}
+            if "Over" not in by_name or "Under" not in by_name:
+                continue
+            line = float(by_name["Over"].get("point", 0))
+            if line == standard_line:
+                continue
+            diff = abs(line - standard_line)
+            if diff > 2.5:
+                continue
+            alt_lines.append({
+                "line": line,
+                "over_odds": float(by_name["Over"]["price"]),
+                "under_odds": float(by_name["Under"]["price"]),
+                "book": bk["title"],
+                "diff_from_standard": round(line - standard_line, 1),
+            })
+    seen = {}
+    for a in alt_lines:
+        k = a["line"]
+        if k not in seen or max(a["over_odds"], a["under_odds"]) > max(seen[k]["over_odds"], seen[k]["under_odds"]):
+            seen[k] = a
+    return sorted(seen.values(), key=lambda x: abs(x["diff_from_standard"]))
+
+In analyze_game_full() after the standard totals candidates are built, add:
+if totals_data and candidates:
+    _std_line = totals_data[0]
+    _alt_lines = get_alternate_totals(game, _std_line)
+    _adj_total_ref = adj_total if is_mlb else exp_total
+    for _alt in _alt_lines[:3]:
+        _alt_side = "UNDER" if _alt["diff_from_standard"] > 0 else "OVER"
+        _alt_odds = _alt["under_odds"] if _alt_side == "UNDER" else _alt["over_odds"]
+        _alt_p = poisson_ou_prob(_adj_total_ref, _alt["line"], _alt_side == "OVER")
+        _alt_ev = (_alt_p * _alt_odds - 1) * 100
+        if _alt_ev > 8.0 and _alt_p >= PROB_MIN_TOTALS:
+            _alt_lbl = f"{'📉' if _alt_side == 'UNDER' else '📈'} {_alt_side} {_alt['line']} (alt)"
+            _alt_r = kelly_stake(_alt_p, _alt_odds)
+            if _alt_r["stake"] > 0:
+                candidates.append({
+                    "label": _alt_lbl, "true_prob": _alt_p,
+                    "odds": _alt_odds, "book": _alt["book"],
+                    "ev_pct": round(_alt_ev, 1), "stake": _alt_r["stake"],
+                    "kelly_pct": _alt_r["kelly_pct"],
+                })
+                print(f"   📊 Línea alternativa: {_alt_lbl} EV+{_alt_ev:.1f}%")
+
+## SECTION 5: FINAL VERIFICATION
+After all changes:
+1. Deploy and confirm Railway logs show no NameError for all_full_analyses
+2. Confirm no automatic Telegram messages are sent during a scan
+3. Confirm synthesis recommendation is under 3 sentences
+4. Run /analizar San Diego Padres vs Cincinnati Reds and verify full analysis works
+5. Check that PROB_CAP warnings appear in logs when probability exceeds 0.72
