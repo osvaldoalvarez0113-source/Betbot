@@ -6144,7 +6144,12 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     # Pinnacle opera cerca del 50% por balanceo de libro — 8–20pp de divergencia
     # es normal. Solo >25pp (_pin_div_alerts no vacío) justifica veto por mercado.
     _top_ev_pct = top3[0]["ev_pct"] if top3 else 0.0
-    _bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts)
+    # Bypass solo si: EV>15% + divergencia Pinnacle aceptable + al menos 1 experto votó sí.
+    # Con 0/3 votos el veto es ABSOLUTO sin importar el EV — unanimidad en contra
+    # indica un riesgo que el modelo de valor no captura.
+    _votos_panel = (_claude_result_g.get("_votos_favor", 1)
+                    if _claude_result_g else 1)
+    _bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts and _votos_panel >= 1)
     if _claude_result_g and not force_panel:
         _apostar_c   = _claude_result_g.get("apostar", True)
         _confianza_c = _claude_result_g.get("confianza", "MEDIA")
@@ -9938,6 +9943,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         (base.get("razonamiento", "") or "") +
         f" [Panel {votos_favor}/3 a favor{'  — veto absoluto' if veto_absoluto else ''}]"
     )
+    merged["_votos_favor"] = votos_favor   # expuesto para bypass-veto guard en analyze_game_full
     return merged
 
 
