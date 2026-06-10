@@ -3687,32 +3687,24 @@ def wind_run_adj(wind):
 
 def get_book_total(game):
     """
-    Extract totals line + odds from a game's bookmaker list.
-    Only considers US-licensed books (US_BOOKS_ONLY whitelist).
-    Prefers Bovada/Bodog; falls back to any other US book.
+    Extract totals line + odds from Bovada/Bodog only.
     Returns (line, over_odds, under_odds, bookmaker_name) or None.
     """
-    preferred, fallback = None, None
     for bk in game.get("bookmakers", []):
-        if not _is_us_book(bk["title"]):
-            continue   # skip non-US books entirely
-        is_pref = bk["title"].lower() in PREFERRED_BOOKS
+        if bk["title"].lower() not in ("bovada", "bodog"):
+            continue
         for m in bk.get("markets", []):
             if m["key"] == "totals":
                 by_name = {o["name"]: o for o in m.get("outcomes", [])}
                 if "Over" not in by_name or "Under" not in by_name:
                     continue
-                entry = (
+                return (
                     by_name["Over"]["point"],
                     by_name["Over"]["price"],
                     by_name["Under"]["price"],
                     bk["title"],
                 )
-                if is_pref:
-                    preferred = entry
-                elif fallback is None:
-                    fallback = entry
-    return preferred or fallback
+    return None
 
 def get_alternate_totals(game: dict, standard_line: float) -> list:
     alt_lines = []
@@ -4560,11 +4552,11 @@ def notify_totals(total_bets, alerted=None):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _extract_h2h_best(game):
-    """Best decimal odds per outcome name across US-only books. Returns {name: (price, book)}."""
+    """Decimal odds per outcome name from Bovada/Bodog only. Returns {name: (price, book)}."""
     best = {}
     for bk in game.get("bookmakers", []):
-        if not _is_us_book(bk["title"]):
-            continue   # skip non-US international books
+        if bk["title"].lower() not in ("bovada", "bodog"):
+            continue
         for m in bk.get("markets", []):
             if m["key"] == "h2h":
                 for o in m.get("outcomes", []):
@@ -4575,14 +4567,14 @@ def _extract_h2h_best(game):
 
 def _extract_spread_best(game):
     """
-    Best decimal odds per team in spreads market (run line / handicap).
-    Only considers US-licensed books (US_BOOKS_ONLY whitelist).
+    Decimal odds per team in spreads market (run line / handicap).
+    Only considers Bovada/Bodog.
     Returns {name: (point, price, book)}.
     """
     best = {}
     for bk in game.get("bookmakers", []):
-        if not _is_us_book(bk["title"]):
-            continue   # skip non-US international books
+        if bk["title"].lower() not in ("bovada", "bodog"):
+            continue
         for m in bk.get("markets", []):
             if m["key"] == "spreads":
                 for o in m.get("outcomes", []):
@@ -4593,10 +4585,10 @@ def _extract_spread_best(game):
     return best
 
 def _extract_f5_h2h_best(game):
-    """Best decimal odds per outcome in h2h_h1 (F5 / primera mitad ML). Returns {name: (price, book)}."""
+    """Decimal odds per outcome in h2h_h1 (F5 ML) from Bovada/Bodog only. Returns {name: (price, book)}."""
     best = {}
     for bk in game.get("bookmakers", []):
-        if not _is_us_book(bk["title"]):
+        if bk["title"].lower() not in ("bovada", "bodog"):
             continue
         for m in bk.get("markets", []):
             if m["key"] == "h2h_h1":
@@ -4609,29 +4601,24 @@ def _extract_f5_h2h_best(game):
 def _extract_f5_total(game):
     """
     Extract F5 (primeras 5 entradas) totals line + odds from totals_h1 market.
+    Only considers Bovada/Bodog.
     Returns (line, over_odds, under_odds, bookmaker_name) or None.
     """
-    preferred, fallback = None, None
     for bk in game.get("bookmakers", []):
-        if not _is_us_book(bk["title"]):
+        if bk["title"].lower() not in ("bovada", "bodog"):
             continue
-        is_pref = bk["title"].lower() in PREFERRED_BOOKS
         for m in bk.get("markets", []):
             if m["key"] == "totals_h1":
                 by_name = {o["name"]: o for o in m.get("outcomes", [])}
                 if "Over" not in by_name or "Under" not in by_name:
                     continue
-                entry = (
+                return (
                     by_name["Over"]["point"],
                     by_name["Over"]["price"],
                     by_name["Under"]["price"],
                     bk["title"],
                 )
-                if is_pref:
-                    preferred = entry
-                elif fallback is None:
-                    fallback = entry
-    return preferred or fallback
+    return None
 
 def _extract_hits_total(game):
     """
@@ -5383,6 +5370,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             if team not in spread_odds:
                 continue
             pt, odds, book = spread_odds[team]
+            if is_mlb and abs(pt) > 2.5:
+                continue
             if is_home:
                 rl = pt if pt != 0 else -1.5
                 p_cover = poisson_runline_prob(home_exp, away_exp, rl)
