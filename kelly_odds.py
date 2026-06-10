@@ -9932,7 +9932,8 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             "Ejemplo: 'ERA diferencial de 3 puntos favorece al pitcher local y Pinnacle lo confirma.'\n"
             "Línea 4 — VOTO: resultado del panel en una frase. Ejemplo: 'Panel 3/3 a favor — sin red flags.'\n\n"
             "PROHIBIDO: más de 4 líneas, listas con guiones, encabezados, JSON anidado, "
-            "repetir lo que dijeron los tres expertos por separado."
+            "repetir lo que dijeron los tres expertos por separado.\n\n"
+            "Responde en máximo 3 oraciones cortas. No más."
         )
         _syn = analyze_with_claude(game_data, sport,
                                    _extra_system=_synthesis_prompt,
