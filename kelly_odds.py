@@ -1087,6 +1087,25 @@ def _patch_mlb_commence_times(games: list) -> None:
     if patched:
         print(f"  🕐 {patched} tiempo(s) MLB corregido(s) desde MLB Stats API")
 
+    for g in games:
+        home_api = g.get("home_team", "")
+        real_times = _fetch_mlb_real_times(date_str)
+        for key_name in real_times.keys():
+            if any(w in key_name for w in home_api.lower().split()
+                   if len(w) > 3):
+                break
+        else:
+            candidates_home = [k for k in real_times.keys()
+                               if any(w in k for w in
+                               g.get("away_team", "").lower().split()
+                               if len(w) > 3)]
+            if candidates_home:
+                old_home = g["home_team"]
+                old_away = g["away_team"]
+                g["home_team"] = old_away
+                g["away_team"] = old_home
+                print(f"  🔄 Home/away corregido: {old_away} es LOCAL")
+
 def fetch_pitcher_stats(name):
     """Return dict with ERA, WHIP, K9 for a pitcher name."""
     empty = {"era": "N/A", "whip": "N/A", "k9": "N/A"}
@@ -6293,6 +6312,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         k: v for k, v in context.items()
         if isinstance(v, (str, int, float, bool, type(None)))
     })
+    _claude_data_g["equipo_local"] = f"{home} (LOCAL 🏠)"
+    _claude_data_g["equipo_visitante"] = f"{away} (VISITANTE ✈️)"
+    _claude_data_g["pitcher_local"] = f"{h_pname} — pitcher LOCAL de {home}"
+    _claude_data_g["pitcher_visitante"] = f"{a_pname} — pitcher VISITANTE de {away}"
     # ── Señal Pinnacle: confirmación o advertencia antes del panel ─────────
     # Compara la dirección del pick contra el mercado sharp de Pinnacle y
     # añade una cadena de texto que Marco, Víctor y Elena reciben como contexto
