@@ -30,7 +30,7 @@ except ImportError:
 API_KEY           = os.environ.get("ODDS_API_KEY",       "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY",  "")
 CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
-CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-haiku-4-5-20251001")
+CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-sonnet-4-6")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO       = os.environ.get("GITHUB_REPO",  "osvaldoalvarez0113-source/Betbot")
 BANKROLL_DEFAULT = 1000.0
@@ -9898,10 +9898,53 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         }
         for i, r in enumerate(resultados)
     ]
-    merged["razonamiento"] = (
-        (base.get("razonamiento", "") or "") +
-        f" [Panel {votos_favor}/3 a favor{'  — veto absoluto' if veto_absoluto else ''}]"
-    )
+    # ── Síntesis final: Sonnet recibe los 3 votos y escribe recomendación conversacional ──
+    _panel_tag = f"[Panel {votos_favor}/3 a favor{'  — veto absoluto' if veto_absoluto else ''}]"
+    _expert_lines = []
+    for i, (exp_nombre, _) in enumerate(_EXPERTOS):
+        r = resultados[i] if i < len(resultados) else None
+        if r is None:
+            continue
+        _voto_txt = "SÍ ✅" if r.get("apostar") else "NO ❌"
+        _razon    = (r.get("razonamiento", "") or "").strip()[:220]
+        _expert_lines.append(f"• {exp_nombre} → {_voto_txt}: {_razon}")
+
+    if _expert_lines:
+        _all_agree = (votos_favor == len([r for r in resultados if r is not None]))
+        _agree_note = " Los tres coinciden — sintetiza en una sola línea." if _all_agree else ""
+        _synthesis_prompt = (
+            "INSTRUCCIÓN ESPECIAL — SÍNTESIS FINAL DEL PANEL:\n"
+            "Eres el árbitro del panel. Recibiste los votos de tres expertos con dominios distintos. "
+            "Escribe la recomendación final en español, en tono conversacional y directo, "
+            "como si le hablaras a un amigo apostador — no como un informe.\n\n"
+            "VOTOS RECIBIDOS:\n"
+            + "\n".join(_expert_lines) + "\n\n"
+            "REGLAS ESTRICTAS:\n"
+            f"• Máximo 3 oraciones en total.{_agree_note}\n"
+            "• Integra solo el punto MÁS relevante de cada experto — no los repitas a los tres.\n"
+            "• Termina SIEMPRE con una acción concreta: pick específico, stake sugerido y libro.\n"
+            "• Formato del cierre: 'Mi recomendación: [pick] en [libro], stake [monto].'\n"
+            "• Estilo deseado: 'Cole viene de ERA 7 en su última salida aunque sus números "
+            "sean 2.00 en temporada — eso me genera duda. El mercado sharp apoya Yankees "
+            "pero con cautela. Mi recomendación: Yankees ML en FanDuel, stake $15.'\n"
+            "• Escribe SOLO la síntesis en el campo razonamiento — sin JSON anidado, "
+            "sin listas, sin encabezados."
+        )
+        _syn = analyze_with_claude(game_data, sport,
+                                   _extra_system=_synthesis_prompt,
+                                   _model=CLAUDE_MODEL)
+        _syn_text = (_syn.get("razonamiento", "") or "").strip() if _syn else ""
+    else:
+        _syn_text = ""
+
+    if _syn_text:
+        merged["razonamiento"] = f"{_syn_text} {_panel_tag}"
+    else:
+        # Fallback: usar el razonamiento del experto base si Sonnet falla
+        merged["razonamiento"] = (
+            (base.get("razonamiento", "") or "") + f" {_panel_tag}"
+        )
+
     merged["_votos_favor"] = votos_favor   # expuesto para bypass-veto guard en analyze_game_full
     return merged
 
