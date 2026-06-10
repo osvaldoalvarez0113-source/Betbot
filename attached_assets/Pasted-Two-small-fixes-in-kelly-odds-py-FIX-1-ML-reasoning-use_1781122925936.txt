@@ -1,0 +1,60 @@
+Two small fixes in kelly_odds.py:
+
+FIX 1 — ML reasoning uses wrong home/away detection:
+In _market_reason(), the is_home check uses 
+ctx.get("match", "") which returns empty string 
+because "match" is not stored inside context dict.
+Empty string is always True in any string check,
+so BOTH teams show home reasoning.
+
+Change the function signature from:
+def _market_reason(label: str, ctx: dict) -> str:
+
+To:
+def _market_reason(label: str, ctx: dict, home_team: str = "") -> str:
+
+And change the is_home line from:
+is_home = ctx.get("match", "").split(" vs ")[0].upper() in u
+
+To:
+is_home = home_team.upper() in u if home_team else False
+
+Then in build_analizar_text(), find where _market_reason
+is called and change it from:
+reason = _market_reason(lbl, ctx)
+
+To:
+reason = _market_reason(lbl, ctx, home)
+
+Where home is already available as the first part of
+result["match"].split(" vs ", 1)[0].
+
+Also fix the Pinnacle line in _market_reason() —
+for away team picks, Pinnacle showing the home team
+probability is misleading. Add this check:
+if pin_p > 0.52:
+    favor = "a favor" if is_home else "en contra"
+    pin_line = f" Pinnacle {round(pin_p*100)}% ({favor})."
+
+FIX 2 — Unify EV display with Pinnacle-calibrated values:
+In build_analizar_text(), before the TODOS LOS MERCADOS 
+loop, build a calibrated lookup from candidates:
+
+cand_ev_map = {
+    c["label"]: {"ev_pct": c["ev_pct"], "prob": c["true_prob"]}
+    for c in (result.get("candidates") or [])
+}
+
+Then in the loop, use calibrated values when available:
+ev_display = cand_ev_map.get(lbl, {}).get("ev_pct", m.get("ev_pct", 0))
+prob_display = cand_ev_map.get(lbl, {}).get("prob", m.get("prob", 0))
+
+Replace the current ev_s and prob_pc calculations with:
+ev_s = f"+{ev_display:.1f}%" if ev_display >= 0 else f"{ev_display:.1f}%"
+prob_pc = round(prob_display * 100)
+
+This way TODOS LOS MERCADOS shows the same calibrated
+numbers that the panel uses, eliminating the confusing
+discrepancy between +41% display and +14% recommendation.
+
+Deploy after both fixes.

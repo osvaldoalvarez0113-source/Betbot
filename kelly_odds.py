@@ -7044,7 +7044,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         print(f"  🔍 Análisis: {a['match']} — {len(a['candidates'])} pick(s), "
               f"mejor EV +{a['best_ev']}%")
 
-def _market_reason(label: str, ctx: dict) -> str:
+def _market_reason(label: str, ctx: dict, home_team: str = "") -> str:
     """One-line reason for a market based on available context."""
     u = label.upper()
     h_era = ctx.get("era_home", 4.5)
@@ -7067,7 +7067,7 @@ def _market_reason(label: str, ctx: dict) -> str:
         dom_era = min(h_era, a_era)
         return f"→ {'Pitcher dominante ' + dom_name + f' ({dom_era:.2f}).' if dom else 'Proyección modelo bajo la línea.'}{wind_note}"
     if " ML" in u:
-        is_home = ctx.get("match", "").split(" vs ")[0].upper() in u
+        is_home = home_team.upper() in u if home_team else False
         era_fav = h_era if is_home else a_era
         era_opp = a_era if is_home else h_era
         pin_line = ""
@@ -7077,7 +7077,8 @@ def _market_reason(label: str, ctx: dict) -> str:
             tot = raw_h + raw_a
             pin_p = raw_h / tot if is_home else raw_a / tot
             if pin_p > 0.52:
-                pin_line = f" Pinnacle {round(pin_p*100)}%."
+                favor = "a favor" if is_home else "en contra"
+                pin_line = f" Pinnacle {round(pin_p*100)}% ({favor})."
         return f"→ Pitcher rival ERA {era_opp:.2f} vs ERA {era_fav:.2f} local.{pin_line}"
     if "RL" in u:
         diff = abs(h_era - a_era)
@@ -7326,6 +7327,10 @@ def build_analizar_text(result: dict) -> list:
             p1 += f"🟨 Árbitro: {ref['name']} — {ref.get('tendency','?')}\n"
 
     # ─── TODOS LOS MERCADOS ───────────────────────────────────────────────────
+    cand_ev_map = {
+        c["label"]: {"ev_pct": c["ev_pct"], "prob": c["true_prob"]}
+        for c in (result.get("candidates") or [])
+    }
     p1 += f"{_DIV}\n📊 TODOS LOS MERCADOS\n{_DIV}\n"
     _has_k = False
     if all_mkts:
@@ -7340,11 +7345,13 @@ def build_analizar_text(result: dict) -> list:
                 # ✅ only when the label was a formal pick AND the book is US-accessible
                 is_pick  = lbl in cand_lbs
                 edge     = " ✅" if is_pick else ""
-                ev_s     = f"+{m['ev_pct']:.1f}%" if m.get("ev_pct", 0) >= 0 else f"{m['ev_pct']:.1f}%"
-                prob_pc  = round(m.get("prob", 0) * 100)
+                ev_display   = cand_ev_map.get(lbl, {}).get("ev_pct", m.get("ev_pct", 0))
+                prob_display = cand_ev_map.get(lbl, {}).get("prob", m.get("prob", 0))
+                ev_s     = f"+{ev_display:.1f}%" if ev_display >= 0 else f"{ev_display:.1f}%"
+                prob_pc  = round(prob_display * 100)
                 odds_val = m.get("odds", 0)
                 p1 += f"  {lbl}: {prob_pc}% | {ev_s} | {odds_val:.2f} @ {bk}{edge}\n"
-                reason = _market_reason(lbl, ctx)
+                reason = _market_reason(lbl, ctx, home)
                 if reason:
                     p1 += f"   <i>{reason}</i>\n"
                 _mkts_shown += 1
