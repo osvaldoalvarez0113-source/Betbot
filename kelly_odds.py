@@ -239,8 +239,10 @@ US_BOOKS_ONLY = {
 # Hard blocklist — books whose names accidentally match US_BOOKS_ONLY substrings
 # (e.g. "PointsBet AU" contains "pointsbet") or are known international books.
 _NON_US_BOOKS: frozenset = frozenset({
-    # PointsBet regional variants (non-US)
-    "pointsbet au", "pointsbet nz", "pointsbet ca",
+    # PointsBet regional variants (non-US) — bare and parenthetical forms
+    "pointsbet au", "pointsbet (au)",
+    "pointsbet nz", "pointsbet (nz)",
+    "pointsbet ca", "pointsbet (ca)",
     # UK / Ireland
     "888sport", "coral", "ladbrokes", "william hill",
     "paddy power", "betfair", "sky bet", "bet victor",
@@ -268,6 +270,9 @@ def _is_us_book(title: str) -> bool:
     """
     t = (title or "").lower().strip()
     if t in _NON_US_BOOKS:
+        return False
+    # Catch any "pointsbet (xx)" or "pointsbet xx" regional variant not in the frozenset
+    if "pointsbet" in t and any(r in t for r in ("au", "nz", "ca")):
         return False
     return any(us in t for us in US_BOOKS_ONLY)
 
@@ -9937,12 +9942,13 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         _syn_text = ""
 
     if _syn_text:
-        merged["razonamiento"] = f"{_syn_text} {_panel_tag}"
+        _final_razon = f"{_syn_text} {_panel_tag}"
     else:
         # Fallback: usar el razonamiento del experto base si Sonnet falla
-        merged["razonamiento"] = (
-            (base.get("razonamiento", "") or "") + f" {_panel_tag}"
-        )
+        _final_razon = (base.get("razonamiento", "") or "") + f" {_panel_tag}"
+
+    # Hard limit: 200 caracteres máximo sin importar la fuente
+    merged["razonamiento"] = _final_razon[:200]
 
     merged["_votos_favor"] = votos_favor   # expuesto para bypass-veto guard en analyze_game_full
     return merged
