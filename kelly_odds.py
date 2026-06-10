@@ -6141,6 +6141,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     # Candidates that fall below PROB_MIN after blending are dropped.
     # High-divergence picks (>25pp) get stake halved + divergence alert.
     candidates, _pin_div_alerts = _apply_pinnacle_calibration(candidates, game, home)
+    for _cal_c in candidates:
+        if _cal_c["label"] in _all_mkts:
+            _all_mkts[_cal_c["label"]]["ev_pct"] = _cal_c["ev_pct"]
+            _all_mkts[_cal_c["label"]]["prob"] = _cal_c["true_prob"]
 
     if not candidates:
         _best = max(_all_evs, key=lambda x: x[1]) if _all_evs else None
