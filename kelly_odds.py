@@ -10140,10 +10140,11 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             _syn_msg = _syn_client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=120,
-                system=(_CLAUDE_SYSTEM + "\n\n" + _synthesis_prompt),
+                system="Eres un experto en apuestas deportivas. Responde SOLO en español conversacional, máximo 2 oraciones cortas. NUNCA uses JSON, NUNCA uses bloques de código, NUNCA uses comillas. Habla como un amigo directo.",
                 messages=[{"role": "user", "content": json.dumps(game_data, default=str, ensure_ascii=False)[:2000]}],
             )
             _syn_raw = _syn_msg.content[0].text.strip()
+            _syn_raw = _syn_raw.replace("```json", "").replace("```", "").replace("{", "").replace("}", "").replace('"apostar":', "").replace('"confianza":', "").replace('"razonamiento":', "").strip().strip('"').strip()
             _syn = {"razonamiento": _syn_raw}
         except Exception as _syne:
             print(f"  ⚠️  Synthesis error: {_syne}")
