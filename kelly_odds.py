@@ -6316,6 +6316,31 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             _claude_data_g.update(_enrich_panel_data(_claude_data_g, game))
         _claude_result_g = panel_expertos(_claude_data_g, _claude_sport_g)
 
+        if force_panel and len(top3) > 1:
+            _extra_candidates_results = []
+            for _extra_c in top3[1:]:
+                _extra_data = {
+                    "match": f"{home} vs {away}",
+                    "sport": sport_key,
+                    "top_pick": _extra_c["label"],
+                    "ev_pct": _extra_c["ev_pct"],
+                    "true_prob": round(_extra_c["true_prob"] * 100, 1),
+                    "odds": _extra_c["odds"],
+                    "stake": _extra_c["stake"],
+                }
+                _extra_data.update({k: v for k, v in context.items()
+                                    if isinstance(v, (str, int, float, bool, type(None)))})
+                _extra_panel = panel_expertos(_extra_data, _claude_sport_g)
+                _extra_candidates_results.append({
+                    "label": _extra_c["label"],
+                    "ev_pct": _extra_c["ev_pct"],
+                    "true_prob": _extra_c["true_prob"],
+                    "odds": _extra_c["odds"],
+                    "stake": _extra_c["stake"],
+                    "panel": _extra_panel,
+                })
+            context["_extra_panels"] = _extra_candidates_results
+
     if _claude_result_g:
         _cc  = _claude_result_g.get("confianza", "N/D")
         _cap = "✅" if _claude_result_g.get("apostar", True) else "❌"
@@ -7019,6 +7044,51 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         print(f"  🔍 Análisis: {a['match']} — {len(a['candidates'])} pick(s), "
               f"mejor EV +{a['best_ev']}%")
 
+def _market_reason(label: str, ctx: dict) -> str:
+    """One-line reason for a market based on available context."""
+    u = label.upper()
+    h_era = ctx.get("era_home", 4.5)
+    a_era = ctx.get("era_away", 4.5)
+    h_name = ctx.get("pname_home", "")
+    a_name = ctx.get("pname_away", "")
+    wind = ctx.get("wind_info", "")
+    pin = ctx.get("pinnacle_odds")
+    bat_h = ctx.get("bat_home") or {}
+    bat_a = ctx.get("bat_away") or {}
+
+    if "OVER" in u and "F5" not in u:
+        weak = h_era > 4.5 or a_era > 4.5
+        wind_note = " Viento OUT." if wind and "OUT" in wind.upper() else ""
+        return f"→ {'Pitchers débiles favorecen más carreras.' if weak else 'Proyección modelo supera la línea.'}{wind_note}"
+    if "UNDER" in u and "F5" not in u:
+        dom = h_era < 3.0 or a_era < 3.0
+        wind_note = " Viento IN." if wind and "IN" in wind.upper() else ""
+        dom_name = h_name if h_era < a_era else a_name
+        dom_era = min(h_era, a_era)
+        return f"→ {'Pitcher dominante ' + dom_name + f' ({dom_era:.2f}).' if dom else 'Proyección modelo bajo la línea.'}{wind_note}"
+    if " ML" in u:
+        is_home = ctx.get("match", "").split(" vs ")[0].upper() in u
+        era_fav = h_era if is_home else a_era
+        era_opp = a_era if is_home else h_era
+        pin_line = ""
+        if pin:
+            raw_h = 1.0 / max(pin["home"], 1.001)
+            raw_a = 1.0 / max(pin["away"], 1.001)
+            tot = raw_h + raw_a
+            pin_p = raw_h / tot if is_home else raw_a / tot
+            if pin_p > 0.52:
+                pin_line = f" Pinnacle {round(pin_p*100)}%."
+        return f"→ Pitcher rival ERA {era_opp:.2f} vs ERA {era_fav:.2f} local.{pin_line}"
+    if "RL" in u:
+        diff = abs(h_era - a_era)
+        return f"→ Diferencia ERA {diff:.1f} puntos respalda la línea de carreras."
+    if "F5" in u:
+        return f"→ Pitchers abridores: {h_name} ({h_era:.2f}) vs {a_name} ({a_era:.2f})."
+    if "K OVER" in u or "K UNDER" in u:
+        return f"→ Prop de ponches basado en K/9 confirmado."
+    return ""
+
+
 def build_analizar_text(result: dict) -> list:
     """
     Build Telegram-HTML message parts for /analizar (manual analysis).
@@ -7274,6 +7344,9 @@ def build_analizar_text(result: dict) -> list:
                 prob_pc  = round(m.get("prob", 0) * 100)
                 odds_val = m.get("odds", 0)
                 p1 += f"  {lbl}: {prob_pc}% | {ev_s} | {odds_val:.2f} @ {bk}{edge}\n"
+                reason = _market_reason(lbl, ctx)
+                if reason:
+                    p1 += f"   <i>{reason}</i>\n"
                 _mkts_shown += 1
                 if "⚡" in lbl:
                     _has_k = True
@@ -7318,6 +7391,23 @@ def build_analizar_text(result: dict) -> list:
             p2 += f"<b>{ex['nombre']}</b> {ec}{ex.get('confianza','?')} — {ap}\n<i>{er}</i>\n\n"
     else:
         p2 += "Sin análisis de expertos disponible.\n"
+
+    extra_panels = ctx.get("_extra_panels", [])
+    if extra_panels:
+        p2 += f"\n{_DIV}\n🔍 OTROS CANDIDATOS EVALUADOS\n{_DIV}\n"
+        for ep in extra_panels:
+            ep_ci = ep.get("panel") or {}
+            ep_ap = "✅ APOSTAR" if ep_ci.get("apostar") is True else "❌ PASAR"
+            ep_cc = ep_ci.get("confianza", "N/D")
+            ep_ic = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(ep_cc, "⚪")
+            ep_r = (ep_ci.get("razonamiento") or "")[:150]
+            p2 += (
+                f"<b>{ep['label']}</b>\n"
+                f"EV: +{ep['ev_pct']:.1f}%  |  Prob: {round(ep['true_prob']*100)}%  "
+                f"|  {ep['odds']:.2f} @ Bovada\n"
+                f"{ep_ic} Panel: {ep_cc} — {ep_ap}\n"
+                f"<i>{ep_r}</i>\n\n"
+            )
 
     final_apostar = ci.get("apostar")
     panel_razon   = ci.get("razonamiento") or ""
