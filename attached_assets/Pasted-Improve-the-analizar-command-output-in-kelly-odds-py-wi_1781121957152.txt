@@ -1,0 +1,116 @@
+Improve the /analizar command output in kelly_odds.py with three changes:
+
+CHANGE 1 — Add reasoning line per market in build_analizar_text():
+In build_analizar_text(), find the TODOS LOS MERCADOS loop where 
+markets are displayed. Currently it shows:
+  OVER 8.5: 63% | +12.4% EV | 1.85 @ Bovada ✅
+
+Change it to also show a one-line reason after each market using 
+existing context data. Add this helper function near build_analizar_text():
+
+def _market_reason(label: str, ctx: dict) -> str:
+    """One-line reason for a market based on available context."""
+    u = label.upper()
+    h_era = ctx.get("era_home", 4.5)
+    a_era = ctx.get("era_away", 4.5)
+    h_name = ctx.get("pname_home", "")
+    a_name = ctx.get("pname_away", "")
+    wind = ctx.get("wind_info", "")
+    pin = ctx.get("pinnacle_odds")
+    bat_h = ctx.get("bat_home") or {}
+    bat_a = ctx.get("bat_away") or {}
+
+    if "OVER" in u and "F5" not in u:
+        weak = h_era > 4.5 or a_era > 4.5
+        wind_note = " Viento OUT." if wind and "OUT" in wind.upper() else ""
+        return f"→ {'Pitchers débiles favorecen más carreras.' if weak else 'Proyección modelo supera la línea.'}{wind_note}"
+    if "UNDER" in u and "F5" not in u:
+        dom = h_era < 3.0 or a_era < 3.0
+        wind_note = " Viento IN." if wind and "IN" in wind.upper() else ""
+        dom_name = h_name if h_era < a_era else a_name
+        dom_era = min(h_era, a_era)
+        return f"→ {'Pitcher dominante ' + dom_name + f' ({dom_era:.2f}).' if dom else 'Proyección modelo bajo la línea.'}{wind_note}"
+    if " ML" in u:
+        is_home = ctx.get("match", "").split(" vs ")[0].upper() in u
+        ops = bat_h.get("ops") if is_home else bat_a.get("ops")
+        era_fav = h_era if is_home else a_era
+        era_opp = a_era if is_home else h_era
+        pin_line = ""
+        if pin:
+            raw_h = 1.0 / max(pin["home"], 1.001)
+            raw_a = 1.0 / max(pin["away"], 1.001)
+            tot = raw_h + raw_a
+            pin_p = raw_h / tot if is_home else raw_a / tot
+            if pin_p > 0.52:
+                pin_line = f" Pinnacle {round(pin_p*100)}%."
+        return f"→ Pitcher rival ERA {era_opp:.2f} vs ERA {era_fav:.2f} local.{pin_line}"
+    if "RL" in u:
+        diff = abs(h_era - a_era)
+        return f"→ Diferencia ERA {diff:.1f} puntos respalda la línea de carreras."
+    if "F5" in u:
+        return f"→ Pitchers abridores: {h_name} ({h_era:.2f}) vs {a_name} ({a_era:.2f})."
+    if "K OVER" in u or "K UNDER" in u:
+        return f"→ Prop de ponches basado en K/9 confirmado."
+    return ""
+
+Then in the TODOS LOS MERCADOS loop in build_analizar_text(), 
+after printing each market line, add:
+    reason = _market_reason(lbl, ctx)
+    if reason:
+        p1 += f"   <i>{reason}</i>\n"
+
+CHANGE 2 — Panel evaluates top 3 candidates individually when force_panel=True:
+In analyze_game_full(), find where panel_expertos() is called.
+Currently it only calls panel on top3[0].
+
+Add this block AFTER the existing panel call, only when force_panel=True 
+and len(top3) > 1:
+
+if force_panel and len(top3) > 1:
+    _extra_candidates_results = []
+    for _extra_c in top3[1:]:
+        _extra_data = {
+            "match": f"{home} vs {away}",
+            "sport": sport_key,
+            "top_pick": _extra_c["label"],
+            "ev_pct": _extra_c["ev_pct"],
+            "true_prob": round(_extra_c["true_prob"] * 100, 1),
+            "odds": _extra_c["odds"],
+            "stake": _extra_c["stake"],
+        }
+        _extra_data.update({k: v for k, v in context.items()
+                            if isinstance(v, (str, int, float, bool, type(None)))})
+        _extra_panel = panel_expertos(_extra_data, _claude_sport_g)
+        _extra_candidates_results.append({
+            "label": _extra_c["label"],
+            "ev_pct": _extra_c["ev_pct"],
+            "true_prob": _extra_c["true_prob"],
+            "odds": _extra_c["odds"],
+            "stake": _extra_c["stake"],
+            "panel": _extra_panel,
+        })
+    context["_extra_panels"] = _extra_candidates_results
+
+CHANGE 3 — Show per-candidate panel results in build_analizar_text():
+In build_analizar_text(), in PARTE 2 (panel de expertos section),
+after showing the main panel experts, add a section for each 
+extra candidate that was evaluated:
+
+extra_panels = ctx.get("_extra_panels", [])
+if extra_panels:
+    p2 += f"\n{_DIV}\n🔍 OTROS CANDIDATOS EVALUADOS\n{_DIV}\n"
+    for ep in extra_panels:
+        ep_ci = ep.get("panel") or {}
+        ep_ap = "✅ APOSTAR" if ep_ci.get("apostar") is True else "❌ PASAR"
+        ep_cc = ep_ci.get("confianza", "N/D")
+        ep_ic = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(ep_cc, "⚪")
+        ep_r = (ep_ci.get("razonamiento") or "")[:150]
+        p2 += (
+            f"<b>{ep['label']}</b>\n"
+            f"EV: +{ep['ev_pct']:.1f}%  |  Prob: {round(ep['true_prob']*100)}%  "
+            f"|  {ep['odds']:.2f} @ Bovada\n"
+            f"{ep_ic} Panel: {ep_cc} — {ep_ap}\n"
+            f"<i>{ep_r}</i>\n\n"
+        )
+
+Deploy after all three changes are applied.
