@@ -4839,7 +4839,7 @@ EV_MIN_PCT       = 3.0   # minimum EV% to include a bet in Full Game Analysis
 PROB_MIN         = 0.50  # global fallback minimum true probability
 # Improvement 2: per-type confidence thresholds (backtesting-calibrated)
 PROB_MIN_TOTALS  = 0.58  # Over/Under — 58% minimum
-PROB_MIN_ML      = 0.62  # Moneyline — 62% minimum
+PROB_MIN_ML      = 0.55  # Moneyline — 55% minimum
 # PROB_MIN_LIVE  = 0.65  # DESACTIVADO — live betting deshabilitado
 PROB_MIN_PREMIUM = 0.70  # Premium alerts — 70% minimum
 _RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
@@ -6334,8 +6334,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         _claude_data_g["divergence_alerts"] = " | ".join(_pin_div_alerts)
     _claude_sport_g = "MLB" if is_mlb else "SOCCER"
     _top_ev = top3[0]["ev_pct"]
-    if _top_ev < 5.0 and not force_panel:
-        print(f"   ⏭️  Panel omitido — EV {_top_ev:.1f}% < 5% mínimo ({top3[0]['label']})")
+    if _top_ev < 3.0 and not force_panel:
+        print(f"   ⏭️  Panel omitido — EV {_top_ev:.1f}% < 3% mínimo ({top3[0]['label']})")
         _claude_result_g = None
     else:
         if is_mlb:
