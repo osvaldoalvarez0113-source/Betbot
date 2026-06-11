@@ -434,13 +434,15 @@ def handle_photo(chat_id: str, msg: dict):
         _send(chat_id, "⚠️ API de Claude no configurada")
         return
 
-    # Pick the largest photo size Telegram provides
-    photos = msg.get("photo", [])
-    if not photos:
+    # Pick file_id — compressed photo or image sent as document
+    if msg.get("photo"):
+        file_id = msg["photo"][-1]["file_id"]   # largest resolution
+    elif msg.get("document") and (msg["document"].get("mime_type") or "").startswith("image/"):
+        file_id = msg["document"]["file_id"]
+    else:
         _send(chat_id, "⚠️ No se recibió ninguna imagen.")
         return
 
-    file_id = photos[-1]["file_id"]
     print(f"  📸 handle_photo: file_id={file_id[:20]}…")
 
     _send(chat_id, "🔍 Analizando imagen… (~10 segundos)")
@@ -593,9 +595,13 @@ def _dispatch(update: dict):
     if not chat_id:
         return
 
-    # Handle photo messages
-    if msg.get("photo"):
-        print(f"  📸 Telegram: foto recibida de chat_id={chat_id}")
+    # Handle photo messages — both compressed photos and images sent as documents
+    _is_image_doc = (
+        msg.get("document") and
+        (msg["document"].get("mime_type") or "").startswith("image/")
+    )
+    if msg.get("photo") or _is_image_doc:
+        print(f"  📸 Telegram: {'foto' if msg.get('photo') else 'imagen-documento'} recibida de chat_id={chat_id}")
         if not _is_authorized(chat_id):
             _send(chat_id, "⛔ No autorizado. Envía /start para registrarte.")
             return
@@ -678,6 +684,10 @@ def _polling_loop():
                 continue
             for update in resp.get("result", []):
                 offset = update["update_id"] + 1
+                # Log every incoming update type for diagnostics
+                _upd_types = [k for k in update if k != "update_id"]
+                _msg_keys  = list((update.get("message") or {}).keys())
+                print(f"  📨 Telegram update #{update['update_id']}: {_upd_types} | msg keys: {_msg_keys}")
                 try:
                     _dispatch(update)
                 except Exception as _de:
