@@ -394,7 +394,8 @@ def _cmd_analizar(chat_id: str, args: str):
     game_found  = None
     sport_found = "baseball_mlb"
 
-    for sport in ["baseball_mlb", "soccer_epl", "soccer_uefa_champs_league",
+    for sport in ["baseball_mlb", "soccer_fifa_world_cup",
+                  "soccer_epl", "soccer_uefa_champs_league",
                   "soccer_usa_mls", "soccer_spain_la_liga"]:
         try:
             games = _get_odds_fn(sport)
