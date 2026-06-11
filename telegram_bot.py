@@ -195,7 +195,7 @@ def _cmd_bankroll(chat_id: str):
                       if (wins_l or loses_l) else 0.0)
 
     # Today's gains from bets_log.csv
-    today_str  = datetime.now().strftime("%Y-%m-%d")
+    today_str  = datetime.datetime.now().strftime("%Y-%m-%d")
     hoy        = 0.0
     semana     = 0.0
     last_bet   = "—"
@@ -427,7 +427,10 @@ def _cmd_analizar(chat_id: str, args: str):
 
 def handle_photo(chat_id: str, msg: dict):
     """Download a photo sent by the user, analyze it with Claude Vision, reply in chat."""
+    print(f"  📸 handle_photo: iniciando para chat_id={chat_id}")
+
     if not ANTHROPIC_API_KEY:
+        print("  📸 handle_photo: ANTHROPIC_API_KEY no configurada")
         _send(chat_id, "⚠️ API de Claude no configurada")
         return
 
@@ -438,22 +441,27 @@ def handle_photo(chat_id: str, msg: dict):
         return
 
     file_id = photos[-1]["file_id"]
+    print(f"  📸 handle_photo: file_id={file_id[:20]}…")
 
     _send(chat_id, "🔍 Analizando imagen… (~10 segundos)")
 
     # 1. Get file path from Telegram
     file_info = _api("getFile", {"file_id": file_id})
     if not file_info.get("ok"):
+        print(f"  📸 handle_photo: getFile falló — {file_info}")
         _send(chat_id, "⚠️ No pude descargar la imagen de Telegram.")
         return
     file_path = file_info["result"]["file_path"]
+    print(f"  📸 handle_photo: file_path={file_path}")
 
     # 2. Download the file bytes
     try:
         dl_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
         with urllib.request.urlopen(dl_url, timeout=20) as r:
             img_bytes = r.read()
+        print(f"  📸 handle_photo: imagen descargada — {len(img_bytes):,} bytes")
     except Exception as e:
+        print(f"  📸 handle_photo: error descargando — {e}")
         _send(chat_id, f"⚠️ Error descargando imagen: {e}")
         return
 
@@ -464,6 +472,7 @@ def handle_photo(chat_id: str, msg: dict):
     # Detect media type from extension
     ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "jpeg"
     media_type = "image/png" if ext == "png" else "image/webp" if ext == "webp" else "image/jpeg"
+    print(f"  📸 handle_photo: media_type={media_type}")
 
     # 4. Call Claude Vision
     PROMPT = (
@@ -476,6 +485,7 @@ def handle_photo(chat_id: str, msg: dict):
         "Sé directo y conciso."
     )
 
+    print("  📸 handle_photo: llamando Claude Vision…")
     try:
         import anthropic as _anth
         client = _anth.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -501,7 +511,9 @@ def handle_photo(chat_id: str, msg: dict):
             }],
         )
         analysis = response.content[0].text.strip()
+        print(f"  📸 handle_photo: Claude respondió ({len(analysis)} chars)")
     except Exception as e:
+        print(f"  📸 handle_photo: error Claude — {e}")
         _send(chat_id, f"⚠️ Error al consultar Claude: {e}")
         return
 
@@ -583,6 +595,7 @@ def _dispatch(update: dict):
 
     # Handle photo messages
     if msg.get("photo"):
+        print(f"  📸 Telegram: foto recibida de chat_id={chat_id}")
         if not _is_authorized(chat_id):
             _send(chat_id, "⛔ No autorizado. Envía /start para registrarte.")
             return
