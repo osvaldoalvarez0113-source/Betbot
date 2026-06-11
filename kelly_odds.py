@@ -6479,6 +6479,14 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             continue
 
         # ── Context block ─────────────────────────────────────────────────────
+        # Default pitcher/ERA values (override inside is_mlb if data available)
+        pn_h = ctx.get("pname_home", "TBD")
+        pn_a = ctx.get("pname_away", "TBD")
+        er_h = float(ctx.get("era_home") or 4.50)
+        er_a = float(ctx.get("era_away") or 4.50)
+        h_pname = pn_h
+        a_pname = pn_a
+
         if is_mlb:
             # Pitchers
             pn_h = ctx.get("pname_home", "TBD")
@@ -7235,6 +7243,12 @@ def build_analizar_text(result: dict) -> list:
         f"⏰ {gt}\n"
         f"{verdict_block}\n"
     )
+
+    # Default pitcher/ERA values — always defined so soccer picks don't crash
+    pn_h = ctx.get("pname_home", "TBD") if ctx else "TBD"
+    pn_a = ctx.get("pname_away", "TBD") if ctx else "TBD"
+    er_h = float(ctx.get("era_home") or 4.50) if ctx else 4.50
+    er_a = float(ctx.get("era_away") or 4.50) if ctx else 4.50
 
     if is_mlb:
         pn_h  = ctx.get("pname_home", "TBD")
