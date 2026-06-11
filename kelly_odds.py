@@ -405,18 +405,18 @@ def _fmt_smart_gt(commence_str: str) -> str:
     Falls back to plain _fmt_et on error.
     """
     try:
-        ct    = datetime.strptime(commence_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
-        ct_et = ct.astimezone(ET)
-        now_et = datetime.now(ET)
-        days  = (ct_et.date() - now_et.date()).days
-        t_str = ct_et.strftime("%-I:%M %p ET")
+        ct     = datetime.strptime(commence_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
+        ct_cdt = ct.astimezone(CDT)
+        now_ct = datetime.now(CDT)
+        days   = (ct_cdt.date() - now_ct.date()).days
+        t_str  = ct_cdt.strftime("%-I:%M %p CT")
         if days == 0:
             return f"Hoy {t_str}"
         if days == 1:
             return f"Mañana {t_str}"
         month_es = {1:"Ene",2:"Feb",3:"Mar",4:"Abr",5:"May",6:"Jun",
                     7:"Jul",8:"Ago",9:"Sep",10:"Oct",11:"Nov",12:"Dic"}
-        date_lbl = f"{month_es.get(ct_et.month, ct_et.strftime('%b'))} {ct_et.day}"
+        date_lbl = f"{month_es.get(ct_cdt.month, ct_cdt.strftime('%b'))} {ct_cdt.day}"
         return f"En {days} días — {date_lbl}"
     except Exception:
         return _fmt_et(commence_str)
