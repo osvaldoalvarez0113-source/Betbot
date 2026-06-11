@@ -426,7 +426,12 @@ def _cmd_analizar(chat_id: str, args: str):
 
 
 def handle_photo(chat_id: str, msg: dict):
-    """Download a photo sent by the user, analyze it with Claude Vision, reply in chat."""
+    """
+    Photo pipeline:
+      1. Claude Vision  → extract team names as JSON
+      2. get_odds()     → find each game in the API
+      3. analyze_game_full() + build_analizar_text() → same output as /analizar
+    """
     print(f"  📸 handle_photo: iniciando para chat_id={chat_id}")
 
     if not ANTHROPIC_API_KEY:
@@ -434,9 +439,13 @@ def handle_photo(chat_id: str, msg: dict):
         _send(chat_id, "⚠️ API de Claude no configurada")
         return
 
-    # Pick file_id — compressed photo or image sent as document
+    if not _get_odds_fn or not _analyze_fn:
+        _send(chat_id, "⚠️ Módulo de análisis no disponible (bot en modo básico).")
+        return
+
+    # ── Step 1: resolve file_id ───────────────────────────────────────────────
     if msg.get("photo"):
-        file_id = msg["photo"][-1]["file_id"]   # largest resolution
+        file_id = msg["photo"][-1]["file_id"]
     elif msg.get("document") and (msg["document"].get("mime_type") or "").startswith("image/"):
         file_id = msg["document"]["file_id"]
     else:
@@ -444,56 +453,46 @@ def handle_photo(chat_id: str, msg: dict):
         return
 
     print(f"  📸 handle_photo: file_id={file_id[:20]}…")
+    _send(chat_id, "🔍 Identificando partidos... dame un momento")
 
-    _send(chat_id, "🔍 Analizando imagen… (~10 segundos)")
-
-    # 1. Get file path from Telegram
+    # ── Step 2: download image from Telegram ─────────────────────────────────
     file_info = _api("getFile", {"file_id": file_id})
     if not file_info.get("ok"):
         print(f"  📸 handle_photo: getFile falló — {file_info}")
         _send(chat_id, "⚠️ No pude descargar la imagen de Telegram.")
         return
     file_path = file_info["result"]["file_path"]
-    print(f"  📸 handle_photo: file_path={file_path}")
 
-    # 2. Download the file bytes
     try:
         dl_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
         with urllib.request.urlopen(dl_url, timeout=20) as r:
             img_bytes = r.read()
-        print(f"  📸 handle_photo: imagen descargada — {len(img_bytes):,} bytes")
+        print(f"  📸 handle_photo: descargada {len(img_bytes):,} bytes")
     except Exception as e:
         print(f"  📸 handle_photo: error descargando — {e}")
         _send(chat_id, f"⚠️ Error descargando imagen: {e}")
         return
 
-    # 3. Convert to base64
     import base64 as _b64
-    img_b64 = _b64.b64encode(img_bytes).decode("utf-8")
-
-    # Detect media type from extension
-    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "jpeg"
+    img_b64   = _b64.b64encode(img_bytes).decode("utf-8")
+    ext       = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "jpeg"
     media_type = "image/png" if ext == "png" else "image/webp" if ext == "webp" else "image/jpeg"
-    print(f"  📸 handle_photo: media_type={media_type}")
 
-    # 4. Call Claude Vision
-    PROMPT = (
-        "Eres un asistente experto en apuestas deportivas. "
-        "Analiza esta imagen que puede ser un schedule de juegos, líneas de Bovada, "
-        "o cualquier información deportiva. "
-        "Extrae toda la información relevante: equipos, horarios, odds/cuotas, líneas de totales. "
-        "Luego dame tu análisis en español indicando: qué partidos hay, cuáles tienen valor "
-        "según las líneas visibles, y una recomendación clara de qué apostar o no apostar. "
-        "Sé directo y conciso."
+    # ── Step 3: Claude Vision — extract team pairs as JSON ───────────────────
+    EXTRACT_PROMPT = (
+        'Extrae únicamente los nombres de los equipos de béisbol que aparecen en esta imagen. '
+        'Devuelve SOLO una lista en formato JSON así: '
+        '[["equipo1", "equipo2"], ["equipo3", "equipo4"]]. '
+        'Sin texto adicional, solo el JSON.'
     )
 
-    print("  📸 handle_photo: llamando Claude Vision…")
+    print("  📸 handle_photo: llamando Claude Vision para extraer equipos…")
     try:
         import anthropic as _anth
         client = _anth.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = client.messages.create(
+        resp_cv = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1500,
+            max_tokens=512,
             messages=[{
                 "role": "user",
                 "content": [
@@ -505,36 +504,99 @@ def handle_photo(chat_id: str, msg: dict):
                             "data": img_b64,
                         },
                     },
-                    {
-                        "type": "text",
-                        "text": PROMPT,
-                    },
+                    {"type": "text", "text": EXTRACT_PROMPT},
                 ],
             }],
         )
-        analysis = response.content[0].text.strip()
-        print(f"  📸 handle_photo: Claude respondió ({len(analysis)} chars)")
+        raw_json = resp_cv.content[0].text.strip()
+        print(f"  📸 handle_photo: Claude raw → {raw_json[:120]}")
     except Exception as e:
-        print(f"  📸 handle_photo: error Claude — {e}")
+        print(f"  📸 handle_photo: error Claude Vision — {e}")
         _send(chat_id, f"⚠️ Error al consultar Claude: {e}")
         return
 
-    # 5. Check if Claude found useful content
-    no_info_signals = (
-        "no pude identificar" in analysis.lower() or
-        "no hay información" in analysis.lower() or
-        "no contiene información" in analysis.lower() or
-        "no veo información" in analysis.lower() or
-        "imagen no" in analysis.lower() or
-        len(analysis) < 60
-    )
-    if no_info_signals:
+    # ── Step 4: parse team pairs ──────────────────────────────────────────────
+    import json as _json, re as _re
+    try:
+        # Strip markdown code fences if present
+        clean = _re.sub(r"```[a-z]*", "", raw_json).strip().strip("`").strip()
+        matchups = _json.loads(clean)
+        if not isinstance(matchups, list) or not matchups:
+            raise ValueError("empty or non-list")
+        # Normalise: each element must be a 2-item list
+        matchups = [m for m in matchups if isinstance(m, list) and len(m) == 2]
+        if not matchups:
+            raise ValueError("no valid pairs")
+    except Exception as pe:
+        print(f"  📸 handle_photo: JSON parse error — {pe} | raw={raw_json[:120]}")
         _send(chat_id,
               "No pude identificar información de apuestas en la imagen. "
               "Manda una captura más clara del schedule o las líneas.")
         return
 
-    _send(chat_id, f"📸 <b>Análisis de imagen</b>\n{'─'*22}\n{analysis[:3800]}")
+    print(f"  📸 handle_photo: {len(matchups)} partido(s) detectados — {matchups}")
+
+    # ── Step 5: fetch MLB odds once, then match each pair ────────────────────
+    try:
+        games = _get_odds_fn("baseball_mlb") or []
+    except Exception as e:
+        games = []
+        print(f"  📸 handle_photo: get_odds error — {e}")
+
+    def _words_match(query: str, team: str) -> bool:
+        t = team.lower()
+        return all(w in t for w in query.lower().split())
+
+    found_any = False
+    for pair in matchups:
+        home_q, away_q = pair[0].strip().lower(), pair[1].strip().lower()
+        game_found  = None
+        for g in games:
+            gh = g.get("home_team", "")
+            ga = g.get("away_team", "")
+            if ((_words_match(home_q, gh) and _words_match(away_q, ga)) or
+                    (_words_match(away_q, gh) and _words_match(home_q, ga))):
+                game_found = g
+                break
+
+        if not game_found:
+            _send(chat_id,
+                  f"⚠️ <b>{pair[0]} vs {pair[1]}</b> — no encontrado en la API "
+                  f"(puede que no esté en las próximas 48h o el nombre difiera).")
+            continue
+
+        # ── Run full analysis pipeline ────────────────────────────────────
+        found_any = True
+        try:
+            result = _analyze_fn(game_found, "baseball_mlb", {}, force_panel=True)
+        except Exception as ae:
+            _send(chat_id, f"⚠️ Error analizando {pair[0]} vs {pair[1]}: {ae}")
+            continue
+
+        if not result:
+            _send(chat_id, f"⚠️ Sin datos suficientes para {pair[0]} vs {pair[1]}.")
+            continue
+
+        if _build_text_fn:
+            try:
+                parts = _build_text_fn(result)
+                for part in parts:
+                    if part and part.strip():
+                        _send(chat_id, part)
+            except Exception as bte:
+                _send(chat_id, f"⚠️ Error formateando resultado: {bte}")
+        else:
+            best  = (result.get("candidates") or [{}])[0]
+            _send(chat_id,
+                  f"🎯 <b>{result.get('match','?')}</b>\n"
+                  f"Pick: <b>{best.get('label','?')}</b> | "
+                  f"EV +{best.get('ev_pct',0):.1f}% | "
+                  f"Stake ${best.get('stake',0):.0f}")
+
+    if not found_any and matchups:
+        _send(chat_id,
+              "No encontré ninguno de los partidos de la imagen en la API de odds. "
+              "Verifica que los juegos estén dentro de las próximas 48 horas.")
 
 
 def _broadcast_to_all(payload):
