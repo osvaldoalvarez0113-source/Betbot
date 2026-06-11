@@ -29,6 +29,7 @@ import urllib.error
 
 TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CHATID_FILE      = "telegram_chat_id.txt"
 TRACKER_FILE     = "paper_trades.json"
 CLV_FILE         = "clv_tracker.json"
@@ -424,6 +425,104 @@ def _cmd_analizar(chat_id: str, args: str):
     ))
 
 
+def handle_photo(chat_id: str, msg: dict):
+    """Download a photo sent by the user, analyze it with Claude Vision, reply in chat."""
+    if not ANTHROPIC_API_KEY:
+        _send(chat_id, "⚠️ API de Claude no configurada")
+        return
+
+    # Pick the largest photo size Telegram provides
+    photos = msg.get("photo", [])
+    if not photos:
+        _send(chat_id, "⚠️ No se recibió ninguna imagen.")
+        return
+
+    file_id = photos[-1]["file_id"]
+
+    _send(chat_id, "🔍 Analizando imagen… (~10 segundos)")
+
+    # 1. Get file path from Telegram
+    file_info = _api("getFile", {"file_id": file_id})
+    if not file_info.get("ok"):
+        _send(chat_id, "⚠️ No pude descargar la imagen de Telegram.")
+        return
+    file_path = file_info["result"]["file_path"]
+
+    # 2. Download the file bytes
+    try:
+        dl_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        with urllib.request.urlopen(dl_url, timeout=20) as r:
+            img_bytes = r.read()
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error descargando imagen: {e}")
+        return
+
+    # 3. Convert to base64
+    import base64 as _b64
+    img_b64 = _b64.b64encode(img_bytes).decode("utf-8")
+
+    # Detect media type from extension
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "jpeg"
+    media_type = "image/png" if ext == "png" else "image/webp" if ext == "webp" else "image/jpeg"
+
+    # 4. Call Claude Vision
+    PROMPT = (
+        "Eres un asistente experto en apuestas deportivas. "
+        "Analiza esta imagen que puede ser un schedule de juegos, líneas de Bovada, "
+        "o cualquier información deportiva. "
+        "Extrae toda la información relevante: equipos, horarios, odds/cuotas, líneas de totales. "
+        "Luego dame tu análisis en español indicando: qué partidos hay, cuáles tienen valor "
+        "según las líneas visibles, y una recomendación clara de qué apostar o no apostar. "
+        "Sé directo y conciso."
+    )
+
+    try:
+        import anthropic as _anth
+        client = _anth.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1500,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": img_b64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": PROMPT,
+                    },
+                ],
+            }],
+        )
+        analysis = response.content[0].text.strip()
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error al consultar Claude: {e}")
+        return
+
+    # 5. Check if Claude found useful content
+    no_info_signals = (
+        "no pude identificar" in analysis.lower() or
+        "no hay información" in analysis.lower() or
+        "no contiene información" in analysis.lower() or
+        "no veo información" in analysis.lower() or
+        "imagen no" in analysis.lower() or
+        len(analysis) < 60
+    )
+    if no_info_signals:
+        _send(chat_id,
+              "No pude identificar información de apuestas en la imagen. "
+              "Manda una captura más clara del schedule o las líneas.")
+        return
+
+    _send(chat_id, f"📸 <b>Análisis de imagen</b>\n{'─'*22}\n{analysis[:3800]}")
+
+
 def _broadcast_to_all(payload):
     """
     Broadcast to all authorized Telegram chats.
@@ -479,7 +578,18 @@ def _dispatch(update: dict):
     chat_id = str(msg.get("chat", {}).get("id", ""))
     text    = (msg.get("text") or "").strip()
 
-    if not chat_id or not text or not text.startswith("/"):
+    if not chat_id:
+        return
+
+    # Handle photo messages
+    if msg.get("photo"):
+        if not _is_authorized(chat_id):
+            _send(chat_id, "⛔ No autorizado. Envía /start para registrarte.")
+            return
+        handle_photo(chat_id, msg)
+        return
+
+    if not text or not text.startswith("/"):
         return
 
     if not _is_authorized(chat_id):
