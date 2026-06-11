@@ -13947,12 +13947,12 @@ if __name__ == "__main__":
                     print(f"  ⚠️  Soccer Daily Card error: {e}")
 
             # Night summary at 11 PM ET — Module P
-            if now_et.hour == 23 and last_night_summary < now_et.date():
-                try:
-                    send_night_summary()
-                    last_night_summary = now_et.date()
-                except Exception as e:
-                    print(f"  ⚠️  Night summary error: {e}")
+            # if now_et.hour == 23 and last_night_summary < now_et.date():
+            #     try:
+            #         send_night_summary()
+            #         last_night_summary = now_et.date()
+            #     except Exception as e:
+            #         print(f"  ⚠️  Night summary error: {e}")
 
             print(f"🔍 Scan #{scan}")
             try:
