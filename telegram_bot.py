@@ -319,6 +319,59 @@ def _team_words_match(query: str, team: str) -> bool:
     return all(w in t for w in query.lower().split())
 
 
+_ES_TO_EN_TEAMS = {
+    "corea del sur": "South Korea",
+    "república checa": "Czech Republic",
+    "chequia": "Czech Republic",
+    "estados unidos": "United States",
+    "países bajos": "Netherlands",
+    "alemania": "Germany",
+    "francia": "France",
+    "españa": "Spain",
+    "brasil": "Brazil",
+    "marruecos": "Morocco",
+    "japón": "Japan",
+    "méxico": "Mexico",
+    "panamá": "Panama",
+    "bélgica": "Belgium",
+    "croacia": "Croatia",
+    "suiza": "Switzerland",
+    "polonia": "Poland",
+    "turquía": "Turkey",
+    "irán": "Iran",
+    "arabia saudita": "Saudi Arabia",
+    "corea": "South Korea",
+    "costa de marfil": "Ivory Coast",
+    "rep. checa": "Czech Republic",
+    "eslovaquia": "Slovakia",
+    "eslovenia": "Slovenia",
+    "rumania": "Romania",
+    "dinamarca": "Denmark",
+    "austria": "Austria",
+    "hungría": "Hungary",
+    "ucrania": "Ukraine",
+    "portugal": "Portugal",
+    "argentina": "Argentina",
+    "uruguay": "Uruguay",
+    "colombia": "Colombia",
+    "ecuador": "Ecuador",
+    "perú": "Peru",
+    "paraguay": "Paraguay",
+    "senegal": "Senegal",
+    "nigeria": "Nigeria",
+    "ghana": "Ghana",
+    "camerún": "Cameroon",
+    "argelia": "Algeria",
+    "egipto": "Egypt",
+    "canadá": "Canada",
+    "australia": "Australia",
+}
+
+
+def _translate_team_name(name: str) -> str:
+    return _ES_TO_EN_TEAMS.get(name.lower().strip(), name)
+
+
 def _cmd_analizar(chat_id: str, args: str):
     if not args or " vs " not in args.lower():
         _send(chat_id,
@@ -331,10 +384,12 @@ def _cmd_analizar(chat_id: str, args: str):
         return
 
     partes = args.split(" vs ", 1)
-    home_q = partes[0].strip().lower()
-    away_q = partes[1].strip().lower()
+    home_raw = partes[0].strip()
+    away_raw = partes[1].strip()
+    home_q = _translate_team_name(home_raw).lower()
+    away_q = _translate_team_name(away_raw).lower()
 
-    _send(chat_id, f"🔍 Buscando <b>{partes[0].strip()} vs {partes[1].strip()}</b>…")
+    _send(chat_id, f"🔍 Buscando <b>{home_raw} vs {away_raw}</b>…")
 
     game_found  = None
     sport_found = "baseball_mlb"
