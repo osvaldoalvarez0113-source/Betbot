@@ -478,21 +478,34 @@ def handle_photo(chat_id: str, msg: dict):
     ext       = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "jpeg"
     media_type = "image/png" if ext == "png" else "image/webp" if ext == "webp" else "image/jpeg"
 
-    # ── Step 3: Claude Vision — extract team pairs as JSON ───────────────────
+    # ── Step 3: Claude Vision — extract full game data as JSON ──────────────
     EXTRACT_PROMPT = (
-        'Extrae únicamente los nombres de los equipos de béisbol que aparecen en esta imagen. '
-        'Devuelve SOLO una lista en formato JSON así: '
-        '[["equipo1", "equipo2"], ["equipo3", "equipo4"]]. '
-        'Sin texto adicional, solo el JSON.'
+        "Analiza esta imagen de béisbol y extrae la información en formato JSON exacto:\n"
+        "{\n"
+        '  "partidos": [\n'
+        "    {\n"
+        '      "equipo_local": "nombre",\n'
+        '      "equipo_visitante": "nombre",\n'
+        '      "pitcher_local": "nombre o null",\n'
+        '      "pitcher_visitante": "nombre o null",\n'
+        '      "era_local": "numero o null",\n'
+        '      "era_visitante": "numero o null",\n'
+        '      "total_line": "numero o null",\n'
+        '      "ml_local": "numero o null",\n'
+        '      "ml_visitante": "numero o null"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "Solo devuelve el JSON, sin texto adicional."
     )
 
-    print("  📸 handle_photo: llamando Claude Vision para extraer equipos…")
+    print("  📸 handle_photo: llamando Claude Vision para extraer datos…")
     try:
         import anthropic as _anth
         client = _anth.Anthropic(api_key=ANTHROPIC_API_KEY)
         resp_cv = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=512,
+            max_tokens=1024,
             messages=[{
                 "role": "user",
                 "content": [
@@ -509,32 +522,34 @@ def handle_photo(chat_id: str, msg: dict):
             }],
         )
         raw_json = resp_cv.content[0].text.strip()
-        print(f"  📸 handle_photo: Claude raw → {raw_json[:120]}")
+        print(f"  📸 handle_photo: Claude raw → {raw_json[:200]}")
     except Exception as e:
         print(f"  📸 handle_photo: error Claude Vision — {e}")
         _send(chat_id, f"⚠️ Error al consultar Claude: {e}")
         return
 
-    # ── Step 4: parse team pairs ──────────────────────────────────────────────
+    # ── Step 4: parse game data ───────────────────────────────────────────────
     import json as _json, re as _re
     try:
-        # Strip markdown code fences if present
-        clean = _re.sub(r"```[a-z]*", "", raw_json).strip().strip("`").strip()
-        matchups = _json.loads(clean)
-        if not isinstance(matchups, list) or not matchups:
-            raise ValueError("empty or non-list")
-        # Normalise: each element must be a 2-item list
-        matchups = [m for m in matchups if isinstance(m, list) and len(m) == 2]
+        clean    = _re.sub(r"```[a-z]*", "", raw_json).strip().strip("`").strip()
+        parsed   = _json.loads(clean)
+        # Accept both {"partidos": [...]} and a bare list
+        if isinstance(parsed, dict):
+            matchups = parsed.get("partidos", [])
+        elif isinstance(parsed, list):
+            matchups = parsed
+        else:
+            matchups = []
         if not matchups:
-            raise ValueError("no valid pairs")
+            raise ValueError("no partidos found")
     except Exception as pe:
-        print(f"  📸 handle_photo: JSON parse error — {pe} | raw={raw_json[:120]}")
+        print(f"  📸 handle_photo: JSON parse error — {pe} | raw={raw_json[:200]}")
         _send(chat_id,
               "No pude identificar información de apuestas en la imagen. "
               "Manda una captura más clara del schedule o las líneas.")
         return
 
-    print(f"  📸 handle_photo: {len(matchups)} partido(s) detectados — {matchups}")
+    print(f"  📸 handle_photo: {len(matchups)} partido(s) detectados")
 
     # ── Step 5: fetch MLB odds once, then match each pair ────────────────────
     try:
@@ -548,9 +563,28 @@ def handle_photo(chat_id: str, msg: dict):
         return all(w in t for w in query.lower().split())
 
     found_any = False
-    for pair in matchups:
-        home_q, away_q = pair[0].strip().lower(), pair[1].strip().lower()
-        game_found  = None
+    for gdata in matchups:
+        # Support both dict (new format) and 2-item list (legacy)
+        if isinstance(gdata, dict):
+            home_q = (gdata.get("equipo_local") or "").strip().lower()
+            away_q = (gdata.get("equipo_visitante") or "").strip().lower()
+            img_pitcher_home = gdata.get("pitcher_local")
+            img_pitcher_away = gdata.get("pitcher_visitante")
+            img_era_home     = gdata.get("era_local")
+            img_era_away     = gdata.get("era_visitante")
+            label_home = gdata.get("equipo_local", "?")
+            label_away = gdata.get("equipo_visitante", "?")
+        else:
+            home_q = str(gdata[0]).strip().lower()
+            away_q = str(gdata[1]).strip().lower()
+            img_pitcher_home = img_pitcher_away = None
+            img_era_home = img_era_away = None
+            label_home, label_away = gdata[0], gdata[1]
+
+        if not home_q or not away_q:
+            continue
+
+        game_found = None
         for g in games:
             gh = g.get("home_team", "")
             ga = g.get("away_team", "")
@@ -561,16 +595,46 @@ def handle_photo(chat_id: str, msg: dict):
 
         if not game_found:
             _send(chat_id,
-                  f"⚠️ <b>{pair[0]} vs {pair[1]}</b> — no encontrado en la API "
+                  f"⚠️ <b>{label_home} vs {label_away}</b> — no encontrado en la API "
                   f"(puede que no esté en las próximas 48h o el nombre difiera).")
             continue
 
         # ── Run full analysis pipeline ────────────────────────────────────
         found_any = True
+
+        # Build img_context: override TBD pitchers / ERAs with data from image
+        img_ctx = {}
+        if img_pitcher_home and str(img_pitcher_home).lower() not in ("null", "none", "tbd", ""):
+            img_ctx["pname_home"] = img_pitcher_home
+        if img_pitcher_away and str(img_pitcher_away).lower() not in ("null", "none", "tbd", ""):
+            img_ctx["pname_away"] = img_pitcher_away
         try:
+            if img_era_home is not None:
+                img_ctx["era_home"] = float(img_era_home)
+        except (TypeError, ValueError):
+            pass
+        try:
+            if img_era_away is not None:
+                img_ctx["era_away"] = float(img_era_away)
+        except (TypeError, ValueError):
+            pass
+        if img_ctx:
+            print(f"  📸 handle_photo: inyectando contexto imagen → {img_ctx}")
+
+        try:
+            result = _analyze_fn(game_found, "baseball_mlb", {}, force_panel=True,
+                                 extra_ctx=img_ctx if img_ctx else None)
+        except TypeError:
+            # analyze_game_full may not accept extra_ctx — fall back gracefully
             result = _analyze_fn(game_found, "baseball_mlb", {}, force_panel=True)
+            # Patch result context manually after the fact
+            if result and img_ctx:
+                ctx = result.setdefault("context", {})
+                for k, v in img_ctx.items():
+                    if ctx.get(k) in (None, "TBD", "", 0, 0.0):
+                        ctx[k] = v
         except Exception as ae:
-            _send(chat_id, f"⚠️ Error analizando {pair[0]} vs {pair[1]}: {ae}")
+            _send(chat_id, f"⚠️ Error analizando {label_home} vs {label_away}: {ae}")
             continue
 
         if not result:
