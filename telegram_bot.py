@@ -492,7 +492,7 @@ def handle_photo(chat_id: str, msg: dict):
         import anthropic as _anth
         client = _anth.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1500,
             messages=[{
                 "role": "user",
