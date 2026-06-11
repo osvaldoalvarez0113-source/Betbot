@@ -1,0 +1,358 @@
+En kelly_odds.py necesito que hagas los siguientes cambios para mejorar el formato de /analizar:
+
+=== PASO 1 — Agregar 3 funciones helper ANTES de build_analizar_text ===
+
+Busca la línea:
+def build_analizar_text(result: dict) -> list:
+
+Agrega estas 3 funciones JUSTO ANTES de esa línea:
+
+def _clean_era_form(eras: list) -> list:
+    """Remove ERA 0.0 entries (relief/skipped starts) from pitcher form."""
+    return [e for e in (eras or []) if isinstance(e, (int, float)) and e > 0.0]
+
+
+def _pitcher_line(name: str, era: float, fip, hand: str, pform, side: str) -> str:
+    """Compact 1-line pitcher summary with optional form trend."""
+    hand_map = {"L": "zurdo", "R": "diestro", "S": "ambidiestro"}
+    hand_txt = f" ({hand_map.get(hand, '')})" if hand else ""
+    fip_txt  = f" | FIP {fip:.2f}" if fip is not None else ""
+    base     = f"{side} {name}{hand_txt}: ERA {era:.2f}{fip_txt} — {_era_label(era)}"
+    if pform:
+        clean = _clean_era_form(pform.get("eras", []))
+        if clean:
+            trend = pform.get("trend", "")
+            base += f"\n   Forma: {trend} | {' → '.join(str(e) for e in clean[-3:])}"
+    return base
+
+
+def _mkt_row(lbl: str, m: dict, is_pick: bool) -> str:
+    """Single clean market row with icon."""
+    ev   = m.get("ev_pct", 0)
+    prob = round(m.get("prob", 0) * 100)
+    odds = m.get("odds", 0)
+    book = m.get("book", "")
+    icon = "✅" if is_pick else ("🟡" if ev >= 2 else "❌")
+    ev_s = f"+{ev:.1f}%" if ev >= 0 else f"{ev:.1f}%"
+    return f"{icon} {lbl}: {prob}% | EV {ev_s} | {odds:.2f} {book}"
+
+
+=== PASO 2 — Reemplazar la función build_analizar_text completa ===
+
+Busca la función completa build_analizar_text (desde def build_analizar_text hasta el return [p1, p2] final) y reemplázala COMPLETA con esto:
+
+def build_analizar_text(result: dict) -> list:
+    """
+    Telegram-HTML message parts for /analizar — formato mejorado:
+    p1: Header → VEREDICTO arriba → Pitchers compactos → Factores clave → Mercados
+    p2: Panel expertos → Recomendación → Consejo
+    """
+    match    = result.get("match", "?")
+    home, away = (match.split(" vs ", 1) + [""])[:2] if " vs " in match else (match, "")
+    home_es  = _es(home)
+    away_es  = _es(away)
+    is_mlb   = result.get("is_mlb", False)
+    ctx      = result.get("context", {}) or {}
+    cands    = result.get("candidates", [])
+    ci       = result.get("claude_intel") or {}
+    gt       = _fmt_smart_gt(result.get("time", ""))
+    emoji    = _sport_emoji(result.get("sport", ""))
+    all_mkts = result.get("all_markets", {}) or {}
+    cand_lbs = {c["label"] for c in cands}
+
+    # ── VEREDICTO (construido primero, mostrado primero) ──────────────────────
+    final_apostar = ci.get("apostar")
+    if cands:
+        best     = cands[0]
+        best_lbl = (best.get("label", "?")
+                    .replace("🔵 ", "").replace("🔴 ", "")
+                    .replace("📈 ", "").replace("📉 ", "")
+                    .replace("🏃 ", "").replace("🤝 ", ""))
+        ev_best   = best.get("ev_pct", 0)
+        prob_best = round(best.get("true_prob", 0) * 100)
+        stake_b   = best.get("stake", 0)
+        book_b    = best.get("book", "")
+        odds_b    = best.get("odds", 0)
+        if final_apostar is False:
+            verdict_block = (
+                f"{'━'*22}\n"
+                f"⛔ <b>SIN APUESTA — Panel vetó el pick</b>\n"
+                f"   Mejor EV: {best_lbl} +{ev_best:.1f}% — rechazado por expertos\n"
+                f"{'━'*22}"
+            )
+        else:
+            verdict_block = (
+                f"{'━'*22}\n"
+                f"✅ <b>APUESTA: {best_lbl}</b>\n"
+                f"   @ {odds_b:.2f} {book_b} | Stake ${stake_b:.0f}\n"
+                f"   Prob: {prob_best}% | EV +{ev_best:.1f}%\n"
+                f"{'━'*22}"
+            )
+    elif all_mkts:
+        pos_mkts = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
+        if pos_mkts:
+            bl, bm = max(pos_mkts, key=lambda x: x[1]["ev_pct"])
+            bl_c   = (bl.replace("🔵 ", "").replace("🔴 ", "")
+                        .replace("📈 ", "").replace("📉 ", ""))
+            prob_v = bm.get("prob", 0)
+            reason = ("prob. mínima no alcanzada (necesita 62%)" if prob_v < 0.62
+                      else "EV mínimo no alcanzado (necesita 5%)")
+            verdict_block = (
+                f"{'━'*22}\n"
+                f"⛔ <b>SIN APUESTA HOY</b>\n"
+                f"   Mejor disponible: {bl_c} EV +{bm['ev_pct']:.1f}%\n"
+                f"   Motivo: {reason}\n"
+                f"{'━'*22}"
+            )
+        else:
+            verdict_block = (
+                f"{'━'*22}\n"
+                f"⛔ <b>SIN APUESTA HOY</b>\n"
+                f"   Todos los mercados con EV negativo\n"
+                f"{'━'*22}"
+            )
+    else:
+        verdict_block = (
+            f"{'━'*22}\n"
+            f"⛔ <b>SIN APUESTA HOY</b>\n"
+            f"   Sin odds disponibles — verifica en Bovada\n"
+            f"{'━'*22}"
+        )
+
+    # ── PARTE 1: Header + Veredicto + Contexto compacto ──────────────────────
+    p1 = (
+        f"{emoji} <b>{home_es} vs {away_es}</b>\n"
+        f"⏰ {gt}\n"
+        f"{verdict_block}\n"
+    )
+
+    if is_mlb:
+        pn_h  = ctx.get("pname_home", "TBD")
+        pn_a  = ctx.get("pname_away", "TBD")
+        er_h  = ctx.get("era_home",  4.50)
+        er_a  = ctx.get("era_away",  4.50)
+        fip_h = ctx.get("fip_home")
+        fip_a = ctx.get("fip_away")
+        hnd_h = ctx.get("hand_home")
+        hnd_a = ctx.get("hand_away")
+        pf_h  = ctx.get("pform_h")
+        pf_a  = ctx.get("pform_a")
+        sc_h  = ctx.get("statcast_home")
+        sc_a  = ctx.get("statcast_away")
+
+        p1 += f"{'─'*22}\n"
+
+        # Pitchers compactos
+        p1 += _pitcher_line(pn_h, er_h, fip_h, hnd_h, pf_h, "🔵") + "\n"
+        sc_h_blk = _statcast_alert_block(pn_h, sc_h, er_h)
+        if sc_h_blk:
+            p1 += sc_h_blk
+        p1 += _pitcher_line(pn_a, er_a, fip_a, hnd_a, pf_a, "🔴") + "\n"
+        sc_a_blk = _statcast_alert_block(pn_a, sc_a, er_a)
+        if sc_a_blk:
+            p1 += sc_a_blk
+
+        # Bullpen compacto
+        try:
+            _bpera_h, _ = fetch_bullpen_era(home)
+            _bpera_a, _ = fetch_bullpen_era(away)
+            p1 += f"⚾ Bullpen ERA: {home_es} {_bpera_h:.2f} | {away_es} {_bpera_a:.2f}\n"
+        except Exception:
+            pass
+        bp_h = ctx.get("bullpen_load_home")
+        bp_a = ctx.get("bullpen_load_away")
+        if bp_h or bp_a:
+            for _te, _bp in [(home_es, bp_h), (away_es, bp_a)]:
+                if _bp:
+                    flag = f" {_bp['flag']}" if _bp.get("flag") else ""
+                    p1 += f"   {_te}: {_bp['ip_3d']} inn últimos 3 días{flag}\n"
+
+        p1 += f"{'─'*22}\n"
+
+        # Stats clave
+        if ctx.get("rs_home"):
+            p1 += f"📊 {home_es}: anota {ctx['rs_home']} | recibe {ctx['ra_home']} /juego\n"
+            p1 += f"📊 {away_es}: anota {ctx['rs_away']} | recibe {ctx['ra_away']} /juego\n"
+
+        # Bateo compacto
+        for _t, _te, _bk in ((home, home_es, "bat_home"), (away, away_es, "bat_away")):
+            bat = ctx.get(_bk)
+            if bat:
+                ops = bat.get("ops")
+                kp  = bat.get("k_pct")
+                parts = [f"AVG {bat['avg']:.3f}"]
+                if ops:
+                    parts.append(f"OPS {ops:.3f} ({_ops_label(ops)})")
+                if kp:
+                    parts.append(f"K% {kp:.0f}%")
+                p1 += f"🏏 {_te}: {' | '.join(parts)}\n"
+
+        # Pinnacle
+        pin = ctx.get("pinnacle_odds")
+        if pin:
+            raw_h = 1.0 / max(pin["home"], 1.001)
+            raw_a = 1.0 / max(pin["away"], 1.001)
+            tot   = raw_h + raw_a
+            p1 += (f"📌 Pinnacle: {home_es} {round(raw_h/tot*100,1)}%"
+                   f" | {away_es} {round(raw_a/tot*100,1)}%\n")
+
+        # Clima
+        if ctx.get("temp_label"):
+            p1 += f"{ctx['temp_label']}\n"
+        if ctx.get("wind_info"):
+            p1 += f"💨 {ctx['wind_info']}\n"
+
+        # Árbitro compacto
+        ump = ctx.get("umpire")
+        if ump and ump.get("name"):
+            tend = ump.get("tendency", "NEUTRAL")
+            ump_es = ("zona cerrada → Over" if tend == "OVER"
+                      else "zona amplia → Under" if tend == "UNDER"
+                      else "zona normal")
+            p1 += f"👨‍⚖️ Árbitro: {ump['name']} — {ump_es}\n"
+
+        # Lesionados compacto
+        for til, ils in ctx.get("il_data", {}).items():
+            if ils:
+                p1 += f"🤕 {_es(til)}: {', '.join(ils[:3])}\n"
+
+        # Movimiento de línea
+        if ctx.get("line_moved") and ctx.get("line_note"):
+            p1 += f"📉 {ctx['line_note']}\n"
+
+        # Récord de locación compacto
+        hs  = ctx.get("h_splits") or {}
+        as_ = ctx.get("a_splits") or {}
+        if hs.get("home_wpct") is not None:
+            p1 += (f"🏠 {home_es} casa: {round(hs['home_wpct']*100)}%"
+                   f" | anota {hs.get('home_rs','?')} | recibe {hs.get('home_ra','?')}\n")
+        if as_.get("away_wpct") is not None:
+            p1 += (f"🚗 {away_es} visita: {round(as_['away_wpct']*100)}%"
+                   f" | anota {as_.get('away_rs','?')} | recibe {as_.get('away_ra','?')}\n")
+
+    else:
+        # Soccer compacto
+        p1 += f"{'─'*22}\n"
+        p1 += f"💪 {home_es}: {_elo_tier(ctx.get('elo_home', 1500))}\n"
+        p1 += f"💪 {away_es}: {_elo_tier(ctx.get('elo_away', 1500))}\n"
+        p1 += f"🤝 Prob. empate: {ctx.get('p_draw','?')}%\n"
+        for sf_key, tname_es in (("sform_h", home_es), ("sform_a", away_es)):
+            sf = ctx.get(sf_key)
+            if sf:
+                rs = " ".join(_result_to_es(r) for r in sf["results"])
+                p1 += (f"📋 {tname_es}: {rs}"
+                       f" | {sf['gf_pg']}g/p anota | {sf['ga_pg']}g/p recibe\n")
+        pin = ctx.get("pinnacle_odds")
+        if pin:
+            raw_h = 1.0 / max(pin["home"], 1.001)
+            raw_a = 1.0 / max(pin["away"], 1.001)
+            tot   = raw_h + raw_a
+            p1 += (f"📌 Pinnacle: {home_es} {round(raw_h/tot*100,1)}%"
+                   f" | {away_es} {round(raw_a/tot*100,1)}%\n")
+        ref = ctx.get("referee")
+        if ref and ref.get("name"):
+            p1 += f"🟨 Árbitro: {ref['name']} — {ref.get('tendency','?')}\n"
+        if ctx.get("line_moved") and ctx.get("line_note"):
+            p1 += f"📉 {ctx['line_note']}\n"
+
+    # ── MERCADOS tabla limpia ─────────────────────────────────────────────────
+    p1 += f"{'─'*22}\n📊 <b>MERCADOS</b>\n{'─'*22}\n"
+    _has_k = False
+    if all_mkts:
+        for lbl, m in all_mkts.items():
+            bk = m.get("book", "")
+            if bk != "Props" and not _is_us_book(bk):
+                continue
+            is_pick = lbl in cand_lbs
+            p1 += _mkt_row(lbl, m, is_pick) + "\n"
+            if "⚡" in lbl:
+                _has_k = True
+        if not _has_k and is_mlb:
+            p1 += "⚡ Props K: sin K/9 >8.5 confirmado — preferir ML\n"
+    else:
+        p1 += "Sin odds disponibles en este momento\n"
+
+    # ── PARTE 2: Panel + Recomendación + Consejo ──────────────────────────────
+    experts   = ci.get("_expertos_detalle") or []
+    _ci_icons = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}
+
+    p2 = f"{'─'*22}\n🎓 <b>PANEL DE EXPERTOS</b>\n{'─'*22}\n"
+
+    if experts:
+        for ex in experts:
+            ap = ("✅" if ex.get("apostar") is True
+                  else ("❌" if ex.get("apostar") is False else "⚪"))
+            ec = _ci_icons.get(ex.get("confianza", ""), "⚪")
+            er = (ex.get("razonamiento") or "sin razonamiento")[:120]
+            p2 += f"<b>{ex['nombre']}</b> {ap} {ec}\n<i>{er}</i>\n\n"
+    else:
+        # Explicar POR QUÉ no corrió el panel
+        if not cands and all_mkts:
+            pos = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
+            if pos:
+                bl, bm = max(pos, key=lambda x: x[1]["ev_pct"])
+                bl_c = (bl.replace("🔵 ", "").replace("🔴 ", "")
+                          .replace("📈 ", "").replace("📉 ", ""))
+                prob_v = round(bm.get("prob", 0) * 100)
+                p2 += (f"ℹ️ Panel no activado\n"
+                       f"   Mejor candidato: {bl_c}\n"
+                       f"   EV +{bm['ev_pct']:.1f}% | Prob {prob_v}%\n"
+                       f"   Necesita: EV >5% y prob >62% para activar panel\n\n")
+            else:
+                p2 += "ℹ️ Panel no activado — todos los mercados con EV negativo.\n\n"
+        else:
+            p2 += "ℹ️ Sin respuesta del panel de expertos.\n\n"
+
+    # Recomendación
+    panel_razon = (ci.get("razonamiento") or "").strip()
+    best_c = cands[0] if cands else {}
+
+    p2 += f"{'─'*22}\n"
+    if final_apostar is True and best_c:
+        bl_c = (best_c.get("label", "?")
+                .replace("🔵 ", "").replace("🔴 ", "")
+                .replace("📈 ", "").replace("📉 ", ""))
+        p2 += (f"📋 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
+               f"Pick: <b>{bl_c}</b>\n"
+               f"Stake: <b>${best_c.get('stake',0):.0f}</b>"
+               f" @ {best_c.get('odds',0):.2f} {best_c.get('book','')}\n"
+               f"EV: +{best_c.get('ev_pct',0):.1f}%"
+               f" | Prob: {round(best_c.get('true_prob',0)*100)}%\n")
+        if panel_razon:
+            p2 += f"<i>{panel_razon[:200]}</i>\n"
+    elif final_apostar is False:
+        p2 += f"📋 <b>RECOMENDACIÓN: ❌ PASAR</b>\n"
+        if panel_razon:
+            p2 += f"<i>{panel_razon[:200]}</i>\n"
+    else:
+        p2 += f"📋 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
+        if panel_razon:
+            p2 += f"<i>{panel_razon[:200]}</i>\n"
+
+    # Consejo — siempre mostrado
+    p2 += f"{'─'*22}\n"
+    if not cands and all_mkts:
+        pos = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
+        if pos:
+            bl, bm = max(pos, key=lambda x: x[1]["ev_pct"])
+            bl_c = (bl.replace("🔵 ", "").replace("🔴 ", "")
+                      .replace("📈 ", "").replace("📉 ", ""))
+            p2 += (f"💡 <b>Si apostas de todas formas:</b>\n"
+                   f"   {bl_c} @ {bm['odds']:.2f} {bm['book']}\n"
+                   f"   El modelo no lo recomienda — apuesta con criterio propio")
+        else:
+            p2 += "💡 Mejor pasar este juego — sin ventaja detectada hoy"
+    elif cands and final_apostar is True:
+        p2 += f"💡 Apuesta antes de {gt} en Bovada"
+    else:
+        p2 += "💡 Espera el próximo partido con mejor edge"
+
+    return [p1, p2]
+
+
+=== DESPUÉS DE LOS CAMBIOS ===
+
+Haz commit a GitHub con el mensaje:
+feat: rediseño formato /analizar - veredicto arriba, layout compacto
+
+Railway redesplegará automáticamente.

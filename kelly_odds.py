@@ -7121,375 +7121,341 @@ def _market_reason(label: str, ctx: dict, home_team: str = "") -> str:
     return ""
 
 
+def _clean_era_form(eras: list) -> list:
+    """Remove ERA 0.0 entries (relief/skipped starts) from pitcher form."""
+    return [e for e in (eras or []) if isinstance(e, (int, float)) and e > 0.0]
+
+
+def _pitcher_line(name: str, era: float, fip, hand: str, pform, side: str) -> str:
+    """Compact 1-line pitcher summary with optional form trend."""
+    hand_map = {"L": "zurdo", "R": "diestro", "S": "ambidiestro"}
+    hand_txt = f" ({hand_map.get(hand, '')})" if hand else ""
+    fip_txt  = f" | FIP {fip:.2f}" if fip is not None else ""
+    base     = f"{side} {name}{hand_txt}: ERA {era:.2f}{fip_txt} — {_era_label(era)}"
+    if pform:
+        clean = _clean_era_form(pform.get("eras", []))
+        if clean:
+            trend = pform.get("trend", "")
+            base += f"\n   Forma: {trend} | {' → '.join(str(e) for e in clean[-3:])}"
+    return base
+
+
+def _mkt_row(lbl: str, m: dict, is_pick: bool) -> str:
+    """Single clean market row with icon."""
+    ev   = m.get("ev_pct", 0)
+    prob = round(m.get("prob", 0) * 100)
+    odds = m.get("odds", 0)
+    book = m.get("book", "")
+    icon = "✅" if is_pick else ("🟡" if ev >= 2 else "❌")
+    ev_s = f"+{ev:.1f}%" if ev >= 0 else f"{ev:.1f}%"
+    return f"{icon} {lbl}: {prob}% | EV {ev_s} | {odds:.2f} {book}"
+
+
 def build_analizar_text(result: dict) -> list:
     """
-    Build Telegram-HTML message parts for /analizar (manual analysis).
-    Returns [p1, p2] — each fits in one Telegram message.
-    Format: CONTEXTO DEL JUEGO → TODOS LOS MERCADOS → PANEL DE EXPERTOS → RECOMENDACIÓN
+    Telegram-HTML message parts for /analizar — formato mejorado:
+    p1: Header → VEREDICTO arriba → Pitchers compactos → Factores clave → Mercados
+    p2: Panel expertos → Recomendación → Consejo
     """
     match    = result.get("match", "?")
     home, away = (match.split(" vs ", 1) + [""])[:2] if " vs " in match else (match, "")
     home_es  = _es(home)
     away_es  = _es(away)
     is_mlb   = result.get("is_mlb", False)
-    ctx      = result.get("context", {})
+    ctx      = result.get("context", {}) or {}
     cands    = result.get("candidates", [])
     ci       = result.get("claude_intel") or {}
     gt       = _fmt_smart_gt(result.get("time", ""))
     emoji    = _sport_emoji(result.get("sport", ""))
-    all_mkts = result.get("all_markets", {})
+    all_mkts = result.get("all_markets", {}) or {}
     cand_lbs = {c["label"] for c in cands}
 
-    # ─── PARTE 1: Contexto del juego ─────────────────────────────────────────
+    # ── VEREDICTO (construido primero, mostrado primero) ──────────────────────
+    final_apostar = ci.get("apostar")
+    if cands:
+        best     = cands[0]
+        best_lbl = (best.get("label", "?")
+                    .replace("🔵 ", "").replace("🔴 ", "")
+                    .replace("📈 ", "").replace("📉 ", "")
+                    .replace("🏃 ", "").replace("🤝 ", ""))
+        ev_best   = best.get("ev_pct", 0)
+        prob_best = round(best.get("true_prob", 0) * 100)
+        stake_b   = best.get("stake", 0)
+        book_b    = best.get("book", "")
+        odds_b    = best.get("odds", 0)
+        if final_apostar is False:
+            verdict_block = (
+                f"{'━'*22}\n"
+                f"⛔ <b>SIN APUESTA — Panel vetó el pick</b>\n"
+                f"   Mejor EV: {best_lbl} +{ev_best:.1f}% — rechazado por expertos\n"
+                f"{'━'*22}"
+            )
+        else:
+            verdict_block = (
+                f"{'━'*22}\n"
+                f"✅ <b>APUESTA: {best_lbl}</b>\n"
+                f"   @ {odds_b:.2f} {book_b} | Stake ${stake_b:.0f}\n"
+                f"   Prob: {prob_best}% | EV +{ev_best:.1f}%\n"
+                f"{'━'*22}"
+            )
+    elif all_mkts:
+        pos_mkts = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
+        if pos_mkts:
+            bl, bm = max(pos_mkts, key=lambda x: x[1]["ev_pct"])
+            bl_c   = (bl.replace("🔵 ", "").replace("🔴 ", "")
+                        .replace("📈 ", "").replace("📉 ", ""))
+            prob_v = bm.get("prob", 0)
+            reason = ("prob. mínima no alcanzada (necesita 62%)" if prob_v < 0.62
+                      else "EV mínimo no alcanzado (necesita 5%)")
+            verdict_block = (
+                f"{'━'*22}\n"
+                f"⛔ <b>SIN APUESTA HOY</b>\n"
+                f"   Mejor disponible: {bl_c} EV +{bm['ev_pct']:.1f}%\n"
+                f"   Motivo: {reason}\n"
+                f"{'━'*22}"
+            )
+        else:
+            verdict_block = (
+                f"{'━'*22}\n"
+                f"⛔ <b>SIN APUESTA HOY</b>\n"
+                f"   Todos los mercados con EV negativo\n"
+                f"{'━'*22}"
+            )
+    else:
+        verdict_block = (
+            f"{'━'*22}\n"
+            f"⛔ <b>SIN APUESTA HOY</b>\n"
+            f"   Sin odds disponibles — verifica en Bovada\n"
+            f"{'━'*22}"
+        )
+
+    # ── PARTE 1: Header + Veredicto + Contexto compacto ──────────────────────
     p1 = (
         f"{emoji} <b>{home_es} vs {away_es}</b>\n"
-        f"⏰ {gt}\n{_DIV}\n📋 CONTEXTO DEL JUEGO\n{_DIV}\n"
+        f"⏰ {gt}\n"
+        f"{verdict_block}\n"
     )
 
     if is_mlb:
-        def _hn(c):
-            return "zurdo" if c == "L" else ("diestro" if c == "R" else None)
+        pn_h  = ctx.get("pname_home", "TBD")
+        pn_a  = ctx.get("pname_away", "TBD")
+        er_h  = ctx.get("era_home",  4.50)
+        er_a  = ctx.get("era_away",  4.50)
+        fip_h = ctx.get("fip_home")
+        fip_a = ctx.get("fip_away")
+        hnd_h = ctx.get("hand_home")
+        hnd_a = ctx.get("hand_away")
+        pf_h  = ctx.get("pform_h")
+        pf_a  = ctx.get("pform_a")
+        sc_h  = ctx.get("statcast_home")
+        sc_a  = ctx.get("statcast_away")
 
-        pn_h   = ctx.get("pname_home", "TBD")
-        pn_a   = ctx.get("pname_away", "TBD")
-        er_h   = ctx.get("era_home",  4.50)
-        er_a   = ctx.get("era_away",  4.50)
-        fip_h  = ctx.get("fip_home")
-        fip_a  = ctx.get("fip_away")
-        sc_h   = ctx.get("statcast_home")
-        sc_a   = ctx.get("statcast_away")
-        hnd_h  = ctx.get("hand_home")
-        hnd_a  = ctx.get("hand_away")
-        pace_h = ctx.get("pitcher_pace_home")
-        pace_a = ctx.get("pitcher_pace_away")
-        bp_h   = ctx.get("bullpen_load_home")
-        bp_a   = ctx.get("bullpen_load_away")
-        pf_h   = ctx.get("pform_h")
-        pf_a   = ctx.get("pform_a")
+        p1 += f"{'─'*22}\n"
 
-        h_ht = f" ({_hn(hnd_h)})" if _hn(hnd_h) else ""
-        a_ht = f" ({_hn(hnd_a)})" if _hn(hnd_a) else ""
+        # Pitchers compactos
+        p1 += _pitcher_line(pn_h, er_h, fip_h, hnd_h, pf_h, "🔵") + "\n"
+        sc_h_blk = _statcast_alert_block(pn_h, sc_h, er_h)
+        if sc_h_blk:
+            p1 += sc_h_blk
+        p1 += _pitcher_line(pn_a, er_a, fip_a, hnd_a, pf_a, "🔴") + "\n"
+        sc_a_blk = _statcast_alert_block(pn_a, sc_a, er_a)
+        if sc_a_blk:
+            p1 += sc_a_blk
 
-        # ── Pitcher local ─────────────────────────────────────────────────────
-        p1 += f"🔵 <b>Pitcher {home_es}</b>: {pn_h}{h_ht}\n"
-        _k9_h_str = ""
-        try:
-            _ps_h = fetch_pitcher_stats(pn_h)
-            _k9_v = _ps_h.get("k9") if _ps_h else None
-            if _k9_v not in (None, "N/A", ""):
-                _k9_h_str = f"  |  K/9: {float(_k9_v):.1f}"
-        except Exception:
-            pass
-        p1 += f"   ERA: {er_h:.2f} — {_era_label(er_h)}{_k9_h_str}\n"
-        if fip_h is not None:
-            p1 += f"   FIP: {fip_h:.2f} — {_era_label(fip_h)}\n"
-        if pace_h:
-            p1 += f"   Ritmo: {pace_h['avg_pi']} pitches/entrada"
-            if pace_h.get("flag"):
-                p1 += f" {pace_h['flag']}"
-            p1 += "\n"
-        if pf_h:
-            eras_str = " → ".join(str(e) for e in pf_h["eras"])
-            p1 += f"   Forma: {pf_h['trend']} | {eras_str}\n"
-        p1 += _statcast_alert_block(pn_h, sc_h, er_h)
-        # Splits bateadores visitantes vs este pitcher
-        for lr in ctx.get("lr_notes", []):
-            if lr.get("lineup") == away and lr.get("verdict", "normal") != "normal":
-                avg_pct = f"{lr['avg']:.3f}".lstrip("0")
-                p1 += (
-                    f"   ⚔️ {away_es} batea {avg_pct} vs {lr['hand']}s"
-                    f" → {lr['verdict']} (favorece {_es(lr['favor'])})\n"
-                )
-
-        # ── Pitcher visitante ─────────────────────────────────────────────────
-        p1 += f"🔴 <b>Pitcher {away_es}</b>: {pn_a}{a_ht}\n"
-        _k9_a_str = ""
-        try:
-            _ps_a = fetch_pitcher_stats(pn_a)
-            _k9_v_a = _ps_a.get("k9") if _ps_a else None
-            if _k9_v_a not in (None, "N/A", ""):
-                _k9_a_str = f"  |  K/9: {float(_k9_v_a):.1f}"
-        except Exception:
-            pass
-        p1 += f"   ERA: {er_a:.2f} — {_era_label(er_a)}{_k9_a_str}\n"
-        if fip_a is not None:
-            p1 += f"   FIP: {fip_a:.2f} — {_era_label(fip_a)}\n"
-        if pace_a:
-            p1 += f"   Ritmo: {pace_a['avg_pi']} pitches/entrada"
-            if pace_a.get("flag"):
-                p1 += f" {pace_a['flag']}"
-            p1 += "\n"
-        if pf_a:
-            eras_str = " → ".join(str(e) for e in pf_a["eras"])
-            p1 += f"   Forma: {pf_a['trend']} | {eras_str}\n"
-        p1 += _statcast_alert_block(pn_a, sc_a, er_a)
-        # Splits bateadores locales vs este pitcher
-        for lr in ctx.get("lr_notes", []):
-            if lr.get("lineup") == home and lr.get("verdict", "normal") != "normal":
-                avg_pct = f"{lr['avg']:.3f}".lstrip("0")
-                p1 += (
-                    f"   ⚔️ {home_es} batea {avg_pct} vs {lr['hand']}s"
-                    f" → {lr['verdict']} (favorece {_es(lr['favor'])})\n"
-                )
-
-        # ── Bullpen ───────────────────────────────────────────────────────────
+        # Bullpen compacto
         try:
             _bpera_h, _ = fetch_bullpen_era(home)
             _bpera_a, _ = fetch_bullpen_era(away)
-            p1 += f"⚾ <b>Bullpen ERA</b>: {home_es} {_bpera_h:.2f} | {away_es} {_bpera_a:.2f}\n"
+            p1 += f"⚾ Bullpen ERA: {home_es} {_bpera_h:.2f} | {away_es} {_bpera_a:.2f}\n"
         except Exception:
             pass
+        bp_h = ctx.get("bullpen_load_home")
+        bp_a = ctx.get("bullpen_load_away")
         if bp_h or bp_a:
-            p1 += "⚾ <b>Bullpen últimos 3 días</b>\n"
-            if bp_h:
-                p1 += f"   {home_es}: {bp_h['ip_3d']} inn"
-                if bp_h.get("flag"):
-                    p1 += f" {bp_h['flag']}"
-                p1 += "\n"
-            if bp_a:
-                p1 += f"   {away_es}: {bp_a['ip_3d']} inn"
-                if bp_a.get("flag"):
-                    p1 += f" {bp_a['flag']}"
-                p1 += "\n"
+            for _te, _bp in [(home_es, bp_h), (away_es, bp_a)]:
+                if _bp:
+                    flag = f" {_bp['flag']}" if _bp.get("flag") else ""
+                    p1 += f"   {_te}: {_bp['ip_3d']} inn últimos 3 días{flag}\n"
 
-        # ── Bateo + últimos juegos ────────────────────────────────────────────
-        if "rs_home" in ctx:
-            p1 += (
-                f"⚾ {home_es} — anota {ctx['rs_home']} | recibe {ctx['ra_home']} /juego\n"
-                f"⚾ {away_es} — anota {ctx['rs_away']} | recibe {ctx['ra_away']} /juego\n"
-            )
+        p1 += f"{'─'*22}\n"
+
+        # Stats clave
+        if ctx.get("rs_home"):
+            p1 += f"📊 {home_es}: anota {ctx['rs_home']} | recibe {ctx['ra_home']} /juego\n"
+            p1 += f"📊 {away_es}: anota {ctx['rs_away']} | recibe {ctx['ra_away']} /juego\n"
+
+        # Bateo compacto
         for _t, _te, _bk in ((home, home_es, "bat_home"), (away, away_es, "bat_away")):
             bat = ctx.get(_bk)
             if bat:
                 ops = bat.get("ops")
-                p1 += f"🏏 <b>Bateo {_te}</b>: AVG {bat['avg']:.3f}"
-                if ops is not None:
-                    p1 += f"  |  OPS {ops:.3f} ({_ops_label(ops)})"
-                p1 += "\n"
-                if bat.get("k_pct") is not None:
-                    p1 += f"   Ponchados: {bat['k_pct']:.0f}%\n"
-                ins = _batting_insight(_t, ops, bat.get("k_pct"))
-                if ins:
-                    p1 += f"{ins}\n"
-            try:
-                recent = fetch_mlb_team_recent(_t)
-                if recent and recent.get("results"):
-                    rs_str = " | ".join(
-                        f"{_result_to_es(r)} {sc}" for r, sc in recent["results"]
-                    )
-                    p1 += (
-                        f"📋 {_te} últimos {len(recent['results'])} juegos:\n"
-                        f"   {rs_str}\n"
-                        f"   Balance: {recent['wins']}G — {recent['losses']}P\n"
-                    )
-            except Exception:
-                pass
+                kp  = bat.get("k_pct")
+                parts = [f"AVG {bat['avg']:.3f}"]
+                if ops:
+                    parts.append(f"OPS {ops:.3f} ({_ops_label(ops)})")
+                if kp:
+                    parts.append(f"K% {kp:.0f}%")
+                p1 += f"🏏 {_te}: {' | '.join(parts)}\n"
 
-        # ── Récord local/visitante ────────────────────────────────────────────
-        hs  = ctx.get("h_splits") or {}
-        as_ = ctx.get("a_splits") or {}
-        if hs.get("home_wpct") is not None or as_.get("away_wpct") is not None:
-            p1 += "📈 <b>Récord de locación</b>\n"
-            if hs.get("home_wpct") is not None:
-                p1 += (
-                    f"   🏠 {home_es} en casa: {hs['home_wpct']*100:.0f}%"
-                    f" | Anota {hs.get('home_rs','?')} | Recibe {hs.get('home_ra','?')}\n"
-                )
-            if as_.get("away_wpct") is not None:
-                p1 += (
-                    f"   🚗 {away_es} de visita: {as_['away_wpct']*100:.0f}%"
-                    f" | Anota {as_.get('away_rs','?')} | Recibe {as_.get('away_ra','?')}\n"
-                )
-
-        # ── Árbitro de home plate ─────────────────────────────────────────────
-        ump = ctx.get("umpire")
-        if ump and ump.get("name"):
-            tend = ump.get("tendency", "NEUTRAL")
-            if tend == "OVER":
-                ump_desc = "zona cerrada (apretada) — favorece hits y OVER"
-            elif tend == "UNDER":
-                ump_desc = "zona amplia (expandida) — favorece ponches y UNDER"
-            else:
-                ump_desc = "zona normal — sin tendencia marcada"
-            p1 += f"👨‍⚖️ Árbitro: {ump['name']} — {ump_desc}\n"
-
-        # ── Pinnacle, clima, línea, lesionados ────────────────────────────────
+        # Pinnacle
         pin = ctx.get("pinnacle_odds")
         if pin:
             raw_h = 1.0 / max(pin["home"], 1.001)
             raw_a = 1.0 / max(pin["away"], 1.001)
             tot   = raw_h + raw_a
-            p1 += (
-                f"📌 Pinnacle — {home_es}: {pin['home']:+.0f} ({round(raw_h/tot*100,1)}%)"
-                f"  |  {away_es}: {pin['away']:+.0f} ({round(raw_a/tot*100,1)}%)\n"
-            )
+            p1 += (f"📌 Pinnacle: {home_es} {round(raw_h/tot*100,1)}%"
+                   f" | {away_es} {round(raw_a/tot*100,1)}%\n")
+
+        # Clima
         if ctx.get("temp_label"):
             p1 += f"{ctx['temp_label']}\n"
         if ctx.get("wind_info"):
             p1 += f"💨 {ctx['wind_info']}\n"
-        if ctx.get("line_moved") and ctx.get("line_note"):
-            p1 += f"📉 {ctx['line_note']}\n"
+
+        # Árbitro compacto
+        ump = ctx.get("umpire")
+        if ump and ump.get("name"):
+            tend = ump.get("tendency", "NEUTRAL")
+            ump_es = ("zona cerrada → Over" if tend == "OVER"
+                      else "zona amplia → Under" if tend == "UNDER"
+                      else "zona normal")
+            p1 += f"👨\u200d⚖️ Árbitro: {ump['name']} — {ump_es}\n"
+
+        # Lesionados compacto
         for til, ils in ctx.get("il_data", {}).items():
             if ils:
-                p1 += f"🤕 Lesionados ({_es(til)}): {', '.join(ils[:4])}\n"
+                p1 += f"🤕 {_es(til)}: {', '.join(ils[:3])}\n"
+
+        # Movimiento de línea
+        if ctx.get("line_moved") and ctx.get("line_note"):
+            p1 += f"📉 {ctx['line_note']}\n"
+
+        # Récord de locación compacto
+        hs  = ctx.get("h_splits") or {}
+        as_ = ctx.get("a_splits") or {}
+        if hs.get("home_wpct") is not None:
+            p1 += (f"🏠 {home_es} casa: {round(hs['home_wpct']*100)}%"
+                   f" | anota {hs.get('home_rs','?')} | recibe {hs.get('home_ra','?')}\n")
+        if as_.get("away_wpct") is not None:
+            p1 += (f"🚗 {away_es} visita: {round(as_['away_wpct']*100)}%"
+                   f" | anota {as_.get('away_rs','?')} | recibe {as_.get('away_ra','?')}\n")
 
     else:
-        # Soccer context
-        p1 += (
-            f"💪 {home_es}: {_elo_tier(ctx.get('elo_home', 1500))}\n"
-            f"💪 {away_es}: {_elo_tier(ctx.get('elo_away', 1500))}\n"
-            f"🤝 Empate: {ctx.get('p_draw','?')}%\n"
-        )
+        # Soccer compacto
+        p1 += f"{'─'*22}\n"
+        p1 += f"💪 {home_es}: {_elo_tier(ctx.get('elo_home', 1500))}\n"
+        p1 += f"💪 {away_es}: {_elo_tier(ctx.get('elo_away', 1500))}\n"
+        p1 += f"🤝 Prob. empate: {ctx.get('p_draw','?')}%\n"
         for sf_key, tname_es in (("sform_h", home_es), ("sform_a", away_es)):
             sf = ctx.get(sf_key)
             if sf:
-                rs = " | ".join(_result_to_es(r) for r in sf["results"])
-                p1 += (
-                    f"📋 {tname_es} — últimos {sf['n']} partidos:\n"
-                    f"   {rs}\n"
-                    f"   ⚽ {sf['gf_pg']} goles/partido | 🛡️ {sf['ga_pg']} recibidos\n"
-                )
-        if ctx.get("temp_label_s"):
-            p1 += f"{ctx['temp_label_s']}\n"
-        if ctx.get("line_moved") and ctx.get("line_note"):
-            p1 += f"📉 {ctx['line_note']}\n"
+                rs = " ".join(_result_to_es(r) for r in sf["results"])
+                p1 += (f"📋 {tname_es}: {rs}"
+                       f" | {sf['gf_pg']}g/p anota | {sf['ga_pg']}g/p recibe\n")
+        pin = ctx.get("pinnacle_odds")
+        if pin:
+            raw_h = 1.0 / max(pin["home"], 1.001)
+            raw_a = 1.0 / max(pin["away"], 1.001)
+            tot   = raw_h + raw_a
+            p1 += (f"📌 Pinnacle: {home_es} {round(raw_h/tot*100,1)}%"
+                   f" | {away_es} {round(raw_a/tot*100,1)}%\n")
         ref = ctx.get("referee")
         if ref and ref.get("name"):
             p1 += f"🟨 Árbitro: {ref['name']} — {ref.get('tendency','?')}\n"
+        if ctx.get("line_moved") and ctx.get("line_note"):
+            p1 += f"📉 {ctx['line_note']}\n"
 
-    # ─── TODOS LOS MERCADOS ───────────────────────────────────────────────────
-    cand_ev_map = {
-        c["label"]: {"ev_pct": c["ev_pct"], "prob": c["true_prob"]}
-        for c in (result.get("candidates") or [])
-    }
-    p1 += f"{_DIV}\n📊 TODOS LOS MERCADOS\n{_DIV}\n"
+    # ── MERCADOS tabla limpia ─────────────────────────────────────────────────
+    p1 += f"{'─'*22}\n📊 <b>MERCADOS</b>\n{'─'*22}\n"
     _has_k = False
     if all_mkts:
-        _mkts_shown = 0
-        try:
-            for lbl, m in all_mkts.items():
-                bk = m.get("book", "")
-                # Safety net: skip any market whose book is not US-accessible.
-                # "Props" is an internal marker for K/hit props (no single-book origin).
-                if bk != "Props" and not _is_us_book(bk):
-                    continue
-                # ✅ only when the label was a formal pick AND the book is US-accessible
-                is_pick  = lbl in cand_lbs
-                edge     = " ✅" if is_pick else ""
-                ev_display   = cand_ev_map.get(lbl, {}).get("ev_pct", m.get("ev_pct", 0))
-                prob_display = cand_ev_map.get(lbl, {}).get("prob", m.get("prob", 0))
-                ev_s     = f"+{ev_display:.1f}%" if ev_display >= 0 else f"{ev_display:.1f}%"
-                prob_pc  = round(prob_display * 100)
-                odds_val = m.get("odds", 0)
-                p1 += f"  {lbl}: {prob_pc}% | {ev_s} | {odds_val:.2f} @ {bk}{edge}\n"
-                reason = _market_reason(lbl, ctx, home)
-                if reason:
-                    p1 += f"   <i>{reason}</i>\n"
-                _mkts_shown += 1
-                if "⚡" in lbl:
-                    _has_k = True
-        except Exception as _mle:
-            print(f"  ⚠️  build_analizar_text markets loop: {_mle}")
-        # Fallback: all existing markets were from non-US books and got filtered
-        if _mkts_shown == 0:
-            p1 += "  ℹ️ Sin línea disponible en libros USA para este partido.\n"
+        for lbl, m in all_mkts.items():
+            bk = m.get("book", "")
+            if bk != "Props" and not _is_us_book(bk):
+                continue
+            is_pick = lbl in cand_lbs
+            p1 += _mkt_row(lbl, m, is_pick) + "\n"
+            if "⚡" in lbl:
+                _has_k = True
         if not _has_k and is_mlb:
-            p1 += "  ⚡ Props K: sin K/9 confirmado >8.5 — se prefiere ML\n"
-    elif cands:
-        for idx, c in enumerate(cands):
-            rank = (["1️⃣", "2️⃣", "3️⃣"][idx] if idx < 3 else "🔹")
-            safe = "\n   ✅ Pick más seguro" if c.get("safest") else ""
-            p1 += (
-                f"{rank} <b>{c['label']}</b>\n"
-                f"   EV: +{c['ev_pct']:.1f}%  |  Prob: {round(c['true_prob']*100)}%{safe}\n"
-                f"   💰 {c['odds']} @ {c['book']}\n"
-                f"   Stake: ${c['stake']:.0f}\n"
-            )
+            p1 += "⚡ Props K: sin K/9 >8.5 confirmado — preferir ML\n"
     else:
-        _any_pos_ev = any(m["ev_pct"] > 0 for m in all_mkts.values())
-        if not _any_pos_ev:
-            p1 += (
-                "⚠️ <b>Sin picks con edge positivo</b>\n"
-                "   El modelo no encuentra valor en la línea actual.\n"
-                "   Revisa el contexto de arriba y decide según tu criterio.\n"
-                "   (Apostar sin edge esperado es -EV a largo plazo)\n"
-            )
+        p1 += "Sin odds disponibles en este momento\n"
 
-    # ─── PARTE 2: Panel de expertos + recomendación ───────────────────────────
+    # ── PARTE 2: Panel + Recomendación + Consejo ──────────────────────────────
     experts   = ci.get("_expertos_detalle") or []
     _ci_icons = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}
 
-    p2 = f"{_DIV}\n🎓 PANEL DE EXPERTOS\n{_DIV}\n"
+    p2 = f"{'─'*22}\n🎓 <b>PANEL DE EXPERTOS</b>\n{'─'*22}\n"
+
     if experts:
         for ex in experts:
-            ap = ("✅ APOSTAR" if ex.get("apostar") is True
-                  else ("❌ PASAR" if ex.get("apostar") is False else "⚪ N/D"))
+            ap = ("✅" if ex.get("apostar") is True
+                  else ("❌" if ex.get("apostar") is False else "⚪"))
             ec = _ci_icons.get(ex.get("confianza", ""), "⚪")
-            er = ex.get("razonamiento") or "no disponible"
-            p2 += f"<b>{ex['nombre']}</b> {ec}{ex.get('confianza','?')} — {ap}\n<i>{er}</i>\n\n"
+            er = (ex.get("razonamiento") or "sin razonamiento")[:120]
+            p2 += f"<b>{ex['nombre']}</b> {ap} {ec}\n<i>{er}</i>\n\n"
     else:
-        p2 += "Sin análisis de expertos disponible.\n"
-
-    extra_panels = ctx.get("_extra_panels", [])
-    if extra_panels:
-        p2 += f"\n{_DIV}\n🔍 OTROS CANDIDATOS EVALUADOS\n{_DIV}\n"
-        for ep in extra_panels:
-            ep_ci = ep.get("panel") or {}
-            ep_ap = "✅ APOSTAR" if ep_ci.get("apostar") is True else "❌ PASAR"
-            ep_cc = ep_ci.get("confianza", "N/D")
-            ep_ic = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(ep_cc, "⚪")
-            ep_r = (ep_ci.get("razonamiento") or "")[:150]
-            p2 += (
-                f"<b>{ep['label']}</b>\n"
-                f"EV: +{ep['ev_pct']:.1f}%  |  Prob: {round(ep['true_prob']*100)}%  "
-                f"|  {ep['odds']:.2f} @ Bovada\n"
-                f"{ep_ic} Panel: {ep_cc} — {ep_ap}\n"
-                f"<i>{ep_r}</i>\n\n"
-            )
-
-    final_apostar = ci.get("apostar")
-    panel_razon   = ci.get("razonamiento") or ""
-    best = cands[0] if cands else {}
-
-    p2 += f"{_DIV}\n"
-    if ci:
-        rec_icon = ("✅ APOSTAR" if final_apostar is True
-                    else ("❌ PASAR" if final_apostar is False else "⚠️ VERIFICAR"))
-        p2 += f"📋 <b>RECOMENDACIÓN FINAL: {rec_icon}</b>\n"
-        if best:
-            p2 += (
-                f"Pick: <b>{best.get('label', '?')}</b>\n"
-                f"Stake: <b>${best.get('stake', 0):.0f}</b> @ {best.get('book','?')}\n"
-                f"EV: +{best.get('ev_pct', 0):.1f}%  |  Prob: {round(best.get('true_prob', 0)*100)}%\n"
-            )
-        elif all_mkts:
-            # High-EV panel mode — no formal pick but panel evaluated a high-EV market
-            _hev_lbl_r = result.get("best_label") or ""
-            _hev_ev_r  = result.get("best_ev", 0.0)
-            if _hev_lbl_r:
-                p2 += (
-                    f"Mercado analizado: <b>{_hev_lbl_r}</b>\n"
-                    f"EV detectado: +{_hev_ev_r:.1f}% — <i>no superó umbral de prob mínima</i>\n"
-                    f"⚠️ Apostar solo si la línea ha mejorado o confirmas la cuota en el libro.\n"
-                )
-        if panel_razon:
-            p2 += f"<i>{panel_razon}</i>\n"
-    else:
-        _any_pos_ev_r = any(m["ev_pct"] > 0 for m in all_mkts.values())
-        if _any_pos_ev_r:
-            p2 += (
-                "📋 <b>MERCADOS CON EV POSITIVO DETECTADOS</b>\n"
-                "Ningún mercado superó el umbral de probabilidad mínima.\n"
-                "Los mercados con EV positivo están listados en la sección de arriba.\n"
-                "Verifica la línea en el libro antes de considerar una apuesta.\n"
-            )
+        # Explicar POR QUÉ no corrió el panel
+        if not cands and all_mkts:
+            pos = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
+            if pos:
+                bl, bm = max(pos, key=lambda x: x[1]["ev_pct"])
+                bl_c = (bl.replace("🔵 ", "").replace("🔴 ", "")
+                          .replace("📈 ", "").replace("📉 ", ""))
+                prob_v = round(bm.get("prob", 0) * 100)
+                p2 += (f"ℹ️ Panel no activado\n"
+                       f"   Mejor candidato: {bl_c}\n"
+                       f"   EV +{bm['ev_pct']:.1f}% | Prob {prob_v}%\n"
+                       f"   Necesita: EV >5% y prob >62% para activar panel\n\n")
+            else:
+                p2 += "ℹ️ Panel no activado — todos los mercados con EV negativo.\n\n"
         else:
-            p2 += (
-                "📋 <b>RECOMENDACIÓN: ⚠️ SIN PICKS CON EDGE</b>\n"
-                "El modelo no encontró valor en la línea actual.\n"
-                "El contexto de arriba tiene toda la info disponible.\n"
-                "Usa tu criterio para decidir si apostar.\n"
-            )
+            p2 += "ℹ️ Sin respuesta del panel de expertos.\n\n"
+
+    # Recomendación
+    panel_razon = (ci.get("razonamiento") or "").strip()
+    best_c = cands[0] if cands else {}
+
+    p2 += f"{'─'*22}\n"
+    if final_apostar is True and best_c:
+        bl_c = (best_c.get("label", "?")
+                .replace("🔵 ", "").replace("🔴 ", "")
+                .replace("📈 ", "").replace("📉 ", ""))
+        p2 += (f"📋 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
+               f"Pick: <b>{bl_c}</b>\n"
+               f"Stake: <b>${best_c.get('stake',0):.0f}</b>"
+               f" @ {best_c.get('odds',0):.2f} {best_c.get('book','')}\n"
+               f"EV: +{best_c.get('ev_pct',0):.1f}%"
+               f" | Prob: {round(best_c.get('true_prob',0)*100)}%\n")
+        if panel_razon:
+            p2 += f"<i>{panel_razon[:200]}</i>\n"
+    elif final_apostar is False:
+        p2 += f"📋 <b>RECOMENDACIÓN: ❌ PASAR</b>\n"
+        if panel_razon:
+            p2 += f"<i>{panel_razon[:200]}</i>\n"
+    else:
+        p2 += f"📋 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
+        if panel_razon:
+            p2 += f"<i>{panel_razon[:200]}</i>\n"
+
+    # Consejo — siempre mostrado
+    p2 += f"{'─'*22}\n"
+    if not cands and all_mkts:
+        pos = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
+        if pos:
+            bl, bm = max(pos, key=lambda x: x[1]["ev_pct"])
+            bl_c = (bl.replace("🔵 ", "").replace("🔴 ", "")
+                      .replace("📈 ", "").replace("📉 ", ""))
+            p2 += (f"💡 <b>Si apostas de todas formas:</b>\n"
+                   f"   {bl_c} @ {bm['odds']:.2f} {bm['book']}\n"
+                   f"   El modelo no lo recomienda — apuesta con criterio propio")
+        else:
+            p2 += "💡 Mejor pasar este juego — sin ventaja detectada hoy"
+    elif cands and final_apostar is True:
+        p2 += f"💡 Apuesta antes de {gt} en Bovada"
+    else:
+        p2 += "💡 Espera el próximo partido con mejor edge"
 
     return [p1, p2]
 
