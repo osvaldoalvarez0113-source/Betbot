@@ -520,6 +520,7 @@ def _update_monthly_kelly_mult():
         cur_month = datetime.now(ET).strftime("%Y-%m")
         wins = losses = 0
         pnl_sum = 0.0
+        stake_sum = 0.0
         with open("backtest_log.csv", "r", newline="", encoding="utf-8") as _f:
             for row in _csv.DictReader(_f):
                 if not row.get("date", "").startswith(cur_month):
@@ -530,14 +531,15 @@ def _update_monthly_kelly_mult():
                 elif result == "LOSS":
                     losses += 1
                 try:
-                    pnl_sum += float(row.get("pnl", 0) or 0)
+                    pnl_sum   += float(row.get("pnl",   0) or 0)
+                    stake_sum += float(row.get("stake", 0) or 0)
                 except Exception:
                     pass
         total_bets = wins + losses
         if total_bets < 10:
             print(f"  ℹ️  Kelly mensual: solo {total_bets} apuestas en {cur_month} — sin ajuste")
             return
-        roi = pnl_sum / total_bets * 100   # assumes $1 flat stake per bet
+        roi = (pnl_sum / stake_sum * 100) if stake_sum > 0 else 0.0  # real ROI vs total staked
         if roi > 5.0:
             _kelly_monthly_mult = 1.1
             print(f"  📈 ROI mensual +{roi:.1f}% > objetivo 5% → Kelly × 1.10")
@@ -1087,25 +1089,6 @@ def _patch_mlb_commence_times(games: list) -> None:
     if patched:
         print(f"  🕐 {patched} tiempo(s) MLB corregido(s) desde MLB Stats API")
 
-    for g in games:
-        home_api = g.get("home_team", "")
-        real_times = _fetch_mlb_real_times(date_str)
-        for key_name in real_times.keys():
-            if any(w in key_name for w in home_api.lower().split()
-                   if len(w) > 3):
-                break
-        else:
-            candidates_home = [k for k in real_times.keys()
-                               if any(w in k for w in
-                               g.get("away_team", "").lower().split()
-                               if len(w) > 3)]
-            if candidates_home:
-                old_home = g["home_team"]
-                old_away = g["away_team"]
-                g["home_team"] = old_away
-                g["away_team"] = old_home
-                print(f"  🔄 Home/away corregido: {old_away} es LOCAL")
-
 def fetch_pitcher_stats(name):
     """Return dict with ERA, WHIP, K9 for a pitcher name."""
     empty = {"era": "N/A", "whip": "N/A", "k9": "N/A"}
@@ -1349,7 +1332,7 @@ def morning_report_mlb():
             _ra_a = away_bat['ra_pg'] if away_bat['ra_pg'] is not None else 'Sin datos'
 
             body = (
-                f"{away_es_r} @ {home_es_r}  |  {gtime[:16] if gtime != 'TBD' else 'TBD'}\n"
+                f"{away_es_r} @ {home_es_r}  |  {_fmt_et(gtime) if gtime != 'TBD' else 'TBD'}\n"
                 f"Lanzadores abridores:\n"
                 f"  {hp_name} (Local): Promedio de carreras {hp_stats['era']} | "
                 f"Base-runners por entrada {hp_stats['whip']} | "
@@ -1437,7 +1420,7 @@ def _elo_to_goals(elo_home: float, elo_away: float) -> tuple:
     HOME_BOOST = 0.10
     ELO_SCALE  = 500.0
     elo_ratio = (elo_home - elo_away) / ELO_SCALE
-    avg_h = BASE_GOALS * (1.0 + elo_ratio) + HOME_BOOST
+    avg_h = BASE_GOALS * (1.0 + elo_ratio)   # WC is neutral venue — no home boost
     avg_a = BASE_GOALS * (1.0 - elo_ratio)
     avg_h = max(0.40, min(3.50, avg_h))
     avg_a = max(0.40, min(3.50, avg_a))
@@ -1616,7 +1599,11 @@ def run_health_check():
                 timeout=8,
             )
             if r.status_code == 200:
-                results.append(("The Odds API",   "✅ funcionando"))
+                remaining  = r.headers.get("x-requests-remaining", "?")
+                used       = r.headers.get("x-requests-used", "?")
+                quota_note = f" ({remaining} restantes / {used} usadas)" if remaining != "?" else ""
+                quota_warn = " ⚠️ QUOTA BAJA" if remaining != "?" and int(remaining) < 500 else ""
+                results.append(("The Odds API", f"✅ funcionando{quota_warn}{quota_note}"))
                 _track_module("The Odds API", True)
             else:
                 raise ValueError(f"HTTP {r.status_code}")
@@ -2929,6 +2916,12 @@ def _detect_line_movement(game_obj: dict, home: str, away: str) -> "str | None":
     if a_impl is not None:
         snapshot["a_impl"] = a_impl
 
+    # prune stale entries older than today to prevent unbounded memory growth
+    _today_pfx = datetime.now(CDT).strftime("%Y-%m-%d")
+    _stale_keys = [_k for _k in list(_line_open_cache.keys()) if _today_pfx not in _k]
+    for _sk in _stale_keys:
+        del _line_open_cache[_sk]
+
     if not snapshot:
         return None
 
@@ -3862,6 +3855,8 @@ def fetch_bullpen_era(team_name: str, starter_era: float = 4.20) -> "tuple[float
     if ck in _bullpen_era_cache:
         return _bullpen_era_cache[ck]
 
+    tid = None   # initialize before try block to avoid NameError in except
+
     try:
         # ── 1. Resolve team ID ────────────────────────────────────────────
         if HAS_STATSAPI:
@@ -3979,6 +3974,8 @@ def fetch_bullpen_era(team_name: str, starter_era: float = 4.20) -> "tuple[float
     except Exception as _be:
         # Fallback: derive from team aggregate ERA without using starter_era algebra
         try:
+            if tid is None:
+                return 4.20, ""
             pit = _mlb_rest(f"/teams/{tid}/stats",
                             {"stats": "season", "group": "pitching", "season": MLB_YEAR})
             p_s = (pit.get("stats", [{}])[0].get("splits", [{}]) or [{}])[-1].get("stat", {})
@@ -4872,6 +4869,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         print(f"   ⏰ OMITIDO — fuera de ventana horaria")
         return None
 
+    f5_tot = None   # initialize here — only assigned in MLB branch
+    f5_h2h = {}     # initialize here — only assigned in MLB branch
     candidates  = []   # {label, true_prob, odds, book, ev_pct, kelly_pct, stake, safest}
     _all_evs: list = []   # [(label, ev_pct)] for every candidate tried, pass or fail
     _all_mkts:  dict = {}   # label → {prob, ev_pct, odds, book} — ALL markets evaluated
@@ -5775,7 +5774,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             # ── Mercados extendidos (F5, Hits, Ponches) ───────────────────────
             "f5_proj":   round((home_exp + away_exp) * 0.52, 2),
             "f5_h2h_ok": bool(f5_h2h),
-            "f5_tot_ok": bool(f5_tot) if "f5_tot" in dir() else False,
+            "f5_tot_ok": bool(f5_tot),
             "hits_proj": round(((bat_h.get("avg") or 0.250) * 30 +
                                 (bat_a.get("avg") or 0.250) * 30), 1) if bat_h and bat_a else None,
             "ko_proj_home": round(
@@ -7073,9 +7072,11 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
 
 def _market_reason(label: str, ctx: dict, home_team: str = "") -> str:
     """One-line reason for a market based on available context."""
+    if not ctx:
+        return ""
     u = label.upper()
-    h_era = ctx.get("era_home", 4.5)
-    a_era = ctx.get("era_away", 4.5)
+    h_era = float(ctx.get("era_home") or 4.5)
+    a_era = float(ctx.get("era_away") or 4.5)
     h_name = ctx.get("pname_home", "")
     a_name = ctx.get("pname_away", "")
     wind = ctx.get("wind_info", "")
@@ -8395,7 +8396,15 @@ def log_bankroll_entry(sport, match, market_type, stake, result, profit_loss):
 # CORE — ODDS FETCHING & LINE MOVEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_odds_api_429_count:   int               = 0
+_odds_api_pause_until: "datetime | None" = None
+
 def get_odds(sport_key):
+    global _odds_api_429_count, _odds_api_pause_until
+    if _odds_api_pause_until and datetime.now(pytz.utc) < _odds_api_pause_until:
+        _remaining = int((_odds_api_pause_until - datetime.now(pytz.utc)).total_seconds() / 60)
+        print(f"  ⏸️  Odds API pausada por quota — {_remaining} min restantes")
+        return []
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
@@ -8403,8 +8412,34 @@ def get_odds(sport_key):
                     "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
+        if r.status_code == 429:
+            _odds_api_429_count += 1
+            print(f"  ⚠️  Odds API 429 (intento {_odds_api_429_count}/3): {sport_key}")
+            if _odds_api_429_count >= 3:
+                _odds_api_pause_until = datetime.now(pytz.utc) + timedelta(minutes=30)
+                ntfy_post(
+                    "🚨 Odds API: Cuota Agotada",
+                    "3 errores 429 seguidos — pausando llamadas 30 minutos.\n"
+                    "El bot sigue corriendo sin nuevas odds hasta reactivarse.",
+                    "urgent"
+                )
+                print("  🛑 Odds API circuit breaker activado — 30 min pause")
+            return []
+        _odds_api_429_count = 0
+        _odds_api_pause_until = None
+        remaining = r.headers.get("x-requests-remaining", "")
+        if remaining and int(remaining) < 500:
+            print(f"  ⚠️  Odds API quota baja: {remaining} llamadas restantes este mes")
+            if int(remaining) < 100:
+                ntfy_post(
+                    "🚨 Quota API Crítica",
+                    f"Solo {remaining} llamadas restantes en Odds API este mes.\n"
+                    "Considera reducir INTERVAL o actualizar el plan.",
+                    "urgent"
+                )
         return r.json() if r.status_code == 200 else []
-    except Exception:
+    except Exception as _e:
+        print(f"  ⚠️  get_odds [{sport_key}]: {_e}")
         return []
 
 def load_previous_odds():
@@ -8507,9 +8542,13 @@ def notify_sharp_money(sharp_moves):
             continue
         sport  = m.get("sport", "")
         emoji  = _sport_emoji(sport)
-        team   = m["team"]
-        opp    = away if team == home else home
-        arrow  = "▼" if m["odds_now"] < m["odds_prev"] else "▲"
+        team     = m["team"]
+        opp      = away if team == home else home
+        team_es  = _es(team)
+        opp_es   = _es(opp)
+        home_es  = _es(home)
+        away_es  = _es(away)
+        arrow    = "▼" if m["odds_now"] < m["odds_prev"] else "▲"
 
         signal = m.get("signal", "")
         if m.get("public_pct"):
@@ -8538,8 +8577,8 @@ def notify_sharp_money(sharp_moves):
             f"{context_lines}"
         )
         body = _two_layer_body(l1, l2)
-        ntfy_post(f"⚡ SHARP | {team} | {m['match']}", body, "high")
-        print(f"  ⚡ Sharp: {team} en {m['match']} ({m['pct']}% movimiento)")
+        ntfy_post(f"⚡ SHARP | {team_es} | {home_es} vs {away_es}", body, "high")
+        print(f"  ⚡ Sharp: {team_es} en {m['match']} ({m['pct']}% movimiento)")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UPGRADE PACKAGE — 10 MODULES
@@ -10146,7 +10185,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     inconsistencias = []
 
     for i, (nombre, extra) in enumerate(_EXPERTOS):
-        _panel_model = CLAUDE_PANEL_MODEL if i == 2 else "claude-haiku-4-5-20251001"
+        _panel_model = "claude-haiku-4-5-20251001"  # all 3 experts on Haiku for cost control
         res = analyze_with_claude(game_data, sport, _extra_system=extra,
                                   _model=_panel_model)
         if res is None:
@@ -10260,7 +10299,15 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
                 messages=[{"role": "user", "content": _synthesis_prompt if _expert_lines else json.dumps(game_data, default=str, ensure_ascii=False)[:1000]}],
             )
             _syn_raw = _syn_msg.content[0].text.strip()
-            _syn_raw = _syn_raw.replace("```json", "").replace("```", "").replace("{", "").replace("}", "").replace('"apostar":', "").replace('"confianza":', "").replace('"razonamiento":', "").strip().strip('"').strip()
+            import re as _re_syn
+            _syn_raw = _re_syn.sub(r'```[\w]*', '', _syn_raw)
+            _syn_raw = _re_syn.sub(r'[{}\[\]]', '', _syn_raw)
+            _syn_raw = _re_syn.sub(r'"(apostar|confianza|razonamiento|pick|line)"\s*:\s*', '', _syn_raw)
+            _syn_raw = _re_syn.sub(r'(true|false|null)', '', _syn_raw)
+            _syn_raw = _syn_raw.strip().strip('"').strip()
+            if _syn_raw.startswith('{') or len(_syn_raw) > 400:
+                _sentences = [s.strip() for s in _syn_raw.split('.') if s.strip()]
+                _syn_raw = '. '.join(_sentences[:2]) + ('.' if _sentences else '')
             _syn = {"razonamiento": _syn_raw}
         except Exception as _syne:
             print(f"  ⚠️  Synthesis error: {_syne}")
@@ -10393,8 +10440,10 @@ def fetch_soccer_rest_days(team: str) -> tuple:
         if not last_date_s:
             _soc_rest_cache[ck] = (0, 0.0, "")
             return (0, 0.0, "")
-        last_dt = datetime.fromisoformat(last_date_s.replace("Z", "+00:00"))
-        days    = (datetime.now(pytz.utc) - last_dt).days
+        last_dt   = datetime.fromisoformat(last_date_s.replace("Z", "+00:00"))
+        _now_utc  = datetime.now(pytz.utc)
+        _last_utc = last_dt if last_dt.tzinfo else pytz.utc.localize(last_dt)
+        days      = (_now_utc - _last_utc).days
         if days <= 3:
             adj  = +0.2
             note = (f"⚠️ Solo {days}d descanso — {team}\n"
@@ -11068,6 +11117,11 @@ def send_weekly_summary():
             pass
 
         ntfy_post("📊 RESUMEN SEMANAL", body, "default")
+        if _tg_broadcast_fn:
+            try:
+                _tg_broadcast_fn(f"📊 <b>RESUMEN SEMANAL</b>\n{_DIV}\n{body[:3800]}")
+            except Exception as _tge:
+                print(f"  ⚠️  Telegram weekly summary error: {_tge}")
         print("  📊 Resumen semanal ntfy enviado")
     except Exception as e:
         print(f"  ⚠️  send_weekly_summary error: {e}")
@@ -11589,6 +11643,16 @@ def compute_bankroll_mult() -> float:
         f"{_bankroll_mult}× 📈"
     )
     print(f"  💼 Bankroll mult: {tier}  (${br:,.2f})")
+    _prev = getattr(compute_bankroll_mult, '_prev_mult', 1.0)
+    if _bankroll_mult > _prev and _bankroll_mult >= 1.2:
+        ntfy_post(
+            "🎉 Bankroll: Nuevo Nivel",
+            f"💰 Bankroll: ${br:,.2f}\n"
+            f"📈 Stakes aumentados a ×{_bankroll_mult:.1f}\n"
+            f"🔥 El modelo apostará más en picks de alta confianza",
+            "default"
+        )
+    compute_bankroll_mult._prev_mult = _bankroll_mult
     return _bankroll_mult
 
 
@@ -12212,21 +12276,27 @@ def send_night_summary():
             f"   en el reporte de las 8 AM"
         )
         ntfy_post("🌙 RESUMEN DEL DÍA", body, "default")
+        if _tg_broadcast_fn:
+            try:
+                _tg_broadcast_fn(f"🌙 <b>RESUMEN DEL DÍA</b>\n{_DIV}\n{body[:3800]}")
+            except Exception as _tge:
+                print(f"  ⚠️  Telegram night summary error: {_tge}")
         print(f"  🌙 Resumen nocturno enviado ({len(today_bets)} picks)")
     except Exception as e:
         print(f"  ⚠️  send_night_summary error: {e}")
 
 
 def check_midnight_reset():
-    global alerted_bets, daily_bets, last_reset, _sent_alerts
+    global alerted_bets, daily_bets, last_reset, _sent_alerts, alerted_game_analysis
     today = datetime.now(CDT).date()
     if today != last_reset:
         print(f"\n🌙 Midnight reset — sending daily summary...")
         send_daily_summary()
-        alerted_bets  = set()
-        _sent_alerts  = {}
-        daily_bets    = []
-        last_reset    = today
+        alerted_bets          = set()
+        alerted_game_analysis = set()   # reset daily to avoid unbounded growth
+        _sent_alerts          = {}
+        daily_bets            = []
+        last_reset            = today
         compute_bankroll_mult()   # Module P: update stake multiplier
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -12789,13 +12859,15 @@ def _track_line_history(game_id: str, home: str, away: str,
         )
         for _rlm_msg in _rlm_alerts:
             print(f"  🔄 RLM: {_rlm_msg[:120]}")
-            try:
-                ntfy_post(
-                    f"🔄 MOVIMIENTO INVERSO | {_es(away)} @ {_es(home)}",
-                    _rlm_msg, priority="high"
-                )
-            except Exception:
-                pass
+            _rlm_dedup_key = f"rlm_{game_id}_{datetime.now(ET).strftime('%Y-%m-%d')}"
+            if _should_alert(_rlm_dedup_key, edge=0):
+                try:
+                    ntfy_post(
+                        f"🔄 MOVIMIENTO INVERSO | {_es(away)} @ {_es(home)}",
+                        _rlm_msg, priority="high"
+                    )
+                except Exception:
+                    pass
 
     _line_history.setdefault(game_id, []).append(entry)
 
@@ -13785,6 +13857,8 @@ if __name__ == "__main__":
     print("🤖 BetBot Pro — starting...")
     scan = 1
     _load_stats_disk_cache()  # load persistent stats cache (survives Railway restarts)
+    _daily_exposure, _daily_exposure_date = _load_daily_exposure()
+    print(f"  💼 Exposición diaria restaurada: ${_daily_exposure:.2f} (fecha: {_daily_exposure_date})")
     compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
     try:
         _check_pinnacle_availability()   # Module 11: verify Pinnacle in Odds API plan
