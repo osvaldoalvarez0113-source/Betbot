@@ -10225,7 +10225,12 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     if _expert_lines:
         _all_agree = (votos_favor == len([r for r in resultados if r is not None]))
         _agree_note = " Los tres coinciden — sintetiza en una sola línea." if _all_agree else ""
+        _pick_raw  = base.get("pick", "N/D")
+        _match_str = game_data.get("match", "")
+        _pick_str  = f"{_pick_raw} ({_match_str})" if _match_str else _pick_raw
         _synthesis_prompt = (
+            f"IMPORTANTE: El pick a evaluar es exactamente: {_pick_str}\n"
+            "Asegúrate que tu recomendación mencione ESE pick específico, no el equipo contrario ni otro mercado.\n\n"
             "INSTRUCCIÓN ESPECIAL — SÍNTESIS FINAL DEL PANEL:\n"
             "Eres un amigo que apostó béisbol toda su vida. Acabas de escuchar a tres expertos "
             "y ahora le explicas a otro amigo, en voz alta, qué harías y por qué. "
