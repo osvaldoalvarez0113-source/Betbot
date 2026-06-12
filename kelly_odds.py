@@ -7272,11 +7272,11 @@ def build_analizar_text(result: dict) -> list:
         p1 += f"{'─'*22}\n"
 
         # Pitchers compactos
-        p1 += _pitcher_line(pn_h, er_h, fip_h, hnd_h, pf_h, "🔵") + "\n"
+        p1 += _pitcher_line(pn_h, er_h, fip_h, hnd_h, pf_h, f"🔵 {home_es}") + "\n"
         sc_h_blk = _statcast_alert_block(pn_h, sc_h, er_h)
         if sc_h_blk:
             p1 += sc_h_blk
-        p1 += _pitcher_line(pn_a, er_a, fip_a, hnd_a, pf_a, "🔴") + "\n"
+        p1 += _pitcher_line(pn_a, er_a, fip_a, hnd_a, pf_a, f"🔴 {away_es}") + "\n"
         sc_a_blk = _statcast_alert_block(pn_a, sc_a, er_a)
         if sc_a_blk:
             p1 += sc_a_blk
