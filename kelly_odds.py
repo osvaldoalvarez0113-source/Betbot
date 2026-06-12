@@ -10225,12 +10225,17 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     if _expert_lines:
         _all_agree = (votos_favor == len([r for r in resultados if r is not None]))
         _agree_note = " Los tres coinciden — sintetiza en una sola línea." if _all_agree else ""
-        _pick_raw  = base.get("pick", "N/D")
-        _match_str = game_data.get("match", "")
-        _pick_str  = f"{_pick_raw} ({_match_str})" if _match_str else _pick_raw
+        _pick_raw        = base.get("pick", "N/D")
+        _match_str       = game_data.get("match", "")
+        _top_pick_label  = game_data.get("top_pick", _pick_raw)
+        _top_pick_odds   = game_data.get("odds", "")
+        _odds_str        = f" a {_top_pick_odds}" if _top_pick_odds else ""
         _synthesis_prompt = (
-            f"IMPORTANTE: El pick a evaluar es exactamente: {_pick_str}\n"
-            "Asegúrate que tu recomendación mencione ESE pick específico, no el equipo contrario ni otro mercado.\n\n"
+            f"El pick formal aprobado por el modelo matemático es: {_top_pick_label}{_odds_str}.\n"
+            "TU TRABAJO es explicar en 2 oraciones POR QUÉ ese pick tiene valor o no.\n"
+            "NO recomiendes un pick diferente. NO menciones otros mercados.\n"
+            "Si el panel votó a favor de ese pick, explica por qué tiene sentido.\n"
+            "Si votaron en contra, explica el riesgo.\n\n"
             "INSTRUCCIÓN ESPECIAL — SÍNTESIS FINAL DEL PANEL:\n"
             "Eres un amigo que apostó béisbol toda su vida. Acabas de escuchar a tres expertos "
             "y ahora le explicas a otro amigo, en voz alta, qué harías y por qué. "
@@ -10281,6 +10286,25 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         _syn_text = ""
 
     if _syn_text:
+        # Sanity-check: si la síntesis recomienda el equipo contrario al pick formal,
+        # descartarla y usar el razonamiento del experto con mayor confianza.
+        import re as _re_sc
+        _formal_pick = game_data.get("top_pick", "")
+        if _formal_pick:
+            _pm = _re_sc.match(r'^(.+?)\s+(ml|rl|moneyline|run line)', _formal_pick, _re_sc.IGNORECASE)
+            if _pm:
+                _pick_words  = set(_pm.group(1).lower().split())
+                _match_parts = game_data.get("match", "").lower().replace(" vs ", "|").split("|")
+                if len(_match_parts) == 2:
+                    _home_w  = set(_match_parts[0].strip().split())
+                    _away_w  = set(_match_parts[1].strip().split())
+                    _other_w = (_away_w if _pick_words & _home_w else _home_w) - {"de", "los", "las", "el", "la", "the"}
+                    _st_low  = _syn_text.lower()
+                    _has_other = sum(1 for w in _other_w if w in _st_low)
+                    _has_pick  = sum(1 for w in _pick_words if w in _st_low)
+                    if _has_other >= 2 and _has_pick == 0:
+                        print(f"   ⚠️  Síntesis contradictoria (mencionó equipo contrario) — usando razonamiento base")
+                        _syn_text = (base.get("razonamiento", "") or "")[:180]
         _final_razon = f"{_syn_text} {_panel_tag}"
     else:
         # Fallback: usar el razonamiento del experto base si Sonnet falla
