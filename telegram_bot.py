@@ -767,6 +767,79 @@ def _cmd_hoy(chat_id: str):
         _send(chat_id, f"⚠️ Error obteniendo juegos: {e}")
 
 
+def _cmd_bulk_analysis(chat_id: str, sport_key: str, emoji: str, label: str):
+    """Shared logic for /mlb and /mundial — analyzes all games for a sport key."""
+    if not _get_odds_fn or not _analyze_fn:
+        _send(chat_id, "⚠️ Módulo de análisis no disponible (bot en modo básico).")
+        return
+
+    _send(chat_id, f"{emoji} Analizando partidos {label} de hoy... dame un momento")
+
+    try:
+        games = _get_odds_fn(sport_key) or []
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error al obtener partidos: {e}")
+        return
+
+    if not games:
+        no_msg = {
+            "baseball_mlb":          "⚾ Sin partidos MLB programados para hoy.",
+            "soccer_fifa_world_cup":  "🏆 Sin partidos del Mundial programados para hoy.",
+        }
+        _send(chat_id, no_msg.get(sport_key, f"Sin partidos de {label} para hoy."))
+        return
+
+    # Sort by commence time, cap at 15
+    games_sorted = sorted(games, key=lambda g: g.get("commence_time", ""))[:15]
+
+    found_any = False
+    for i, game in enumerate(games_sorted):
+        home = game.get("home_team", "?")
+        away = game.get("away_team", "?")
+        try:
+            result = _analyze_fn(game, sport_key, {}, force_panel=True)
+        except Exception as ae:
+            _send(chat_id, f"⚠️ Error analizando {home} vs {away}: {ae}")
+            continue
+
+        if not result:
+            print(f"  [bulk] Sin resultado para {home} vs {away}")
+            continue
+
+        found_any = True
+        if _build_text_fn:
+            try:
+                parts = _build_text_fn(result)
+                for part in parts:
+                    if part and part.strip():
+                        _send(chat_id, part)
+            except Exception as bte:
+                _send(chat_id, f"⚠️ Error formateando {home} vs {away}: {bte}")
+        else:
+            best = (result.get("candidates") or [{}])[0]
+            _send(chat_id,
+                  f"🎯 <b>{result.get('match','?')}</b>\n"
+                  f"Pick: <b>{best.get('label','?')}</b> | "
+                  f"EV +{best.get('ev_pct',0):.1f}% | "
+                  f"Stake ${best.get('stake',0):.0f}")
+
+        if i < len(games_sorted) - 1:
+            import time as _t; _t.sleep(1)
+
+    if not found_any:
+        _send(chat_id,
+              f"Sin picks recomendados en los partidos de {label} de hoy "
+              f"(EV insuficiente o datos incompletos).")
+
+
+def _cmd_mlb(chat_id: str):
+    _cmd_bulk_analysis(chat_id, "baseball_mlb", "⚾", "MLB")
+
+
+def _cmd_mundial(chat_id: str):
+    _cmd_bulk_analysis(chat_id, "soccer_fifa_world_cup", "🏆", "del Mundial")
+
+
 # ── Dispatcher ──────────────────────────────────────────────────
 
 def _dispatch(update: dict):
@@ -812,6 +885,8 @@ def _dispatch(update: dict):
         "/estado":   lambda: _cmd_estado(chat_id),
         "/hoy":      lambda: _cmd_hoy(chat_id),
         "/analizar": lambda: _cmd_analizar(chat_id, args),
+        "/mlb":      lambda: _cmd_mlb(chat_id),
+        "/mundial":  lambda: _cmd_mundial(chat_id),
     }
 
     handler = handlers.get(cmd)
