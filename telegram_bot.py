@@ -153,7 +153,8 @@ def _cmd_ayuda(chat_id: str):
     ))
 
 
-def _cmd_picks(chat_id: str):
+def _cmd_mispicks(chat_id: str):
+    """Shows pending picks from the local tracker (original /picks behavior)."""
     trades = _load_json(TRACKER_FILE, {"picks": []})
     hoy    = datetime.date.today().isoformat()
     pend   = [p for p in trades.get("picks", []) if p.get("estado") == "PENDING"
@@ -174,6 +175,106 @@ def _cmd_picks(chat_id: str):
             f"  {tipo}{linea_str} @ {cuota} | ${stake} | {libro}"
         )
     _send(chat_id, "\n".join(lines))
+
+
+def _cmd_best_picks(chat_id: str, sport_key: str, emoji: str, label: str):
+    """Analyze all games for sport_key, return top-5 picks by EV in one message."""
+    if not _get_odds_fn or not _analyze_fn:
+        _send(chat_id, "⚠️ Módulo de análisis no disponible (bot en modo básico).")
+        return
+
+    _send(chat_id, f"🔍 Buscando los mejores picks {label} de hoy...")
+
+    try:
+        games = _get_odds_fn(sport_key) or []
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error al obtener partidos: {e}")
+        return
+
+    if not games:
+        _send(chat_id, f"Sin partidos de {label} programados para hoy.")
+        return
+
+    RANKS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    all_picks = []  # list of dicts with pick data
+
+    for game in sorted(games, key=lambda g: g.get("commence_time", ""))[:20]:
+        home = game.get("home_team", "?")
+        away = game.get("away_team", "?")
+        try:
+            result = _analyze_fn(game, sport_key, {}, force_panel=False)
+        except Exception:
+            continue
+        if not result:
+            continue
+
+        intel     = result.get("claude_intel") or {}
+        panel_ok  = intel.get("apostar") is True
+        confianza = intel.get("confianza", "")
+        razon_raw = intel.get("razonamiento", "")
+        # Shorten reasoning to ~80 chars
+        razon = (razon_raw[:77] + "…") if len(razon_raw) > 80 else razon_raw
+
+        # Count expert votes from individual responses if present
+        votos_str = ""
+        expertos  = intel.get("expertos") or []
+        if expertos:
+            si_count = sum(1 for ex in expertos if ex.get("apostar") is True)
+            votos_str = f"{si_count}/{len(expertos)} expertos"
+        elif confianza:
+            votos_str = confianza
+
+        for cand in result.get("candidates") or []:
+            ev = cand.get("ev_pct", 0)
+            if ev <= 0:
+                continue
+            all_picks.append({
+                "match":      result.get("match", f"{home} vs {away}"),
+                "label":      cand.get("label", "?"),
+                "odds":       cand.get("odds", 0),
+                "book":       cand.get("book", ""),
+                "prob":       round(cand.get("true_prob", 0) * 100, 1),
+                "ev":         ev,
+                "panel_ok":   panel_ok,
+                "votos":      votos_str,
+                "razon":      razon,
+            })
+
+    if not all_picks:
+        _send(chat_id,
+              f"Sin picks con valor hoy en {label} — el modelo protege tu bankroll 🔒")
+        return
+
+    # Sort: panel-approved first, then by EV descending
+    all_picks.sort(key=lambda x: (not x["panel_ok"], -x["ev"]))
+    top5 = all_picks[:5]
+
+    rank_emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    header = (f"{emoji} <b>TOP {len(top5)} PICKS {label.upper()} HOY</b>"
+              + (f"\n<i>Solo {len(all_picks)} picks con valor hoy</i>"
+                 if len(all_picks) < 5 else "") + "\n")
+    lines  = [header]
+
+    for i, pk in enumerate(top5):
+        panel_icon = "✅" if pk["panel_ok"] else "⚠️"
+        votos_line = f"\n   Panel: {panel_icon} {pk['votos']}" if pk["votos"] else f"\n   Panel: {panel_icon}"
+        razon_line = f"\n   <i>'{pk['razon']}'</i>" if pk["razon"] else ""
+        lines.append(
+            f"\n{rank_emoji[i]} <b>{pk['label']}</b> — {pk['match']}\n"
+            f"   Odds: {pk['odds']:+.0f} ({pk['book']})\n"
+            f"   Prob: {pk['prob']}% | EV +{pk['ev']:.1f}%"
+            f"{votos_line}{razon_line}"
+        )
+
+    _send(chat_id, "\n".join(lines))
+
+
+def _cmd_picks(chat_id: str):
+    _cmd_best_picks(chat_id, "baseball_mlb", "⚾", "MLB")
+
+
+def _cmd_picks_futbol(chat_id: str):
+    _cmd_best_picks(chat_id, "soccer_fifa_world_cup", "🏆", "del Mundial")
 
 
 def _cmd_bankroll(chat_id: str):
@@ -878,7 +979,9 @@ def _dispatch(update: dict):
         "/start":    lambda: _cmd_start(chat_id),
         "/ayuda":    lambda: _cmd_ayuda(chat_id),
         "/help":     lambda: _cmd_ayuda(chat_id),
-        "/picks":    lambda: _cmd_picks(chat_id),
+        "/picks":        lambda: _cmd_picks(chat_id),
+        "/picksfutbol":  lambda: _cmd_picks_futbol(chat_id),
+        "/mispicks":     lambda: _cmd_mispicks(chat_id),
         "/bankroll": lambda: _cmd_bankroll(chat_id),
         "/reporte":  lambda: _cmd_reporte(chat_id),
         "/clv":      lambda: _cmd_clv(chat_id),
