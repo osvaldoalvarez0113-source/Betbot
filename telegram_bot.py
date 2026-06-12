@@ -33,6 +33,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CHATID_FILE      = "telegram_chat_id.txt"
 TRACKER_FILE     = "paper_trades.json"
 CLV_FILE         = "clv_tracker.json"
+BETS_TODAY_FILE  = "bets_today.json"
 LOCK_FILE        = "/tmp/betbot_telegram.lock"   # previene error 409 por instancias duplicadas
 
 # ── Diagnóstico al cargar el módulo ────────────────────────────
@@ -1279,6 +1280,213 @@ def _cmd_parlay_futbol(chat_id: str):
     _send(chat_id, "\n".join(lines))
 
 
+# ── Bet tracking helpers ─────────────────────────────────────────────────────
+
+def _ct_now_str() -> str:
+    """Current time as 'YYYY-MM-DD HH:MM CT' (UTC-5, close enough for CDT)."""
+    ct = datetime.datetime.utcnow() - datetime.timedelta(hours=5)
+    return ct.strftime("%Y-%m-%d %H:%M CT")
+
+def _ct_today() -> str:
+    ct = datetime.datetime.utcnow() - datetime.timedelta(hours=5)
+    return ct.strftime("%Y-%m-%d")
+
+def _load_bets() -> dict:
+    return _load_json(BETS_TODAY_FILE, {"date": _ct_today(), "bets": []})
+
+def _save_bets(data: dict):
+    try:
+        with open(BETS_TODAY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  ⚠️  _save_bets: {e}")
+
+def _midnight_reset():
+    """Archive bets_today.json if date changed. Called at polling loop start."""
+    try:
+        data = _load_bets()
+        saved_date = data.get("date", "")
+        today = _ct_today()
+        if saved_date and saved_date != today and data.get("bets"):
+            archive = f"bets_{saved_date}.json"
+            import shutil as _sh
+            _sh.copy2(BETS_TODAY_FILE, archive)
+            _save_bets({"date": today, "bets": []})
+            print(f"  📦 Bets archivados en {archive} — nuevo día {today}")
+    except Exception as e:
+        print(f"  ⚠️  _midnight_reset: {e}")
+
+
+def _cmd_aposte(chat_id: str, args: str):
+    """Register a manual bet: /aposte Dodgers ML $25"""
+    import re as _re
+    if not args:
+        _send(chat_id,
+              "⚠️ Uso: <code>/aposte Pick $Monto</code>\n"
+              "Ejemplos:\n"
+              "  /aposte Dodgers ML $25\n"
+              "  /aposte UNDER 8.5 Seattle $20\n"
+              "  /aposte parlay Dodgers ML + UNDER 8.5 $15")
+        return
+
+    # Extract stake: find last $number in text
+    m = _re.search(r'\$\s*(\d+(?:\.\d+)?)', args)
+    if not m:
+        _send(chat_id, "⚠️ No encontré el monto. Usa formato: <code>/aposte Pick $Monto</code>")
+        return
+
+    stake = float(m.group(1))
+    # Pick is everything before the $amount match
+    pick = args[:m.start()].strip().strip(",").strip()
+    if not pick:
+        _send(chat_id, "⚠️ No encontré el pick. Usa: <code>/aposte Dodgers ML $25</code>")
+        return
+
+    data = _load_bets()
+    # Day rollover check
+    if data.get("date") != _ct_today():
+        _midnight_reset()
+        data = _load_bets()
+
+    bet_id = int(datetime.datetime.utcnow().timestamp())
+    bet = {
+        "id":        bet_id,
+        "pick":      pick,
+        "stake":     stake,
+        "status":    "pending",
+        "timestamp": _ct_now_str(),
+        "odds":      None,
+        "resultado": None,
+        "pnl":       None,
+    }
+    data["bets"].append(bet)
+    _save_bets(data)
+
+    _send(chat_id,
+          f"✅ <b>Apuesta registrada</b>\n"
+          f"Pick: <b>{pick}</b>\n"
+          f"Stake: <b>${stake:.2f}</b>\n"
+          f"Estado: ⏳ Pendiente\n\n"
+          f"Te aviso cuando salga el resultado.")
+
+
+def _cmd_historial(chat_id: str):
+    """Show today's bets from bets_today.json."""
+    data = _load_bets()
+    bets = data.get("bets", [])
+    if not bets:
+        _send(chat_id, "📭 Sin apuestas registradas hoy. Usa /aposte para registrar una.")
+        return
+
+    DIV = "━" * 22
+    lines = [f"📊 <b>TUS APUESTAS DE HOY</b>\n{DIV}"]
+
+    total_pnl = 0.0
+    pending_stake = 0.0
+    for b in bets:
+        status  = b.get("status", "pending")
+        pick    = b.get("pick", "?")
+        stake   = b.get("stake", 0)
+        pnl     = b.get("pnl")
+
+        if status == "win":
+            pnl_str = f" → <b>GANÓ +${pnl:.2f}</b>" if pnl is not None else " → <b>GANÓ ✅</b>"
+            icon = "✅"
+            total_pnl += pnl if pnl is not None else 0
+        elif status == "loss":
+            pnl_str = f" → <b>PERDIÓ -${stake:.2f}</b>"
+            icon = "❌"
+            total_pnl -= stake
+        else:
+            pnl_str = " → <b>Pendiente</b>"
+            icon = "⏳"
+            pending_stake += stake
+
+        lines.append(f"{icon} {pick} <b>${stake:.0f}</b>{pnl_str}")
+
+    lines.append(DIV)
+    pnl_sign = "+" if total_pnl >= 0 else ""
+    lines.append(f"💰 Balance hoy: <b>{pnl_sign}${total_pnl:.2f}</b>")
+    if pending_stake > 0:
+        lines.append(f"⏳ Pendiente: <b>${pending_stake:.0f}</b> en juego")
+
+    _send(chat_id, "\n".join(lines))
+
+
+def _cmd_resultado(chat_id: str, args: str):
+    """Mark a bet result: /resultado Dodgers W  or  /resultado UNDER L"""
+    if not args:
+        _send(chat_id,
+              "⚠️ Uso: <code>/resultado Pick W</code> o <code>/resultado Pick L</code>\n"
+              "Ejemplos:\n"
+              "  /resultado Dodgers W\n"
+              "  /resultado UNDER L")
+        return
+
+    parts = args.strip().split()
+    if len(parts) < 2 or parts[-1].upper() not in ("W", "L"):
+        _send(chat_id,
+              "⚠️ El último carácter debe ser W (ganó) o L (perdió).\n"
+              "Ejemplo: <code>/resultado Dodgers ML W</code>")
+        return
+
+    outcome = parts[-1].upper()
+    query   = " ".join(parts[:-1]).lower().strip()
+
+    data = _load_bets()
+    bets = data.get("bets", [])
+
+    # Find the most recent pending bet that contains query keywords
+    match_bet = None
+    for b in reversed(bets):
+        if b.get("status") != "pending":
+            continue
+        if any(w in b.get("pick", "").lower() for w in query.split()):
+            match_bet = b
+            break
+
+    if not match_bet:
+        _send(chat_id,
+              f"❌ No encontré apuesta pendiente que coincida con <b>{query}</b>.\n"
+              "Usa /historial para ver tus apuestas.")
+        return
+
+    pick  = match_bet["pick"]
+    stake = match_bet.get("stake", 0)
+    odds  = match_bet.get("odds")
+
+    if outcome == "W":
+        match_bet["status"]    = "win"
+        match_bet["resultado"] = "W"
+        # Calculate P&L if decimal odds available
+        if odds and abs(odds) > 0:
+            if odds > 0:
+                pnl = stake * odds / 100
+            else:
+                pnl = stake * 100 / abs(odds)
+            match_bet["pnl"] = round(pnl, 2)
+        else:
+            match_bet["pnl"] = None
+        pnl_txt = (f"Ganancia: <b>+${match_bet['pnl']:.2f}</b>"
+                   if match_bet["pnl"] is not None
+                   else "Ganancia: <i>(registra las odds para cálculo exacto)</i>")
+        status_txt = "GANÓ 🎉"
+    else:
+        match_bet["status"]    = "loss"
+        match_bet["resultado"] = "L"
+        match_bet["pnl"]       = -stake
+        pnl_txt  = f"Pérdida: <b>-${stake:.2f}</b>"
+        status_txt = "PERDIÓ ❌"
+
+    _save_bets(data)
+
+    _send(chat_id,
+          f"✅ <b>Resultado registrado</b>\n"
+          f"{pick} → <b>{status_txt}</b>\n"
+          f"{pnl_txt}\n"
+          f"Usa /historial para ver el balance del día.")
+
+
 # ── Dispatcher ──────────────────────────────────────────────────
 
 def _dispatch(update: dict):
@@ -1330,6 +1538,9 @@ def _dispatch(update: dict):
         "/mundial":  lambda: _cmd_mundial(chat_id),
         "/parlay":        lambda: _cmd_parlay(chat_id),
         "/parlayfutbol":  lambda: _cmd_parlay_futbol(chat_id),
+        "/aposte":        lambda: _cmd_aposte(chat_id, args),
+        "/historial":     lambda: _cmd_historial(chat_id),
+        "/resultado":     lambda: _cmd_resultado(chat_id, args),
     }
 
     handler = handlers.get(cmd)
@@ -1348,7 +1559,9 @@ def _dispatch(update: dict):
 def _polling_loop():
     global _last_scan_time
     print("  📱 Telegram polling activo")
+    _midnight_reset()   # archive previous day's bets if date changed
     offset = 0
+    _last_reset_date = _ct_today()
 
     # Drenar actualizaciones pendientes antes de entrar al loop principal.
     # Evita procesar comandos viejos acumulados durante el downtime.
@@ -1362,6 +1575,12 @@ def _polling_loop():
         print(f"  ⚠️  Telegram drain: {_dr_err}")
 
     while True:
+        # Daily midnight reset check
+        _today = _ct_today()
+        if _today != _last_reset_date:
+            _midnight_reset()
+            _last_reset_date = _today
+
         try:
             resp = _api("getUpdates", {
                 "offset":          offset,
