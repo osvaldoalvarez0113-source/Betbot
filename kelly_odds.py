@@ -9825,6 +9825,19 @@ _CLAUDE_SYSTEM = (
     "• En vez de 'probabilidad implícita' di 'el mercado dice'\n"
     "• En vez de 'divergencia Pinnacle' di 'los libros sharp están de acuerdo/en contra'\n\n"
 
+    "REGLA 0 — ENTENDER EL TIPO DE PICK (obligatoria antes de cualquier análisis):\n"
+    "Antes de analizar, identifica qué tipo de pick es:\n\n"
+    "• Si el pick es 'Equipo ML': evalúa si ese equipo GANA el partido\n"
+    "• Si el pick es 'Equipo RL -1.5': evalúa si ese equipo gana por 2+ carreras\n"
+    "• Si el pick es 'Equipo RL +1.5': evalúa si ese equipo NO pierde por 2+.\n"
+    "  El equipo puede PERDER el partido y el pick igual GANA si pierde por solo 1.\n"
+    "  En este caso buscar si el pitcher rival es tan dominante que ganaría por 2+.\n"
+    "• Si el pick es 'OVER/UNDER': evalúa el total de carreras esperadas\n\n"
+    "EJEMPLO: Pick 'Washington RL +1.5' con Miller (SEA ERA 3.63) vs Littell (WSH ERA 4.70):\n"
+    "CORRECTO: ¿Puede Seattle ganar por 2+ carreras con Miller? Tal vez, pero Miller "
+    "no es tan dominante. Washington +1.5 tiene valor porque el partido puede ser cerrado.\n"
+    "INCORRECTO: 'Miller es mejor entonces apuesta Seattle ML' — eso es otro pick diferente.\n\n"
+
     "REGLAS DE ANÁLISIS (no negociables):\n"
     "• Si la diferencia de ERA entre pitchers es mayor a 3 puntos → el ML del "
     "equipo con mejor pitcher es el pick principal\n"
@@ -10230,9 +10243,16 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         _top_pick_label  = game_data.get("top_pick", _pick_raw)
         _top_pick_odds   = game_data.get("odds", "")
         _odds_str        = f" a {_top_pick_odds}" if _top_pick_odds else ""
+        _is_rl_plus = "+1.5" in _top_pick_label
+        _rl_note = (
+            "IMPORTANTE: Este es un pick RL +1.5. Ese equipo puede PERDER el partido "
+            "y el pick igual gana si pierde por solo 1 carrera. "
+            "NO sugieras ML — son mercados diferentes.\n"
+        ) if _is_rl_plus else ""
         _synthesis_prompt = (
-            f"El pick formal aprobado por el modelo matemático es: {_top_pick_label}{_odds_str}.\n"
-            "TU TRABAJO es explicar en 2 oraciones POR QUÉ ese pick tiene valor o no.\n"
+            f"El pick formal es: {_top_pick_label}{_odds_str}.\n"
+            + _rl_note
+            + "TU TRABAJO es explicar en 2 oraciones POR QUÉ ese pick tiene valor o no.\n"
             "NO recomiendes un pick diferente. NO menciones otros mercados.\n"
             "Si el panel votó a favor de ese pick, explica por qué tiene sentido.\n"
             "Si votaron en contra, explica el riesgo.\n\n"
