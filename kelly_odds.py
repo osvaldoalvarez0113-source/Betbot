@@ -4854,6 +4854,11 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
 
     is_mlb = "mlb" in sport_key
 
+    # Default pitcher names — overwritten in the MLB block below; kept as "N/A"
+    # for soccer so references further down the function never raise UnboundLocalError
+    h_pname: str = "N/A"
+    a_pname: str = "N/A"
+
     home, away = game["home_team"], game["away_team"]
     game_id    = game.get("id", f"{home}|{away}")
     commence   = game.get("commence_time", "")
