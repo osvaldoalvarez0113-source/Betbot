@@ -941,6 +941,174 @@ def _cmd_mundial(chat_id: str):
     _cmd_bulk_analysis(chat_id, "soccer_fifa_world_cup", "🏆", "del Mundial")
 
 
+def _cmd_parlay(chat_id: str):
+    """Build the best 2-3 leg parlay from today's strongest MLB (+ optional Mundial) picks."""
+    if not _get_odds_fn or not _analyze_fn:
+        _send(chat_id, "⚠️ Módulo de análisis no disponible.")
+        return
+
+    _send(chat_id, "🎰 Armando el mejor parlay del día... dame un momento")
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    GOOD_BOOKS = {"bovada", "betonline", "betonline.ag"}
+
+    def _to_decimal(american: float) -> float:
+        if american >= 0:
+            return round(american / 100 + 1, 4)
+        return round(100 / abs(american) + 1, 4)
+
+    def _collect_picks(sport_key: str) -> list:
+        """Return filtered pick dicts for a sport."""
+        try:
+            games = _get_odds_fn(sport_key) or []
+        except Exception:
+            return []
+        picks = []
+        for game in sorted(games, key=lambda g: g.get("commence_time", ""))[:20]:
+            try:
+                result = _analyze_fn(game, sport_key, {}, force_panel=False)
+            except Exception:
+                continue
+            if not result:
+                continue
+            intel    = result.get("claude_intel") or {}
+            panel_ok = intel.get("apostar") is True
+            razon_raw= intel.get("razonamiento", "")
+            razon    = (razon_raw[:77] + "…") if len(razon_raw) > 80 else razon_raw
+            match    = result.get("match", "")
+            for cand in result.get("candidates") or []:
+                ev   = cand.get("ev_pct", 0)
+                prob = cand.get("true_prob", 0)
+                book = (cand.get("book") or "").lower()
+                if (panel_ok and ev >= 5.0 and prob >= 0.55
+                        and book in GOOD_BOOKS):
+                    picks.append({
+                        "match":   match,
+                        "sport":   sport_key,
+                        "label":   cand.get("label", "?"),
+                        "odds":    cand.get("odds", 0),
+                        "dec":     _to_decimal(cand.get("odds", 0)),
+                        "book":    cand.get("book", ""),
+                        "prob":    prob,
+                        "ev":      ev,
+                        "razon":   razon,
+                    })
+        return picks
+
+    # ── gather picks ─────────────────────────────────────────────────────────
+    mlb_picks   = _collect_picks("baseball_mlb")
+    wc_picks    = _collect_picks("soccer_fifa_world_cup")
+    all_picks   = mlb_picks + wc_picks
+
+    # Sort by EV descending
+    all_picks.sort(key=lambda x: -x["ev"])
+
+    # ── select legs (greedy, anti-correlation) ────────────────────────────────
+    def _team_from_label(label: str) -> str:
+        """Extract team name from label like 'Moneyline Cubs' or 'RL Cubs -1.5'."""
+        for prefix in ("moneyline ", "ml ", "rl ", "runline ", "over ", "under ",
+                       "total over ", "total under "):
+            if label.lower().startswith(prefix):
+                rest = label[len(prefix):]
+                return rest.split()[0].lower()
+        return label.lower()
+
+    def _market_type(label: str) -> str:
+        low = label.lower()
+        if "rl" in low or "runline" in low:
+            return "rl"
+        if "moneyline" in low or low.startswith("ml "):
+            return "ml"
+        return "other"
+
+    legs = []
+    used_matches = set()
+    used_team_market = set()  # (team, sport) — avoid ML+RL same team
+
+    for pk in all_picks:
+        if len(legs) >= 3:
+            break
+        if pk["match"] in used_matches:
+            continue
+        team = _team_from_label(pk["label"])
+        mtype = _market_type(pk["label"])
+        key = (team, pk["sport"])
+        # Block ML+RL of same team
+        if mtype in ("ml", "rl") and key in used_team_market:
+            continue
+        # Try to have at least 1 MLB + 1 Mundial if both available
+        if (len(legs) == 0 and wc_picks and mlb_picks
+                and pk["sport"] == "soccer_fifa_world_cup"
+                and not any(l["sport"] == "baseball_mlb" for l in legs)):
+            # Defer first WC pick until we have at least 1 MLB leg
+            continue
+        legs.append(pk)
+        used_matches.add(pk["match"])
+        used_team_market.add(key)
+
+    # If we deferred WC picks and still have room, fill from all_picks again
+    if len(legs) < 3:
+        for pk in all_picks:
+            if len(legs) >= 3:
+                break
+            if pk["match"] in used_matches:
+                continue
+            team = _team_from_label(pk["label"])
+            mtype = _market_type(pk["label"])
+            key = (team, pk["sport"])
+            if mtype in ("ml", "rl") and key in used_team_market:
+                continue
+            legs.append(pk)
+            used_matches.add(pk["match"])
+            used_team_market.add(key)
+
+    if len(legs) < 2:
+        _send(chat_id,
+              "No hay suficientes picks fuertes hoy para armar parlay.\n"
+              "Usa /picks para ver los picks individuales disponibles.")
+        return
+
+    # ── calculate parlay stats ────────────────────────────────────────────────
+    bankroll = _load_json(TRACKER_FILE, {"bankroll": 1000.0}).get("bankroll", 1000.0)
+    stake    = max(10.0, min(20.0, bankroll * 0.02))
+
+    odds_comb = 1.0
+    prob_comb = 1.0
+    for leg in legs:
+        odds_comb *= leg["dec"]
+        prob_comb *= leg["prob"]
+
+    ganancia   = stake * odds_comb
+    ev_parlay  = (prob_comb * odds_comb - 1) * 100
+
+    # ── build message ─────────────────────────────────────────────────────────
+    DIV = "━" * 22
+    RANK = ["1️⃣", "2️⃣", "3️⃣"]
+    lines = [f"🎰 <b>MEJOR PARLAY DEL DÍA</b>\n{DIV}\n"]
+
+    for i, leg in enumerate(legs):
+        razon_block = f"\n   <i>'{leg['razon']}'</i>" if leg["razon"] else ""
+        lines.append(
+            f"{RANK[i]} <b>{leg['label']}</b>\n"
+            f"   {round(leg['prob']*100,1)}% | EV +{leg['ev']:.1f}% | "
+            f"{leg['odds']:+.0f} @ {leg['book']}"
+            f"{razon_block}\n"
+        )
+
+    lines.append(
+        f"{DIV}\n"
+        f"💰 Cuota combinada: <b>{odds_comb:.2f}x</b>\n"
+        f"🎯 Apuesta: <b>${stake:.0f}</b> en {legs[0]['book']}\n"
+        f"📈 Si gana: <b>${ganancia:.0f}</b>\n"
+        f"📊 EV parlay: {ev_parlay:+.1f}%\n"
+        f"{DIV}\n"
+        f"⚠️ Apuesta pequeña — es parlay\n"
+        f"Panel aprobó cada pierna individualmente"
+    )
+
+    _send(chat_id, "\n".join(lines))
+
+
 # ── Dispatcher ──────────────────────────────────────────────────
 
 def _dispatch(update: dict):
@@ -990,6 +1158,7 @@ def _dispatch(update: dict):
         "/analizar": lambda: _cmd_analizar(chat_id, args),
         "/mlb":      lambda: _cmd_mlb(chat_id),
         "/mundial":  lambda: _cmd_mundial(chat_id),
+        "/parlay":   lambda: _cmd_parlay(chat_id),
     }
 
     handler = handlers.get(cmd)
