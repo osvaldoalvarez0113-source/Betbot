@@ -71,8 +71,8 @@ MIN_STAKE            = 10.00  # never alert if Kelly stake < $10
 MIN_BET              = 10.00  # hard floor — identical to MIN_STAKE
 MAX_SINGLE_BET_PCT   = 0.05   # hard cap: 5% of bankroll per single bet
 MAX_DAILY_EXPO_PCT   = 0.15   # hard cap: 15% of bankroll queued per day
-PROB_CAP             = 0.72   # max single-bet prob; anything higher → cap at 70%
-PROB_CAP_CEIL        = 0.70   # value used after capping (realistic MLB ceiling)
+PROB_CAP             = 0.85   # cap más alto — 85% máximo
+PROB_CAP_CEIL        = 0.80   # valor usado después del cap
 PROB_CAP_PARLAY      = 0.68   # max probability for any parlay leg
 PREMIUM_MULT      = 1.5     # Module P: stake multiplier for PREMIUM alerts
 PREMIUM_MAX_STAKE = 100.0   # Module P: max PREMIUM bet size ($)
@@ -6303,6 +6303,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         print(f"  ℹ️  force_panel=True — mostrando análisis con datos escasos a usuario")
 
     # ── Claude AI: expert validation of top pick ──────────────────────────
+    # Garantizar que top3[0] sea siempre el pick de mayor EV
+    top3.sort(key=lambda x: x["ev_pct"], reverse=True)
     _claude_data_g = {
         "match":     f"{home} vs {away}",
         "sport":     sport_key,
