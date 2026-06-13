@@ -3112,7 +3112,7 @@ def _apply_pinnacle_calibration(
             continue
 
         model_p = c["true_prob"]
-        blended = round(model_p * 0.4 + pin_p * 0.6, 4)
+        blended = round(model_p * 0.60 + pin_p * 0.40, 4)
         # Divergencia se mide sobre la prob YA calibrada, no sobre la raw.
         # blended = model×40% + Pinnacle×60% → la distancia restante con Pinnacle
         # es siempre mucho menor que la distancia del modelo crudo.
@@ -4327,26 +4327,26 @@ def analyze_totals(games, sport_key):
         _tc_data.update({k: v for k, v in extra.items()
                          if isinstance(v, (str, int, float, bool, type(None)))})
         _tc_sport  = "MLB" if is_mlb else "SOCCER"
-        if edge_val < 5.0:
-            print(f"   ⏭️  Panel omitido — edge {edge_val:.1f}% < 5% mínimo ({bet_side} {book_line})")
-            continue
-        if is_mlb:
-            _tc_data.update(_enrich_panel_data(_tc_data, g))
-        _tc_claude = panel_expertos(_tc_data, _tc_sport)
-        if _tc_claude:
-            _tcc  = _tc_claude.get("confianza", "N/D")
-            _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
-            _tcr  = (_tc_claude.get("razonamiento", "") or "")[:80]
-            print(f"   🤖 Claude: {_tcc} | apostar:{_tcap} | \"{_tcr}\"")
-        if _tc_claude and (
-                not _tc_claude.get("apostar", True)
-                or _tc_claude.get("confianza") == "BAJA"):
-            _why = (f"apostar={_tc_claude.get('apostar')}, "
-                    f"confianza={_tc_claude.get('confianza')}")
-            print(f"   ❌ RECHAZADO — Claude veta {bet_side} {book_line} ({_why})")
-            continue
-        if _tc_claude and _tc_claude.get("apostar", True):
-            print(f"   ✅ TOTALS PICK: {bet_side} {book_line}  edge={edge_val:.1f}")
+        _tc_claude = None
+        if edge_val >= 1.2:
+            if is_mlb:
+                _tc_data.update(_enrich_panel_data(_tc_data, g))
+            _tc_claude = panel_expertos(_tc_data, _tc_sport)
+            if _tc_claude:
+                _tcc  = _tc_claude.get("confianza", "N/D")
+                _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
+                _tcr  = (_tc_claude.get("razonamiento", "") or "")[:80]
+                print(f"   🤖 Claude: {_tcc} | apostar:{_tcap} | \"{_tcr}\"")
+            if _tc_claude and (
+                    not _tc_claude.get("apostar", True)
+                    or _tc_claude.get("confianza") == "BAJA"):
+                _why = (f"apostar={_tc_claude.get('apostar')}, "
+                        f"confianza={_tc_claude.get('confianza')}")
+                print(f"   ❌ RECHAZADO — Claude veta {bet_side} {book_line} ({_why})")
+                continue
+        else:
+            print(f"   ℹ️  Panel omitido — edge {edge_val:.1f} runs (umbral: 1.2)")
+        print(f"   ✅ TOTALS PICK: {bet_side} {book_line}  edge={edge_val:.1f} runs")
 
         _tot_ev_pct = round((true_prob * bet_odds - 1) * 100, 1)
         _tot_ev_d   = round(r["stake"] * _tot_ev_pct / 100, 2)
@@ -4838,8 +4838,8 @@ def _data_completeness_score(context: dict, sport: str,
 EV_MIN_PCT       = 3.0   # minimum EV% to include a bet in Full Game Analysis
 PROB_MIN         = 0.50  # global fallback minimum true probability
 # Improvement 2: per-type confidence thresholds (backtesting-calibrated)
-PROB_MIN_TOTALS  = 0.58  # Over/Under — 58% minimum
-PROB_MIN_ML      = 0.55  # Moneyline — 55% minimum
+PROB_MIN_TOTALS  = 0.54  # FIXED: threshold realista post-calibración Pinnacle 60/40
+PROB_MIN_ML      = 0.52  # FIXED: threshold realista post-calibración Pinnacle 60/40
 # PROB_MIN_LIVE  = 0.65  # DESACTIVADO — live betting deshabilitado
 PROB_MIN_PREMIUM = 0.70  # Premium alerts — 70% minimum
 _RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
@@ -6399,7 +6399,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     _votos_panel = (_claude_result_g.get("_votos_favor", 0)
                     if _claude_result_g else 0)
     _top_prob = top3[0]["true_prob"] if top3 else 1.0
-    _bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts and _votos_panel >= 1 and _top_prob < 0.80)
+    _bypass_veto = (_top_ev_pct > 8.0 and not _pin_div_alerts and _votos_panel >= 1)
     if _claude_result_g and not force_panel:
         _apostar_c   = _claude_result_g.get("apostar", True)
         _confianza_c = _claude_result_g.get("confianza", "MEDIA")

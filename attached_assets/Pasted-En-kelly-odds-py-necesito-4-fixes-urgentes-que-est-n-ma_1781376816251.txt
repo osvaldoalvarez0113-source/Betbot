@@ -1,0 +1,85 @@
+En kelly_odds.py necesito 4 fixes urgentes que están matando todos los análisis del bot:
+
+---
+
+FIX 1 — En la función analyze_totals(), busca este bloque exacto:
+
+if edge_val < 5.0:
+    print(f"   ⏭️  Panel omitido — edge {edge_val:.1f}% < 5% mínimo ({bet_side} {book_line})")
+    continue
+if is_mlb:
+    _tc_data.update(_enrich_panel_data(_tc_data, g))
+_tc_claude = panel_expertos(_tc_data, _tc_sport)
+if _tc_claude:
+    _tcc  = _tc_claude.get("confianza", "N/D")
+    _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
+    _tcr  = (_tc_claude.get("razonamiento", "") or "")[:80]
+    print(f"   🤖 Claude: {_tcc} | apostar:{_tcap} | \"{_tcr}\"")
+if _tc_claude and (
+        not _tc_claude.get("apostar", True)
+        or _tc_claude.get("confianza") == "BAJA"):
+    _why = (f"apostar={_tc_claude.get('apostar')}, "
+            f"confianza={_tc_claude.get('confianza')}")
+    print(f"   ❌ RECHAZADO — Claude veta {bet_side} {book_line} ({_why})")
+    continue
+if _tc_claude and _tc_claude.get("apostar", True):
+    print(f"   ✅ TOTALS PICK: {bet_side} {book_line}  edge={edge_val:.1f}")
+
+Reemplaza ese bloque completo con esto:
+
+_tc_claude = None
+if edge_val >= 1.2:
+    if is_mlb:
+        _tc_data.update(_enrich_panel_data(_tc_data, g))
+    _tc_claude = panel_expertos(_tc_data, _tc_sport)
+    if _tc_claude:
+        _tcc  = _tc_claude.get("confianza", "N/D")
+        _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
+        _tcr  = (_tc_claude.get("razonamiento", "") or "")[:80]
+        print(f"   🤖 Claude: {_tcc} | apostar:{_tcap} | \"{_tcr}\"")
+    if _tc_claude and (
+            not _tc_claude.get("apostar", True)
+            or _tc_claude.get("confianza") == "BAJA"):
+        _why = (f"apostar={_tc_claude.get('apostar')}, "
+                f"confianza={_tc_claude.get('confianza')}")
+        print(f"   ❌ RECHAZADO — Claude veta {bet_side} {book_line} ({_why})")
+        continue
+else:
+    print(f"   ℹ️  Panel omitido — edge {edge_val:.1f} runs (umbral: 1.2)")
+print(f"   ✅ TOTALS PICK: {bet_side} {book_line}  edge={edge_val:.1f} runs")
+
+---
+
+FIX 2 — En la función _apply_pinnacle_calibration(), busca esta línea exacta:
+
+blended = round(model_p * 0.4 + pin_p * 0.6, 4)
+
+Reemplázala con:
+
+blended = round(model_p * 0.60 + pin_p * 0.40, 4)
+
+---
+
+FIX 3 — En la función analyze_game_full(), busca esta línea exacta:
+
+_bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts and _votos_panel >= 1 and _top_prob < 0.80)
+
+Reemplázala con:
+
+_bypass_veto = (_top_ev_pct > 8.0 and not _pin_div_alerts and _votos_panel >= 1)
+
+---
+
+FIX 4 — Busca estas dos líneas en la sección de constantes al inicio del archivo:
+
+PROB_MIN_ML      = 0.55  # Moneyline — 55% minimum
+PROB_MIN_TOTALS  = 0.58  # Over/Under — 58% minimum
+
+Reemplázalas con:
+
+PROB_MIN_ML      = 0.52  # FIXED: threshold realista post-calibración Pinnacle 60/40
+PROB_MIN_TOTALS  = 0.54  # FIXED: threshold realista post-calibración Pinnacle 60/40
+
+---
+
+Después de hacer los 4 cambios, haz commit y push a GitHub para que Railway redeploy automáticamente.
