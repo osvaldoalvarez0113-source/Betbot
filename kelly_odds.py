@@ -76,7 +76,7 @@ PROB_CAP_CEIL        = 0.80   # valor usado después del cap
 PROB_CAP_PARLAY      = 0.68   # max probability for any parlay leg
 PREMIUM_MULT      = 1.5     # Module P: stake multiplier for PREMIUM alerts
 PREMIUM_MAX_STAKE = 100.0   # Module P: max PREMIUM bet size ($)
-INTERVAL  = 600       # 10-minute main scan (API limit-friendly)
+INTERVAL  = 1800      # 30-minute main scan — conserva quota mensual
 NOTIFY   = "my-bets"
 LOG_CSV  = True
 
@@ -8396,7 +8396,7 @@ def get_odds(sport_key):
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
             params={"apiKey": API_KEY, "regions": "us,us2,eu,uk,au",
-                    "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
+                    "markets": "h2h,totals", "oddsFormat": "decimal"},
             timeout=10,
         )
         if r.status_code == 429:
@@ -13683,7 +13683,12 @@ def run_scan():
                         pass
 
             bets, sharp_moves, steam_moves = analyze(games, prev_map, new_map, sport_key)
-            total_bets = analyze_totals(games, sport_key)
+            # Solo correr analyze_totals cada 2 scans para conservar quota
+            if scan % 2 == 0:
+                total_bets = analyze_totals(games, sport_key)
+            else:
+                total_bets = []
+                print(f"  ⏭️  Totals scan omitido (scan par/impar para conservar quota)")
             arbs = scan_arbitrage(games, sport_key)
             for m in sharp_moves:
                 m["sport"] = sport_key
