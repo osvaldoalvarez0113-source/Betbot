@@ -6424,6 +6424,21 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         _claude_result_g["datos_incompletos"] = True
         print(f"   ⚠️  Confianza capada a MEDIA — datos parciales ({_dqs}/100)")
 
+    # Calcular pick más probable independiente de EV
+    _mp_team = home if p_home >= p_away else away
+    _mp_prob = p_home if p_home >= p_away else p_away
+    _mp_h2h  = h2h_odds.get(_mp_team)
+    _most_prob_pick = {
+        "team":      _mp_team,
+        "prob":      round(_mp_prob * 100, 1),
+        "odds":      _mp_h2h[0] if _mp_h2h else None,
+        "book":      _mp_h2h[1] if _mp_h2h else "Bovada",
+        "has_value": any(
+            _mp_team.split()[-1].lower() in c.get("label", "").lower()
+            for c in top3
+        ),
+    }
+
     _best_pick = top3[0]
     print(f"   ✅ PICK: {_best_pick['label']}  EV+{_best_pick['ev_pct']:.1f}%  "
           f"@ {_best_pick['odds']}  stake=${_best_pick['stake']:.0f}")
@@ -6450,6 +6465,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         "all_markets": _all_mkts,
         "most_probable_team": _most_probable,
         "most_probable_data": _most_probable_data,
+        "most_prob_pick":     _most_prob_pick,
     }
 
 
@@ -7486,7 +7502,18 @@ def build_analizar_text(result: dict) -> list:
     elif cands and final_apostar is True:
         p2 += f"💡 Apuesta antes de {gt} en Bovada"
     else:
-        p2 += "💡 Espera el próximo partido con mejor edge"
+        _mp_b = result.get("most_prob_pick") or {}
+        if _mp_b.get("team"):
+            _has_val_b = _mp_b.get("has_value", False)
+            _val_tag_b = "✅ también tiene valor" if _has_val_b else "⚠️ sin valor EV — precio caro"
+            _odds_b = f"@ {_mp_b['odds']:.2f}" if _mp_b.get("odds") else ""
+            p2 += (
+                f"💡 <b>Más probable de ganar hoy:</b>\n"
+                f"   {_es(_mp_b['team'])}  {_mp_b['prob']}%  {_odds_b}\n"
+                f"   {_val_tag_b}"
+            )
+        else:
+            p2 += f"💡 Espera el próximo partido con mejor edge"
 
     return [p1, p2]
 
@@ -11521,15 +11548,19 @@ def notify_bets(new_bets, alerted=None):
             priority = "urgent" if b["edge"] >= 5.0 else ("high" if b["edge"] >= 3 else "default")
             title    = f"{emoji} GANADOR | {team_es} | {match_es}"
 
-        _mp_team = a.get("most_probable_team")
-        _mp_data = a.get("most_probable_data") or {}
-        if _mp_team and _mp_data:
-            _mp_prob = round(_mp_data.get("prob", 0) * 100)
-            _mp_odds = _mp_data.get("odds", 0)
-            _mp_line = (f"\n🎯 Más probable de ganar: "
-                        f"{_es(_mp_team)} {_mp_prob}% "
-                        f"@ {_mp_odds} ⚠️ sin valor\n")
-            body = body + _mp_line
+        _mp = a.get("most_prob_pick") or {}
+        if _mp.get("team"):
+            _has_val = _mp.get("has_value", False)
+            _val_tag = "✅ también tiene valor EV" if _has_val else "⚠️ precio caro — sin valor EV"
+            _mp_odds_str = f"@ {_mp['odds']:.2f}" if _mp.get("odds") else ""
+            _mp_section = (
+                f"\n{'━'*22}\n"
+                f"🎯 MÁS PROBABLE DE GANAR:\n"
+                f"   {_es(_mp['team'])}  {_mp['prob']}%  {_mp_odds_str}  {_mp['book']}\n"
+                f"   {_val_tag}\n"
+                f"{'━'*22}"
+            )
+            body = body + _mp_section
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
         if alerted is not None:
