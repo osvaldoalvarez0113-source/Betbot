@@ -1,0 +1,73 @@
+En kelly_odds.py haz exactamente estos 3 cambios:
+
+═══════════════════════════════════════════
+CAMBIO 1 — En analyze_game_full()
+═══════════════════════════════════════════
+Busca esta línea exacta (está cerca del final de analyze_game_full):
+    _best_pick = top3[0]
+
+Justo ANTES de esa línea agrega este bloque:
+    # Calcular pick más probable independiente de EV
+    _mp_team = home if p_home >= p_away else away
+    _mp_prob = p_home if p_home >= p_away else p_away
+    _mp_h2h  = h2h_odds.get(_mp_team)
+    _most_prob_pick = {
+        "team":      _mp_team,
+        "prob":      round(_mp_prob * 100, 1),
+        "odds":      _mp_h2h[0] if _mp_h2h else None,
+        "book":      _mp_h2h[1] if _mp_h2h else "Bovada",
+        "has_value": any(
+            _mp_team.split()[-1].lower() in c.get("label", "").lower()
+            for c in top3
+        ),
+    }
+
+Luego busca el return final de la función (el último return que tiene "candidates": top3) y agrega este campo antes del cierre }:
+        "most_prob_pick": _most_prob_pick,
+
+═══════════════════════════════════════════
+CAMBIO 2 — En notify_game_analysis()
+═══════════════════════════════════════════
+Busca esta línea exacta dentro de notify_game_analysis:
+        ntfy_post(title, body, priority)
+
+Justo ANTES de esa línea agrega:
+        _mp = a.get("most_prob_pick") or {}
+        if _mp.get("team"):
+            _has_val = _mp.get("has_value", False)
+            _val_tag = "✅ también tiene valor EV" if _has_val else "⚠️ precio caro — sin valor EV"
+            _mp_odds_str = f"@ {_mp['odds']:.2f}" if _mp.get("odds") else ""
+            _mp_section = (
+                f"\n{'━'*22}\n"
+                f"🎯 MÁS PROBABLE DE GANAR:\n"
+                f"   {_es(_mp['team'])}  {_mp['prob']}%  {_mp_odds_str}  {_mp['book']}\n"
+                f"   {_val_tag}\n"
+                f"{'━'*22}"
+            )
+            body = body + _mp_section
+
+═══════════════════════════════════════════
+CAMBIO 3 — En build_analizar_text()
+═══════════════════════════════════════════
+Busca estas líneas exactas dentro del bloque p2 de build_analizar_text:
+        else:
+            p2 += f"💡 Espera el próximo partido con mejor edge"
+
+Reemplázalas con:
+        else:
+            _mp_b = result.get("most_prob_pick") or {}
+            if _mp_b.get("team"):
+                _has_val_b = _mp_b.get("has_value", False)
+                _val_tag_b = "✅ también tiene valor" if _has_val_b else "⚠️ sin valor EV — precio caro"
+                _odds_b = f"@ {_mp_b['odds']:.2f}" if _mp_b.get("odds") else ""
+                p2 += (
+                    f"💡 <b>Más probable de ganar hoy:</b>\n"
+                    f"   {_es(_mp_b['team'])}  {_mp_b['prob']}%  {_odds_b}\n"
+                    f"   {_val_tag_b}"
+                )
+            else:
+                p2 += f"💡 Espera el próximo partido con mejor edge"
+
+═══════════════════════════════════════════
+No cambies nada más. Commit y push a GitHub.
+═══════════════════════════════════════════
