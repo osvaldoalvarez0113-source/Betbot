@@ -3112,7 +3112,7 @@ def _apply_pinnacle_calibration(
             continue
 
         model_p = c["true_prob"]
-        blended = round(model_p * 0.60 + pin_p * 0.40, 4)
+        blended = round(model_p * 0.40 + pin_p * 0.60, 4)
         # Divergencia se mide sobre la prob YA calibrada, no sobre la raw.
         # blended = model×40% + Pinnacle×60% → la distancia restante con Pinnacle
         # es siempre mucho menor que la distancia del modelo crudo.
@@ -10159,7 +10159,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     inconsistencias = []
 
     for i, (nombre, extra) in enumerate(_EXPERTOS):
-        _panel_model = "claude-haiku-4-5-20251001"  # all 3 experts on Haiku for cost control
+        _panel_model = CLAUDE_PANEL_MODEL  # configurable desde Railway env vars
         res = analyze_with_claude(game_data, sport, _extra_system=extra,
                                   _model=_panel_model)
         if res is None:
@@ -13683,12 +13683,7 @@ def run_scan():
                         pass
 
             bets, sharp_moves, steam_moves = analyze(games, prev_map, new_map, sport_key)
-            # Solo correr analyze_totals cada 2 scans para conservar quota
-            if scan % 2 == 0:
-                total_bets = analyze_totals(games, sport_key)
-            else:
-                total_bets = []
-                print(f"  ⏭️  Totals scan omitido (scan par/impar para conservar quota)")
+            total_bets = analyze_totals(games, sport_key)
             arbs = scan_arbitrage(games, sport_key)
             for m in sharp_moves:
                 m["sport"] = sport_key
@@ -13962,12 +13957,12 @@ if __name__ == "__main__":
                     print(f"  ⚠️  Soccer Daily Card error: {e}")
 
             # Night summary at 11 PM ET — Module P
-            # if now_et.hour == 23 and last_night_summary < now_et.date():
-            #     try:
-            #         send_night_summary()
-            #         last_night_summary = now_et.date()
-            #     except Exception as e:
-            #         print(f"  ⚠️  Night summary error: {e}")
+            if now_et.hour == 23 and last_night_summary < now_et.date():
+                try:
+                    send_night_summary()
+                    last_night_summary = now_et.date()
+                except Exception as e:
+                    print(f"  ⚠️  Night summary error: {e}")
 
             print(f"🔍 Scan #{scan}")
             try:
