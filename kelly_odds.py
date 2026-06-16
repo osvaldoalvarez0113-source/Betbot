@@ -6428,6 +6428,14 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     print(f"   ✅ PICK: {_best_pick['label']}  EV+{_best_pick['ev_pct']:.1f}%  "
           f"@ {_best_pick['odds']}  stake=${_best_pick['stake']:.0f}")
 
+    # Pick más probable (independiente de valor)
+    _prob_map = {}
+    for team, prob in [(home, p_home), (away, p_away)]:
+        if team in h2h_odds:
+            _prob_map[team] = {"prob": prob, "odds": h2h_odds[team][0]}
+    _most_probable = max(_prob_map, key=lambda t: _prob_map[t]["prob"]) if _prob_map else None
+    _most_probable_data = _prob_map.get(_most_probable) if _most_probable else None
+
     return {
         "game_id":     game_id,
         "match":       f"{home} vs {away}",
@@ -6440,6 +6448,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         "best_ev":     top3[0]["ev_pct"],
         "claude_intel": _claude_result_g,
         "all_markets": _all_mkts,
+        "most_probable_team": _most_probable,
+        "most_probable_data": _most_probable_data,
     }
 
 
@@ -11511,6 +11521,15 @@ def notify_bets(new_bets, alerted=None):
             priority = "urgent" if b["edge"] >= 5.0 else ("high" if b["edge"] >= 3 else "default")
             title    = f"{emoji} GANADOR | {team_es} | {match_es}"
 
+        _mp_team = a.get("most_probable_team")
+        _mp_data = a.get("most_probable_data") or {}
+        if _mp_team and _mp_data:
+            _mp_prob = round(_mp_data.get("prob", 0) * 100)
+            _mp_odds = _mp_data.get("odds", 0)
+            _mp_line = (f"\n🎯 Más probable de ganar: "
+                        f"{_es(_mp_team)} {_mp_prob}% "
+                        f"@ {_mp_odds} ⚠️ sin valor\n")
+            body = body + _mp_line
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
         if alerted is not None:
