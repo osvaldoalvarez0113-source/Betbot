@@ -1,0 +1,79 @@
+En kelly_odds.py implementa este cambio en 3 partes:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE 1 — Detectar el conflicto en analyze_game_full()
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dentro de analyze_game_full(), en el bloque if is_mlb:, busca esta línea exacta:
+
+        # ── Elite Source 2: Pinnacle Market Reference ─────────────────────────
+        pin_data = _extract_pinnacle_odds(game)
+
+Inserta ANTES de esa línea este bloque completo:
+
+        # ── ADVERTENCIA: pitcher bueno vs ofensiva peligrosa del rival ─────────
+        _pitcher_conflicts: list = []
+        for _pit_name, _pit_era, _pit_team, _rival_team, _rival_bat, _rival_streak in [
+            (h_pname, h_era_eff, home, away, bat_a, _a_streak),
+            (a_pname, a_era_eff, away, home, bat_h, _h_streak),
+        ]:
+            if _pit_era >= 3.50:
+                continue
+            _flags = []
+            _rival_ops = (_rival_bat.get("ops") or 0.0) if _rival_bat else 0.0
+            if _rival_ops > 0.800:
+                _flags.append(f"OPS {_rival_ops:.3f} del rival (ofensiva fuerte)")
+            if _rival_streak and _rival_streak.get("is_hot"):
+                _w = _rival_streak["wins_10"]
+                _l = _rival_streak["losses_10"]
+                _flags.append(f"rival en racha ({_w}-{_l} últimos 10)")
+            _lr_bad = any(
+                lr.get("lineup") == _rival_team and "bateadores" in lr.get("favor", "")
+                for lr in lr_notes
+            )
+            if _lr_bad:
+                _flags.append("matchup de mano desfavorable para el pitcher")
+            if _flags:
+                _pitcher_conflicts.append({
+                    "pitcher": _pit_name,
+                    "era":     _pit_era,
+                    "team":    _pit_team,
+                    "rival":   _rival_team,
+                    "flags":   _flags,
+                })
+                print(f"   ⚠️  Conflicto: {_pit_name} (ERA {_pit_era:.2f}) vs {_rival_team} — {' | '.join(_flags)}")
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE 2 — Agregar al diccionario context
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+En el mismo bloque if is_mlb: de analyze_game_full(), busca la línea:
+
+            "pitcher_home":  f"{h_pname} ({_h_era_label})",
+
+Agrega DESPUÉS de ella (manteniendo la coma y la indentación):
+
+            "pitcher_conflicts": _pitcher_conflicts,
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE 3 — Mostrar la advertencia en build_analizar_text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dentro de build_analizar_text(), en el bloque if is_mlb:, busca estas líneas exactas:
+
+    p1 += f"{'─'*22}\n"
+
+    # Pinnacle
+    pin = ctx.get("pinnacle_odds")
+
+Inserta ANTES de esas líneas:
+
+    # Advertencia de conflicto pitcher vs ofensiva peligrosa
+    for _cf in ctx.get("pitcher_conflicts", []):
+        _flags_txt = "\n   → ".join(_cf["flags"])
+        p1 += (
+            f"⚠️ CONFLICTO — {_cf['pitcher'].split()[-1]} "
+            f"(ERA {_cf['era']:.2f}) vs ofensiva peligrosa de {_es(_cf['rival'])}:\n"
+            f"   → {_flags_txt}\n"
+            f"   → Pick más riesgoso — considera apostar menos o evaluar RL +1.5\n"
+        )

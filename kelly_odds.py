@@ -5738,6 +5738,38 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         home_exp = max(0.1, home_exp + t_adj / 2)
         away_exp = max(0.1, away_exp + t_adj / 2)
 
+        # ── ADVERTENCIA: pitcher bueno vs ofensiva peligrosa del rival ─────────
+        _pitcher_conflicts: list = []
+        for _pit_name, _pit_era, _pit_team, _rival_team, _rival_bat, _rival_streak in [
+            (h_pname, h_era_eff, home, away, bat_a, _a_streak),
+            (a_pname, a_era_eff, away, home, bat_h, _h_streak),
+        ]:
+            if _pit_era >= 3.50:
+                continue
+            _flags = []
+            _rival_ops = (_rival_bat.get("ops") or 0.0) if _rival_bat else 0.0
+            if _rival_ops > 0.800:
+                _flags.append(f"OPS {_rival_ops:.3f} del rival (ofensiva fuerte)")
+            if _rival_streak and _rival_streak.get("is_hot"):
+                _w = _rival_streak["wins_10"]
+                _l = _rival_streak["losses_10"]
+                _flags.append(f"rival en racha ({_w}-{_l} últimos 10)")
+            _lr_bad = any(
+                lr.get("lineup") == _rival_team and "bateadores" in lr.get("favor", "")
+                for lr in lr_notes
+            )
+            if _lr_bad:
+                _flags.append("matchup de mano desfavorable para el pitcher")
+            if _flags:
+                _pitcher_conflicts.append({
+                    "pitcher": _pit_name,
+                    "era":     _pit_era,
+                    "team":    _pit_team,
+                    "rival":   _rival_team,
+                    "flags":   _flags,
+                })
+                print(f"   ⚠️  Conflicto: {_pit_name} (ERA {_pit_era:.2f}) vs {_rival_team} — {' | '.join(_flags)}")
+
         # ── Elite Source 2: Pinnacle Market Reference ─────────────────────────
         pin_data = _extract_pinnacle_odds(game)
 
@@ -5749,6 +5781,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
 
         context = {
             "pitcher_home":  f"{h_pname} ({_h_era_label})",
+            "pitcher_conflicts": _pitcher_conflicts,
             "pitcher_away":  f"{a_pname} ({_a_era_label})",
             "rs_home": f"{h_stats['rs_pg']:.1f}", "ra_home": f"{h_stats['ra_pg']:.1f}",
             "rs_away": f"{a_stats['rs_pg']:.1f}", "ra_away": f"{a_stats['ra_pg']:.1f}",
@@ -7363,6 +7396,16 @@ def build_analizar_text(result: dict) -> list:
                 if kp:
                     parts.append(f"K% {kp:.0f}%")
                 p1 += f"🏏 {_te}: {' | '.join(parts)}\n"
+
+        # Advertencia de conflicto pitcher vs ofensiva peligrosa
+        for _cf in ctx.get("pitcher_conflicts", []):
+            _flags_txt = "\n   → ".join(_cf["flags"])
+            p1 += (
+                f"⚠️ CONFLICTO — {_cf['pitcher'].split()[-1]} "
+                f"(ERA {_cf['era']:.2f}) vs ofensiva peligrosa de {_es(_cf['rival'])}:\n"
+                f"   → {_flags_txt}\n"
+                f"   → Pick más riesgoso — considera apostar menos o evaluar RL +1.5\n"
+            )
 
         # Pinnacle
         pin = ctx.get("pinnacle_odds")
