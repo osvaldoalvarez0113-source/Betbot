@@ -6511,6 +6511,9 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     _most_probable = max(_prob_map, key=lambda t: _prob_map[t]["prob"]) if _prob_map else None
     _most_probable_data = _prob_map.get(_most_probable) if _most_probable else None
 
+    # Narrativa conversacional del partido
+    _narrativa = _generar_narrativa(context, top3, home, away, is_mlb, sport_key)
+
     return {
         "game_id":     game_id,
         "match":       f"{home} vs {away}",
@@ -6526,6 +6529,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         "most_probable_team": _most_probable,
         "most_probable_data": _most_probable_data,
         "most_prob_pick":     _most_prob_pick,
+        "narrativa":          _narrativa,
     }
 
 
@@ -7273,6 +7277,11 @@ def build_analizar_text(result: dict) -> list:
 
     # ── VEREDICTO (construido primero, mostrado primero) ──────────────────────
     final_apostar = ci.get("apostar")
+    # Si el panel no corrió pero hay candidatos con EV ≥ 5%, aprobar con confianza MEDIA
+    if final_apostar is None and cands and cands[0].get("ev_pct", 0) >= 5.0:
+        final_apostar = True
+        if not ci.get("confianza"):
+            ci["confianza"] = "MEDIA"
     if cands:
         best     = cands[0]
         best_lbl = (best.get("label", "?")
@@ -7331,11 +7340,14 @@ def build_analizar_text(result: dict) -> list:
         )
 
     # ── PARTE 1: Header + Veredicto + Contexto compacto ──────────────────────
+    _narrativa_txt = result.get("narrativa", "")
     p1 = (
         f"{emoji} <b>{home_es} vs {away_es}</b>\n"
         f"⏰ {gt}\n"
         f"{verdict_block}\n"
     )
+    if _narrativa_txt:
+        p1 += f"{'─'*22}\n📖 {_narrativa_txt}\n"
 
     # Default pitcher/ERA values — always defined so soccer picks don't crash
     pn_h = ctx.get("pname_home", "TBD") if ctx else "TBD"
@@ -10178,6 +10190,78 @@ def _enrich_panel_data(game_data: dict, game_obj: "dict | None" = None) -> dict:
         print(f"   📊 Panel enriquecido: {keys_found}")
 
     return enriched
+
+
+def _generar_narrativa(context: dict, candidates: list, home: str, away: str,
+                       is_mlb: bool, sport_key: str) -> str:
+    """
+    Genera 3 oraciones en español natural que explican los factores clave
+    del partido y si hay contradicciones entre los datos y el pick.
+    """
+    if not ANTHROPIC_API_KEY or not HAS_ANTHROPIC:
+        return ""
+    try:
+        datos = []
+        if is_mlb:
+            ph  = context.get("pname_home", "TBD")
+            pa  = context.get("pname_away", "TBD")
+            eh  = context.get("era_home", 4.50)
+            ea  = context.get("era_away", 4.50)
+            pfh = context.get("pform_h")
+            pfa = context.get("pform_a")
+            if pfh and pfh.get("trend"):
+                eras_h = _clean_era_form(pfh.get("eras", []))
+                datos.append(f"{ph}: {pfh['trend']} — ERA reciente: {' → '.join(str(e) for e in eras_h[-3:])}")
+            else:
+                datos.append(f"{ph}: ERA {eh:.2f}")
+            if pfa and pfa.get("trend"):
+                eras_a = _clean_era_form(pfa.get("eras", []))
+                datos.append(f"{pa}: {pfa['trend']} — ERA reciente: {' → '.join(str(e) for e in eras_a[-3:])}")
+            else:
+                datos.append(f"{pa}: ERA {ea:.2f}")
+            for t, ils in (context.get("il_data") or {}).items():
+                if ils:
+                    datos.append(f"Lesionados {t}: {', '.join(ils[:2])}")
+            pin = context.get("pinnacle_odds")
+            if pin:
+                rh = 1.0 / max(pin["home"], 1.001)
+                ra = 1.0 / max(pin["away"], 1.001)
+                tot = rh + ra
+                datos.append(f"Pinnacle: {home} {round(rh/tot*100,1)}% | {away} {round(ra/tot*100,1)}%")
+            if context.get("wind_info"):
+                datos.append(f"Clima: {context['wind_info']}")
+            if context.get("temp_label"):
+                datos.append(context["temp_label"])
+            for cf in (context.get("pitcher_conflicts") or []):
+                datos.append(f"CONFLICTO: {cf['pitcher']} vs ofensiva peligrosa de {cf['rival']}: {', '.join(cf['flags'])}")
+        else:
+            if context.get("form_home"): datos.append(f"{home}: {context['form_home']}")
+            if context.get("form_away"): datos.append(f"{away}: {context['form_away']}")
+        if candidates:
+            best = candidates[0]
+            lbl  = best.get("label", "?").replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
+            datos.append(f"Pick del modelo: {lbl} EV+{best.get('ev_pct',0):.1f}%")
+        datos_str = "\n".join(f"- {d}" for d in datos)
+        prompt = (
+            f"Partido: {home} vs {away}\n"
+            f"Datos:\n{datos_str}\n\n"
+            f"Escribe exactamente 3 oraciones en español conversacional:\n"
+            f"1. Qué está pasando con los pitchers o el partido hoy\n"
+            f"2. Si hay contradicción entre los datos y el pick (por ejemplo pitchers en declive pero pick UNDER)\n"
+            f"3. Qué deberías considerar antes de apostar\n\n"
+            f"Habla como un amigo que sabe de béisbol. Sin tecnicismos. Sin listas. Solo oraciones naturales."
+        )
+        client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=220,
+            system="Eres un experto en béisbol que habla en español natural. Nunca uses JSON, listas, ni tecnicismos. Exactamente 3 oraciones cortas y directas.",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return msg.content[0].text.strip()
+    except Exception as _ne:
+        print(f"  ⚠️  narrativa error: {_ne}")
+        return ""
 
 
 def panel_expertos(game_data: dict, sport: str) -> "dict | None":
