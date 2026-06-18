@@ -5288,14 +5288,21 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 _over_edge > 1.0
             )
 
+            # FILTRO 2: Condiciones mínimas para alertar totals (necesita ≥2 de 3)
+            _pit_ok  = h_pname not in ("TBD", "", "SIN CONFIRMAR") and a_pname not in ("TBD", "", "SIN CONFIRMAR")
+            _env_ok  = bool(w_label) or (park != 1.0 and home in MLB_PARK_FACTORS)
+            _edge_ok = abs(_over_edge) >= 0.8
+            _conds   = sum([_pit_ok, _env_ok, _edge_ok])
+            if _conds < 2:
+                print(f"   ⏭️  Totals {home} vs {away}: {_conds}/3 condiciones — omitido (pitcher:{_pit_ok} entorno:{_env_ok} edge:{_edge_ok})")
             # Calcula EV de OVER y UNDER por separado; envía al panel solo el de mayor EV
             _tot_cands = []
-            for side_label, is_over, p, odds in [
+            for side_label, is_over, p, odds in ([] if _conds < 2 else [
                 (f"📈 OVER {book_line} carreras",  True,
                  poisson_ou_prob(adj_total, book_line, True),  over_odds),
                 (f"📉 UNDER {book_line} carreras", False,
                  poisson_ou_prob(adj_total, book_line, False), under_odds),
-            ]:
+            ]):
                 # Rule 1: skip OVER below dominant-pitcher edge threshold
                 if is_over and _over_min_edge > 0 and _over_edge < _over_min_edge:
                     continue
@@ -5389,6 +5396,13 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                         print(f"   📊 Línea alternativa: {_alt_lbl} EV+{_alt_ev:.1f}%")
 
         # Run line
+        # FILTRO 1: si hay favorito pesado en ML (odds < 1.60), reducir umbral para RL +1.5 del perro
+        _heavy_fav_ml = None
+        for _t, _od_pair in h2h_odds.items():
+            if _od_pair[0] < 1.60:
+                _heavy_fav_ml = _t
+                break
+
         for team, is_home in [(home, True), (away, False)]:
             if team not in spread_odds:
                 continue
@@ -5408,10 +5422,14 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             _all_evs.append((lbl, round(ev, 1)))
             _all_mkts[lbl] = {"prob": p_cover, "ev_pct": round(ev, 1),
                                "odds": odds, "book": book}
-            if ev >= EV_MIN_PCT and r["stake"] > 0:
+            _es_perro_rl = bool(_heavy_fav_ml and team != _heavy_fav_ml and (pt > 0 or (pt == 0 and not is_home)))
+            _ev_min_rl = max(EV_MIN_PCT / 2, 1.0) if _es_perro_rl else EV_MIN_PCT
+            if ev >= _ev_min_rl and r["stake"] > 0:
+                _perro_note = "⚠️ Alternativa al favorito caro — considera RL +1.5 antes del ML directo" if _es_perro_rl else ""
                 candidates.append({"label": lbl, "true_prob": p_cover, "odds": odds,
                                    "book": book, "ev_pct": round(ev, 1),
-                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"],
+                                   "stake_warn": _perro_note})
 
         # ── F5 ML (primera mitad — moneyline primeras 5 entradas) ────────────
         # F5 odds se obtienen por endpoint de evento (no en get_odds principal)
@@ -6155,6 +6173,15 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             for lbl, ev in _all_evs
         )
         print(f"   📈 EVs calculados: {_ev_strs}")
+
+    # FILTRO 3: priorizar F5 cuando ambos abridores tienen ERA < 4.00 confirmada
+    if is_mlb and h_pname not in ("TBD", "", "SIN CONFIRMAR") and a_pname not in ("TBD", "", "SIN CONFIRMAR"):
+        if h_era < 4.00 and a_era < 4.00:
+            _f5_cands = [c for c in candidates if "F5" in c.get("label", "")]
+            _otros    = [c for c in candidates if "F5" not in c.get("label", "")]
+            if _f5_cands:
+                candidates = sorted(_f5_cands, key=lambda x: x["ev_pct"], reverse=True) + _otros
+                print(f"   ⚾ FILTRO 3: F5 priorizado — ERA {h_era:.2f}/{a_era:.2f} confirmadas")
 
     # Drop any pick whose true probability is below the minimum threshold
     candidates = [c for c in candidates if c["true_prob"] >= PROB_MIN]

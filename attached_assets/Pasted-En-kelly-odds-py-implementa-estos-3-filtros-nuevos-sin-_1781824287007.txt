@@ -1,0 +1,123 @@
+En kelly_odds.py, implementa estos 3 filtros nuevos sin tocar nada más:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILTRO 1 — Favorito caro: mostrar RL +1.5 del perro automáticamente
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dentro de analyze_game_full(), busca este bloque exacto:
+
+        # Run line
+        for team, is_home in [(home, True), (away, False)]:
+            if team not in spread_odds:
+                continue
+            pt, odds, book = spread_odds[team]
+            if is_mlb and abs(pt) > 2.5:
+                continue
+            if is_home:
+                rl = pt if pt != 0 else -1.5
+                p_cover = poisson_runline_prob(home_exp, away_exp, rl)
+            else:
+                rl_home = -(pt) if pt != 0 else -1.5   # away +1.5 → home -1.5
+                p_cover = 1.0 - poisson_runline_prob(home_exp, away_exp, rl_home)
+            sign = f"{pt:+.1f}" if pt != 0 else ("-1.5" if is_home else "+1.5")
+            lbl  = f"🏃 {team} RL {sign}"
+            ev   = (p_cover * odds - 1) * 100
+            r    = kelly_stake(p_cover, odds)
+            _all_evs.append((lbl, round(ev, 1)))
+            _all_mkts[lbl] = {"prob": p_cover, "ev_pct": round(ev, 1),
+                               "odds": odds, "book": book}
+            if ev >= EV_MIN_PCT and r["stake"] > 0:
+                candidates.append({"label": lbl, "true_prob": p_cover, "odds": odds,
+                                   "book": book, "ev_pct": round(ev, 1),
+                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
+
+Reemplaza por:
+
+        # Run line
+        # FILTRO 1: si hay favorito pesado en ML (odds < 1.60), reducir umbral para RL +1.5 del perro
+        _heavy_fav_ml = None
+        for _t, _od_pair in h2h_odds.items():
+            if _od_pair[0] < 1.60:
+                _heavy_fav_ml = _t
+                break
+
+        for team, is_home in [(home, True), (away, False)]:
+            if team not in spread_odds:
+                continue
+            pt, odds, book = spread_odds[team]
+            if is_mlb and abs(pt) > 2.5:
+                continue
+            if is_home:
+                rl = pt if pt != 0 else -1.5
+                p_cover = poisson_runline_prob(home_exp, away_exp, rl)
+            else:
+                rl_home = -(pt) if pt != 0 else -1.5   # away +1.5 → home -1.5
+                p_cover = 1.0 - poisson_runline_prob(home_exp, away_exp, rl_home)
+            sign = f"{pt:+.1f}" if pt != 0 else ("-1.5" if is_home else "+1.5")
+            lbl  = f"🏃 {team} RL {sign}"
+            ev   = (p_cover * odds - 1) * 100
+            r    = kelly_stake(p_cover, odds)
+            _all_evs.append((lbl, round(ev, 1)))
+            _all_mkts[lbl] = {"prob": p_cover, "ev_pct": round(ev, 1),
+                               "odds": odds, "book": book}
+            _es_perro_rl = bool(_heavy_fav_ml and team != _heavy_fav_ml and (pt > 0 or (pt == 0 and not is_home)))
+            _ev_min_rl = max(EV_MIN_PCT / 2, 1.0) if _es_perro_rl else EV_MIN_PCT
+            if ev >= _ev_min_rl and r["stake"] > 0:
+                _perro_note = "⚠️ Alternativa al favorito caro — considera RL +1.5 antes del ML directo" if _es_perro_rl else ""
+                candidates.append({"label": lbl, "true_prob": p_cover, "odds": odds,
+                                   "book": book, "ev_pct": round(ev, 1),
+                                   "stake": r["stake"], "kelly_pct": r["kelly_pct"],
+                                   "stake_warn": _perro_note})
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILTRO 2 — Condiciones mínimas para alertar totals MLB
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+En analyze_game_full(), busca este bloque (el que está cerca del código _oracle_park y _near_line, NO el de analyze_totals):
+
+            # Calcula EV de OVER y UNDER por separado; envía al panel solo el de mayor EV
+            _tot_cands = []
+            for side_label, is_over, p, odds in [
+                (f"📈 OVER {book_line} carreras",  True,
+                 poisson_ou_prob(adj_total, book_line, True),  over_odds),
+                (f"📉 UNDER {book_line} carreras", False,
+                 poisson_ou_prob(adj_total, book_line, False), under_odds),
+            ]:
+
+Reemplaza por:
+
+            # FILTRO 2: Condiciones mínimas para alertar totals (necesita ≥2 de 3)
+            _pit_ok  = h_pname not in ("TBD", "", "SIN CONFIRMAR") and a_pname not in ("TBD", "", "SIN CONFIRMAR")
+            _env_ok  = bool(w_label) or (park != 1.0 and home in MLB_PARK_FACTORS)
+            _edge_ok = abs(_over_edge) >= 0.8
+            _conds   = sum([_pit_ok, _env_ok, _edge_ok])
+            if _conds < 2:
+                print(f"   ⏭️  Totals {home} vs {away}: {_conds}/3 condiciones — omitido (pitcher:{_pit_ok} entorno:{_env_ok} edge:{_edge_ok})")
+            # Calcula EV de OVER y UNDER por separado; envía al panel solo el de mayor EV
+            _tot_cands = []
+            for side_label, is_over, p, odds in ([] if _conds < 2 else [
+                (f"📈 OVER {book_line} carreras",  True,
+                 poisson_ou_prob(adj_total, book_line, True),  over_odds),
+                (f"📉 UNDER {book_line} carreras", False,
+                 poisson_ou_prob(adj_total, book_line, False), under_odds),
+            ]):
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILTRO 3 — Prioridad F5 cuando ambos pitchers son sólidos
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Busca esta línea exacta en analyze_game_full():
+
+    # Drop any pick whose true probability is below the minimum threshold
+    candidates = [c for c in candidates if c["true_prob"] >= PROB_MIN]
+
+Inserta ANTES de esa línea (sin borrarla):
+
+    # FILTRO 3: priorizar F5 cuando ambos abridores tienen ERA < 4.00 confirmada
+    if is_mlb and h_pname not in ("TBD", "", "SIN CONFIRMAR") and a_pname not in ("TBD", "", "SIN CONFIRMAR"):
+        if h_era < 4.00 and a_era < 4.00:
+            _f5_cands = [c for c in candidates if "F5" in c.get("label", "")]
+            _otros    = [c for c in candidates if "F5" not in c.get("label", "")]
+            if _f5_cands:
+                candidates = sorted(_f5_cands, key=lambda x: x["ev_pct"], reverse=True) + _otros
+                print(f"   ⚾ FILTRO 3: F5 priorizado — ERA {h_era:.2f}/{a_era:.2f} confirmadas")
