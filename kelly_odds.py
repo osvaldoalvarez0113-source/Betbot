@@ -334,6 +334,7 @@ last_mlb_card:     date = date(2000, 1, 1)  # 2 PM ET MLB daily card
 last_soccer_card:  date = date(2000, 1, 1)  # 10 AM ET soccer daily card
 last_backtest_report: date = date(2000, 1, 1)  # Sunday 10 AM ET backtest
 _kelly_monthly_mult: float = 1.0  # Improvement 4: monthly ROI-based Kelly multiplier
+_perf_adj: dict = {}   # ajustes por tipo de mercado basados en resultados reales
 _line_history:    dict = {}       # 1B: game_id → [{time, total, ml_home, ml_away}]
 _last_news_seen:  set  = set()    # 1C: news IDs already alerted this session
 _last_news_date:  date = date(2000, 1, 1)  # 1C: reset seen set daily
@@ -501,6 +502,49 @@ def confidence_level(edge_pct):
     if edge_pct >= 5.0: return "HIGH"
     if edge_pct >= 3.0: return "MEDIUM"
     return "LOW"
+
+
+def _load_performance_adjustments() -> dict:
+    """
+    Lee bets_log.csv y calcula el hit rate por tipo de mercado.
+    Si un mercado pierde consistentemente (hit rate < 45%), sube el umbral de EV.
+    Si un mercado gana consistentemente (hit rate > 58%), baja el umbral.
+    Solo activa cuando hay ≥ 20 picks resueltos en ese mercado.
+    """
+    global _perf_adj
+    adj = {"totals": 1.0, "h2h": 1.0, "spreads": 1.0}
+    if not os.path.isfile(BETS_LOG_FILE):
+        return adj
+    try:
+        import csv as _csv
+        rows = []
+        with open(BETS_LOG_FILE, newline="", encoding="utf-8") as f:
+            rows = [r for r in _csv.DictReader(f) if r.get("result") in ("W", "L")]
+        if not rows:
+            return adj
+        resumen = []
+        for mtype in ("totals", "h2h", "spreads"):
+            m_rows = [r for r in rows if r.get("market_type","").lower() == mtype]
+            if len(m_rows) < 20:
+                continue
+            wins     = sum(1 for r in m_rows if r.get("result") == "W")
+            hit_rate = round(wins / len(m_rows) * 100, 1)
+            if hit_rate < 45.0:
+                adj[mtype] = 1.5
+                resumen.append(f"⚠️ {mtype}: {hit_rate}% hit rate — subiendo umbral EV ×1.5")
+            elif hit_rate > 58.0:
+                adj[mtype] = 0.8
+                resumen.append(f"✅ {mtype}: {hit_rate}% hit rate — bajando umbral EV ×0.8")
+            else:
+                resumen.append(f"➡️ {mtype}: {hit_rate}% hit rate — normal")
+        if resumen:
+            print("  📊 Ajustes por resultados:")
+            for r in resumen:
+                print(f"     {r}")
+        _perf_adj = adj
+    except Exception as e:
+        print(f"  ⚠️  _load_performance_adjustments: {e}")
+    return adj
 
 
 def _update_monthly_kelly_mult():
@@ -2605,6 +2649,39 @@ def _regressed_era(season_era: float, innings_pitched: float, career_era: float 
     else:
         return round(season_era * 0.20 + career_era * 0.80, 2)
 
+def _third_time_through_adj(pitcher_name: str, era: float,
+                             pace_data: "dict | None") -> "tuple[float, str]":
+    """
+    Ajuste por tercera vez que el lineup enfrenta al pitcher.
+    Históricamente los pitchers dan ~0.5 carreras más la 3ra vuelta.
+    Solo aplica si se espera que el pitcher lance 6+ innings.
+    Retorna (adj_runs: float, note: str).
+    """
+    if not pitcher_name or pitcher_name in ("TBD", "", "SIN CONFIRMAR"):
+        return 0.0, ""
+    # Estimar innings esperados
+    expected_ip = 5.5  # default
+    if pace_data and pace_data.get("avg_pi"):
+        avg_pi      = float(pace_data["avg_pi"])
+        expected_ip = min(100.0 / max(avg_pi, 10.0) * 0.85, 8.0)
+    if era < 3.00:
+        expected_ip = min(expected_ip + 0.5, 8.0)
+    elif era > 5.00:
+        expected_ip = min(expected_ip - 0.5, 4.5)
+    expected_ip = max(expected_ip, 1.0)
+    if expected_ip < 6.0:
+        return 0.0, ""  # no llega a la 3ra vuelta
+    innings_3rd = round(expected_ip - 6.0, 1)
+    adj         = round(innings_3rd * 0.18, 2)
+    if adj <= 0:
+        return 0.0, ""
+    note = (
+        f"🔄 3ra vuelta al lineup ({pitcher_name}, {expected_ip:.1f} inn proyectados):\n"
+        f"   Los bateadores le conocen mejor → +{adj:.2f} carreras al total"
+    )
+    return adj, note
+
+
 def _day_game_adj(commence: str) -> tuple:
     try:
         _game_et = datetime.fromisoformat(commence.replace("Z", "+00:00")).astimezone(ET)
@@ -2785,6 +2862,58 @@ def _extract_pinnacle_odds(game: dict) -> "dict | None":
                     if pin_h is not None and pin_a is not None:
                         return {"home": pin_h, "away": pin_a}
     return None
+
+def _check_pinnacle_movement(game: dict, pick_label: str, home: str) -> str:
+    """
+    Detecta si Pinnacle movió su línea en contra del pick desde la apertura.
+    Si la línea se movió ≥ 0.5 pts (totals) o ≥ 3pp (ML) en contra → advertencia fuerte.
+    Retorna string de advertencia o '' si no hay señal.
+    """
+    gid   = game.get("id", "")
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    ck    = f"{gid}_{today}"
+    prev  = _line_open_cache.get(ck, {})
+    if not prev:
+        return ""
+    label_up  = pick_label.upper()
+    is_over   = "OVER"  in label_up
+    is_under  = "UNDER" in label_up
+    is_totals = is_over or is_under
+    try:
+        if is_totals:
+            pin_tots = _extract_pinnacle_totals(game)
+            if not pin_tots:
+                return ""
+            curr_line = float(pin_tots["line"])
+            prev_line = float(prev.get("total", curr_line))
+            delta     = round(curr_line - prev_line, 1)
+            if is_over and delta <= -0.5:
+                return (f"⛔ SEÑAL SHARP CONTRARIA: Pinnacle bajó la línea {abs(delta):.1f} pts "
+                        f"desde apertura → sharps apostaron UNDER. Evalúa con cuidado.")
+            if is_under and delta >= 0.5:
+                return (f"⛔ SEÑAL SHARP CONTRARIA: Pinnacle subió la línea {abs(delta):.1f} pts "
+                        f"desde apertura → sharps apostaron OVER. Evalúa con cuidado.")
+        else:
+            pin_h2h = _extract_pinnacle_odds(game)
+            if not pin_h2h:
+                return ""
+            rh    = 1.0 / max(pin_h2h["home"], 1.001)
+            ra    = 1.0 / max(pin_h2h["away"], 1.001)
+            tot   = rh + ra
+            curr  = round(rh / tot * 100, 1)
+            prev_impl = float(prev.get("h_impl", curr))
+            delta_pp  = round(curr - prev_impl, 1)
+            is_home_p = home.upper() in label_up
+            if is_home_p and delta_pp <= -3.0:
+                return (f"⛔ SEÑAL SHARP CONTRARIA: Pinnacle bajó al local {abs(delta_pp):.1f}pp "
+                        f"desde apertura → sharps en visitante. Evalúa con cuidado.")
+            if not is_home_p and delta_pp >= 3.0:
+                return (f"⛔ SEÑAL SHARP CONTRARIA: Pinnacle bajó al visitante {abs(delta_pp):.1f}pp "
+                        f"desde apertura → sharps en local. Evalúa con cuidado.")
+    except Exception:
+        pass
+    return ""
+
 
 def _pinnacle_analysis(
     pick_team: str,
@@ -4959,6 +5088,19 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         home_exp = max(0.1, home_exp + _day_adj / 2)
         away_exp = max(0.1, away_exp + _day_adj / 2)
 
+        # Mejora 2: ajuste por tercera vez por el lineup
+        _ttt_h_adj, _ttt_h_note = _third_time_through_adj(
+            h_pname, h_era_eff, ctx.get("pitcher_pace_home") if False else _h_pace)
+        _ttt_a_adj, _ttt_a_note = _third_time_through_adj(
+            a_pname, a_era_eff, ctx.get("pitcher_pace_away") if False else _a_pace)
+        if _ttt_h_adj > 0:
+            home_exp = max(0.1, home_exp + _ttt_h_adj / 2)
+            away_exp = max(0.1, away_exp + _ttt_h_adj / 2)
+        if _ttt_a_adj > 0:
+            home_exp = max(0.1, home_exp + _ttt_a_adj / 2)
+            away_exp = max(0.1, away_exp + _ttt_a_adj / 2)
+        _ttt_note = "\n".join(n for n in [_ttt_h_note, _ttt_a_note] if n)
+
         _pvt_home = None
         _pvt_away = None
         try:
@@ -5178,7 +5320,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             _all_evs.append((lbl, round(ev, 1)))
             _all_mkts[lbl] = {"prob": true_p_capped, "ev_pct": round(ev, 1),
                                "odds": odds, "book": book}
-            if ev >= EV_MIN_PCT and r["stake"] > 0:
+            _ev_min_ml = EV_MIN_PCT * _perf_adj.get("h2h", 1.0)
+            if ev >= _ev_min_ml and r["stake"] > 0:
                 # Improvement 2: ML requires ≥62% probability (checked after cap)
                 if true_p_capped < PROB_MIN_ML:
                     print(f"   ⏭️  {_tag}: {lbl} prob {true_p_capped:.0%} < {PROB_MIN_ML:.0%} mín ML — omitido")
@@ -5366,7 +5509,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 _all_evs.append((side_label, round(ev, 1)))
                 _all_mkts[side_label] = {"prob": p, "ev_pct": round(ev, 1),
                                          "odds": odds, "book": bk_name}
-                if ev >= EV_MIN_PCT and r["stake"] > 0:
+                _ev_min_tot = EV_MIN_PCT * _perf_adj.get("totals", 1.0)
+                if ev >= _ev_min_tot and r["stake"] > 0:
                     _tot_cands.append({"label": side_label, "true_prob": p, "odds": odds,
                                        "book": bk_name, "ev_pct": round(ev, 1),
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
@@ -5845,6 +5989,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             "pitcher_pace_away":  _a_pace,
             "bullpen_load_home":  _bp_load_h,
             "bullpen_load_away":  _bp_load_a,
+            "ttt_note":           _ttt_note,
         }
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
@@ -6511,6 +6656,13 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     _most_probable = max(_prob_map, key=lambda t: _prob_map[t]["prob"]) if _prob_map else None
     _most_probable_data = _prob_map.get(_most_probable) if _most_probable else None
 
+    # Mejora 3: advertencia por movimiento de Pinnacle contra el pick
+    _pin_mov_warn = ""
+    if top3:
+        _pin_mov_warn = _check_pinnacle_movement(game, top3[0]["label"], home)
+        if _pin_mov_warn:
+            print(f"   ⚠️  Movimiento Pinnacle: {_pin_mov_warn[:80]}")
+
     # Narrativa conversacional del partido
     _narrativa = _generar_narrativa(context, top3, home, away, is_mlb, sport_key)
 
@@ -6530,6 +6682,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         "most_probable_data": _most_probable_data,
         "most_prob_pick":     _most_prob_pick,
         "narrativa":          _narrativa,
+        "pinnacle_mov_warn": _pin_mov_warn,
     }
 
 
@@ -7428,6 +7581,10 @@ def build_analizar_text(result: dict) -> list:
             p1 += (f"📌 Pinnacle: {home_es} {round(raw_h/tot*100,1)}%"
                    f" | {away_es} {round(raw_a/tot*100,1)}%\n")
 
+        # Tercera vez por el lineup
+        if ctx.get("ttt_note"):
+            p1 += f"{ctx['ttt_note']}\n"
+
         # Clima
         if ctx.get("temp_label"):
             p1 += f"{ctx['temp_label']}\n"
@@ -7531,6 +7688,11 @@ def build_analizar_text(result: dict) -> list:
     panel_razon = (ci.get("razonamiento") or "").strip()
     best_c = cands[0] if cands else {}
 
+    # Mejora 3: advertencia movimiento Pinnacle
+    _pmw = result.get("pinnacle_mov_warn", "")
+    if _pmw:
+        p2 += f"{'─'*22}\n{_pmw}\n"
+
     p2 += f"{'─'*22}\n"
     if final_apostar is True and best_c:
         bl_c = (best_c.get("label", "?")
@@ -7552,6 +7714,15 @@ def build_analizar_text(result: dict) -> list:
         p2 += f"📋 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
         if panel_razon:
             p2 += f"<i>{panel_razon[:400]}</i>\n"
+
+    # Mejora 4: horario óptimo
+    if cands:
+        _timing_tip = _bet_timing_advice(
+            cands[0].get("market_type", cands[0].get("label", "")),
+            result.get("time", "")
+        )
+        if _timing_tip:
+            p2 += f"{'─'*22}\n{_timing_tip}\n"
 
     # Consejo — siempre mostrado
     p2 += f"{'─'*22}\n"
@@ -13577,38 +13748,37 @@ def _portfolio_optimize(all_picks: list) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _bet_timing_advice(pick_type: str, commence_time_str: str) -> str:
-    """Return timing window advice line for an alert. Empty string if unavailable."""
+    """Consejo de timing óptimo para apostar según tipo de mercado."""
     try:
-        game_et = datetime.fromisoformat(
-            commence_time_str.replace("Z", "+00:00")
-        ).astimezone(ET)
-        game_str = game_et.strftime("%I:%M %p ET")
+        game_et   = datetime.fromisoformat(
+            commence_time_str.replace("Z", "+00:00")).astimezone(ET)
+        game_str  = game_et.strftime("%I:%M %p ET")
+        late_str  = (game_et - timedelta(hours=1)).strftime("%I:%M %p")
+        early_str = (game_et - timedelta(hours=4)).strftime("%I:%M %p")
+        open_str  = (game_et - timedelta(hours=16)).strftime("%I:%M %p")
     except Exception:
-        game_str = "?"
-
-    if pick_type in ("totals", "total", "over", "under"):
-        window  = "2–4h antes"
-        reason  = "Pitchers confirmados, clima definido"
-        try:
-            from datetime import timezone as _tz
-            open_t  = (game_et - timedelta(hours=4)).strftime("%I:%M %p")
-            close_t = (game_et - timedelta(hours=2)).strftime("%I:%M %p")
-            window  = f"{open_t}–{close_t} ET"
-        except Exception:
-            pass
-    elif pick_type in ("ml", "moneyline"):
-        window  = "Apertura de línea (AM)"
-        reason  = "Sharp money la mueve rápido"
-    elif pick_type == "live":
-        window  = "Inning 3+"
-        reason  = "Pitchers mostrando forma real"
-    elif pick_type == "steam":
-        window  = "AHORA (máx 5 min)"
-        reason  = "Las líneas se mueven muy rápido"
-    else:
         return ""
-    return (f"⏰ Timing óptimo: {window} | Juego: {game_str}\n"
-            f"   Por qué: {reason}")
+    pt = (pick_type or "").lower()
+    if "total" in pt or "under" in pt or "over" in pt:
+        return (
+            f"⏰ CUÁNDO APOSTAR ESTE TOTAL:\n"
+            f"   ✅ Mejor: {open_str} ET (apertura) o {late_str}–{game_str}\n"
+            f"   ⚠️ Evitar: 11 AM–4 PM ET (libros ajustan por público)\n"
+            f"   → Las líneas de totals son más blandas al abrir y en la última hora"
+        )
+    elif "h2h" in pt or "ml" in pt:
+        return (
+            f"⏰ CUÁNDO APOSTAR ESTE ML:\n"
+            f"   ✅ Mejor: {late_str}–{game_str} (dinero sharp ya se movió)\n"
+            f"   → El ML tiene más valor cuando la línea ya fue movida por sharps"
+        )
+    elif "spread" in pt or "rl" in pt:
+        return (
+            f"⏰ CUÁNDO APOSTAR ESTE RL:\n"
+            f"   ✅ Mejor: {early_str}–{late_str} ET\n"
+            f"   Juego: {game_str}"
+        )
+    return ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -14046,6 +14216,7 @@ if __name__ == "__main__":
     _daily_exposure, _daily_exposure_date = _load_daily_exposure()
     print(f"  💼 Exposición diaria restaurada: ${_daily_exposure:.2f} (fecha: {_daily_exposure_date})")
     compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
+    _load_performance_adjustments()   # Mejora 1: ajustar umbrales por resultados reales
     try:
         _check_pinnacle_availability()   # Module 11: verify Pinnacle in Odds API plan
     except Exception as _pe:
