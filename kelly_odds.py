@@ -7316,13 +7316,6 @@ def build_analizar_text(result: dict) -> list:
             p1 += f"⚾ Bullpen ERA: {home_es} {_bpera_h:.2f} | {away_es} {_bpera_a:.2f}\n"
         except Exception:
             pass
-        bp_h = ctx.get("bullpen_load_home")
-        bp_a = ctx.get("bullpen_load_away")
-        if bp_h or bp_a:
-            for _te, _bp in [(home_es, bp_h), (away_es, bp_a)]:
-                if _bp:
-                    flag = f" {_bp['flag']}" if _bp.get("flag") else ""
-                    p1 += f"   {_te}: {_bp['ip_3d']} inn últimos 3 días{flag}\n"
 
         p1 += f"{'─'*22}\n"
 
@@ -7378,14 +7371,6 @@ def build_analizar_text(result: dict) -> list:
             p1 += f"📉 {ctx['line_note']}\n"
 
         # Récord de locación compacto
-        hs  = ctx.get("h_splits") or {}
-        as_ = ctx.get("a_splits") or {}
-        if hs.get("home_wpct") is not None:
-            p1 += (f"🏠 {home_es} casa: {round(hs['home_wpct']*100)}%"
-                   f" | anota {hs.get('home_rs','?')} | recibe {hs.get('home_ra','?')}\n")
-        if as_.get("away_wpct") is not None:
-            p1 += (f"🚗 {away_es} visita: {round(as_['away_wpct']*100)}%"
-                   f" | anota {as_.get('away_rs','?')} | recibe {as_.get('away_ra','?')}\n")
 
     else:
         # Soccer compacto
@@ -7440,7 +7425,7 @@ def build_analizar_text(result: dict) -> list:
             ap = ("✅" if ex.get("apostar") is True
                   else ("❌" if ex.get("apostar") is False else "⚪"))
             ec = _ci_icons.get(ex.get("confianza", ""), "⚪")
-            er = (ex.get("razonamiento") or "sin razonamiento")[:120]
+            er = (ex.get("razonamiento") or "sin razonamiento")[:250]
             p2 += f"<b>{ex['nombre']}</b> {ap} {ec}\n<i>{er}</i>\n\n"
     else:
         # Explicar POR QUÉ no corrió el panel
@@ -7476,15 +7461,15 @@ def build_analizar_text(result: dict) -> list:
                f"EV: +{best_c.get('ev_pct',0):.1f}%"
                f" | Prob: {round(best_c.get('true_prob',0)*100)}%\n")
         if panel_razon:
-            p2 += f"<i>{panel_razon[:200]}</i>\n"
+            p2 += f"<i>{panel_razon[:400]}</i>\n"
     elif final_apostar is False:
         p2 += f"📋 <b>RECOMENDACIÓN: ❌ PASAR</b>\n"
         if panel_razon:
-            p2 += f"<i>{panel_razon[:200]}</i>\n"
+            p2 += f"<i>{panel_razon[:400]}</i>\n"
     else:
         p2 += f"📋 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
         if panel_razon:
-            p2 += f"<i>{panel_razon[:200]}</i>\n"
+            p2 += f"<i>{panel_razon[:400]}</i>\n"
 
     # Consejo — siempre mostrado
     p2 += f"{'─'*22}\n"
@@ -10259,7 +10244,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             "nombre":        _EXPERTOS[i][0],
             "apostar":       r.get("apostar")                          if r else None,
             "confianza":     r.get("confianza", "N/D")                 if r else "N/D",
-            "razonamiento":  (r.get("razonamiento", "") or "")[:120]   if r else "no disponible",
+            "razonamiento":  (r.get("razonamiento", "") or "")[:250]   if r else "no disponible",
         }
         for i, r in enumerate(resultados)
     ]
@@ -10322,8 +10307,8 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             _syn_client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
             _syn_msg = _syn_client.messages.create(
                 model=CLAUDE_MODEL,
-                max_tokens=120,
-                system="Eres un experto en apuestas deportivas. Responde SOLO en español conversacional, máximo 2 oraciones cortas. NUNCA uses JSON, NUNCA uses bloques de código, NUNCA uses comillas. Habla como un amigo directo.",
+                max_tokens=350,
+                system="Eres un experto en apuestas deportivas. Responde SOLO en español conversacional. NUNCA uses JSON, NUNCA uses bloques de código, NUNCA uses comillas. Habla como un amigo directo. Máximo 4 oraciones.",
                 messages=[{"role": "user", "content": _synthesis_prompt if _expert_lines else json.dumps(game_data, default=str, ensure_ascii=False)[:1000]}],
             )
             _syn_raw = _syn_msg.content[0].text.strip()
@@ -10370,7 +10355,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         _final_razon = (base.get("razonamiento", "") or "") + f" {_panel_tag}"
 
     # Hard limit: 200 caracteres máximo sin importar la fuente
-    merged["razonamiento"] = _final_razon[:200]
+    merged["razonamiento"] = _final_razon[:500]
 
     merged["_votos_favor"] = votos_favor   # expuesto para bypass-veto guard en analyze_game_full
     return merged
@@ -11548,19 +11533,6 @@ def notify_bets(new_bets, alerted=None):
             priority = "urgent" if b["edge"] >= 5.0 else ("high" if b["edge"] >= 3 else "default")
             title    = f"{emoji} GANADOR | {team_es} | {match_es}"
 
-        _mp = a.get("most_prob_pick") or {}
-        if _mp.get("team"):
-            _has_val = _mp.get("has_value", False)
-            _val_tag = "✅ también tiene valor EV" if _has_val else "⚠️ precio caro — sin valor EV"
-            _mp_odds_str = f"@ {_mp['odds']:.2f}" if _mp.get("odds") else ""
-            _mp_section = (
-                f"\n{'━'*22}\n"
-                f"🎯 MÁS PROBABLE DE GANAR:\n"
-                f"   {_es(_mp['team'])}  {_mp['prob']}%  {_mp_odds_str}  {_mp['book']}\n"
-                f"   {_val_tag}\n"
-                f"{'━'*22}"
-            )
-            body = body + _mp_section
         ntfy_post(title, body, priority)
         alerted_bets.add(f"{b['game_id']}|{b['team']}")
         if alerted is not None:

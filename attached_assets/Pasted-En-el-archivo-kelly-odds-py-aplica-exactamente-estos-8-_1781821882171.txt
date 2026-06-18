@@ -1,0 +1,84 @@
+En el archivo kelly_odds.py, aplica exactamente estos 8 cambios sin tocar nada más:
+
+CAMBIO 1 — Razonamiento final más largo
+Busca: merged["razonamiento"] = _final_razon[:200]
+Reemplaza por: merged["razonamiento"] = _final_razon[:500]
+
+---
+
+CAMBIO 2 — Razonamiento por experto más largo (en _expertos_detalle)
+Busca: "razonamiento": (r.get("razonamiento", "") or "")[:120] if r else "no disponible",
+Reemplaza por: "razonamiento": (r.get("razonamiento", "") or "")[:250] if r else "no disponible",
+
+---
+
+CAMBIO 3 — Expertos visibles con más texto (en build_analizar_text)
+Busca: er = (ex.get("razonamiento") or "sin razonamiento")[:120]
+Reemplaza por: er = (ex.get("razonamiento") or "sin razonamiento")[:250]
+
+---
+
+CAMBIO 4 — Síntesis con más tokens
+Busca este bloque (está cerca del texto "Eres un experto en apuestas deportivas. Responde SOLO en español conversacional"):
+            _syn_msg = _syn_client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=120,
+Cambia solo max_tokens=120, por max_tokens=350,
+
+---
+
+CAMBIO 5 — Síntesis con más libertad de expresión
+Busca exactamente:
+system="Eres un experto en apuestas deportivas. Responde SOLO en español conversacional, máximo 2 oraciones cortas. NUNCA uses JSON, NUNCA uses bloques de código, NUNCA uses comillas. Habla como un amigo directo.",
+Reemplaza por:
+system="Eres un experto en apuestas deportivas. Responde SOLO en español conversacional. NUNCA uses JSON, NUNCA uses bloques de código, NUNCA uses comillas. Habla como un amigo directo. Máximo 4 oraciones.",
+
+---
+
+CAMBIO 6 — Recomendación final más visible (hay 2 ocurrencias, reemplaza ambas)
+Busca: f"<i>{panel_razon[:200]}</i>\n"
+Reemplaza por: f"<i>{panel_razon[:400]}</i>\n"
+
+---
+
+CAMBIO 7 — Eliminar bug en notify_bets (variable 'a' no existe en ese scope)
+Busca y elimina completamente este bloque dentro de la función notify_bets:
+        _mp = a.get("most_prob_pick") or {}
+        if _mp.get("team"):
+            _has_val = _mp.get("has_value", False)
+            _val_tag = "✅ también tiene valor EV" if _has_val else "⚠️ precio caro — sin valor EV"
+            _odds_b = f"@ {_mp['odds']:.2f}" if _mp.get("odds") else ""
+            _mp_section = (
+                f"\n{'━'*22}\n"
+                f"🎯 MÁS PROBABLE DE GANAR:\n"
+                f"   {_es(_mp['team'])}  {_mp['prob']}%  {_odds_b}\n"
+                f"   {_val_tag}\n"
+                f"{'━'*22}"
+            )
+            body = body + _mp_section
+
+---
+
+CAMBIO 8 — Eliminar secciones verbose del contexto p1 MLB en build_analizar_text
+Dentro de la función build_analizar_text, en el bloque if is_mlb: del contexto, elimina estas 3 secciones (bórralas completamente, no las reemplaces con nada):
+
+8a — Variables de splits:
+        hs  = ctx.get("h_splits") or {}
+        as_ = ctx.get("a_splits") or {}
+
+8b — Bloque de home/away splits:
+        if hs.get("home_wpct") is not None:
+            p1 += (f"🏠 {home_es} casa: {round(hs['home_wpct']*100)}%"
+                   f" | anota {hs.get('home_rs','?')} | recibe {hs.get('home_ra','?')}\n")
+        if as_.get("away_wpct") is not None:
+            p1 += (f"🚗 {away_es} visita: {round(as_['away_wpct']*100)}%"
+                   f" | anota {as_.get('away_rs','?')} | recibe {as_.get('away_ra','?')}\n")
+
+8c — Bloque de carga de bullpen:
+        bp_h = ctx.get("bullpen_load_home")
+        bp_a = ctx.get("bullpen_load_away")
+        if bp_h or bp_a:
+            for _te, _bp in [(home_es, bp_h), (away_es, bp_a)]:
+                if _bp:
+                    flag = f" {_bp['flag']}" if _bp.get("flag") else ""
+                    p1 += f"   {_te}: {_bp['ip_3d']} inn últimos 3 días{flag}\n"
