@@ -5089,10 +5089,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         away_exp = max(0.1, away_exp + _day_adj / 2)
 
         # Mejora 2: ajuste por tercera vez por el lineup
-        _ttt_h_adj, _ttt_h_note = _third_time_through_adj(
-            h_pname, h_era_eff, ctx.get("pitcher_pace_home") if False else _h_pace)
-        _ttt_a_adj, _ttt_a_note = _third_time_through_adj(
-            a_pname, a_era_eff, ctx.get("pitcher_pace_away") if False else _a_pace)
+        _ttt_h_adj, _ttt_h_note = _third_time_through_adj(h_pname, h_era_eff, None)
+        _ttt_a_adj, _ttt_a_note = _third_time_through_adj(a_pname, a_era_eff, None)
         if _ttt_h_adj > 0:
             home_exp = max(0.1, home_exp + _ttt_h_adj / 2)
             away_exp = max(0.1, away_exp + _ttt_h_adj / 2)
