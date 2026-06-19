@@ -10430,7 +10430,30 @@ def _generar_narrativa(context: dict, candidates: list, home: str, away: str,
         return msg.content[0].text.strip()
     except Exception as _ne:
         print(f"  ⚠️  narrativa error: {_ne}")
-        return ""
+        try:
+            _fb = []
+            _eh  = float(context.get("era_home") or 4.5)
+            _ea  = float(context.get("era_away") or 4.5)
+            _pfh = context.get("pform_h") or {}
+            _pfa = context.get("pform_a") or {}
+            _ph  = context.get("pname_home", "El pitcher local")
+            _pa  = context.get("pname_away", "El pitcher visitante")
+            if "DECLIVE" in _pfh.get("trend", ""):
+                _fb.append(f"{_ph} viene en declive en sus últimas salidas")
+            elif _eh < 3.0:
+                _fb.append(f"{_ph} es el pitcher dominante del partido")
+            if "DECLIVE" in _pfa.get("trend", ""):
+                _fb.append(f"{_pa} también viene en mal momento")
+            elif _ea > 5.5:
+                _fb.append(f"{_pa} es vulnerable con ERA {_ea:.2f}")
+            if candidates:
+                _bc  = candidates[0]
+                _lbl = (_bc.get("label", "").replace("🔵 ","").replace("🔴 ","")
+                        .replace("📈 ","").replace("📉 ",""))
+                _fb.append(f"El modelo ve valor en {_lbl} con EV +{_bc.get('ev_pct', 0):.1f}%")
+            return ". ".join(_fb) + "." if _fb else ""
+        except Exception:
+            return ""
 
 
 def panel_expertos(game_data: dict, sport: str) -> "dict | None":
@@ -10531,6 +10554,19 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
 
     disponibles = sum(1 for r in resultados if r is not None)
     if disponibles == 0:
+        ev_f = float(game_data.get("ev_pct", 0) or 0)
+        if ev_f >= 8.0:
+            print(f"   🤖 Panel fallback: EV +{ev_f:.1f}% — auto-aprobado (API no disponible)")
+            return {
+                "apostar":              True,
+                "confianza":            "MEDIA",
+                "razonamiento":         f"Panel no disponible. Pick aprobado automáticamente por EV +{ev_f:.1f}%. Verifica pitcher y clima antes de apostar.",
+                "factores_positivos":   [f"EV +{ev_f:.1f}% positivo"],
+                "factores_negativos":   ["Panel de expertos no disponible — verifica manualmente"],
+                "datos_inconsistentes": [],
+                "_expertos_detalle":    [],
+                "_votos_favor":         1,
+            }
         return None
 
     consenso = (votos_favor >= 2) and not veto_absoluto
