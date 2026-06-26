@@ -1,0 +1,34 @@
+=== PATRONES SITUACIONALES MLB 2026 (CAPA DE META-ANÁLISIS) ===
+
+Antes de emitir su veredicto, cada experto debe revisar si el juego activa alguno de estos patrones detectados durante la temporada 2026. No son reglas absolutas, pero son señales de alta frecuencia que deben mencionarse si aplican:
+
+PATRÓN 1 – MOMENTUM DE SERIE
+Si el equipo que estamos analizando ganó el juego anterior en esta misma serie (ayer o antes de ayer contra el mismo rival), eso es una señal a favor. Si perdió el juego anterior de la serie, es una señal en contra. El momentum dentro de la serie ha sido el patrón más consistente de la temporada.
+
+PATRÓN 2 – TRAMPA DEL FAVORITO PESADO
+Si el favorito está a -200 o peor en el moneyline, hay que decirlo. A ese precio, incluso ganando el 62% del tiempo, el ROI es negativo a largo plazo. Solo vale la pena si hay razón estadística muy clara (ventaja de más de 15% en probabilidad real vs línea implícita).
+
+PATRÓN 3 – OVER EN JUEGO DE DÍA CON TOTAL ALTO
+Si el total del juego es 9 o más Y el juego es diurno (antes de las 5pm local), el Over tiene ventaja estadística real en 2026. Mencionar esto como señal de totales.
+
+PATRÓN 4 – UNDERDOG VISITANTE CON VALOR
+Si un equipo visitante está entre +110 y +160, ese rango ha producido valor positivo esta temporada, especialmente en duelos de división. No descartar automáticamente al underdog visitante en ese rango.
+
+PATRÓN 5 – GOLEADA NO GARANTIZA REBOTE
+Si un equipo fue goleado (diferencia de 6+ carreras) en el juego anterior, NO asumir que va a rebotar. En 2026 el patrón muestra que los equipos dominantes siguen dominando en juegos consecutivos.
+
+PATRÓN 6 – PERFILES DE EQUIPO ACTIVOS EN 2026
+Mencionar si alguno de estos perfiles aplica al juego analizado:
+- TB en casa: rendimiento sólido
+- CWS en casa: 66.7% win rate en casa, muy por encima del mercado
+- CLE: fuerte tendencia al UNDER, especialmente después de perder ante pitcher derecho
+- WSH en casa: tendencia fuerte al OVER
+- SD, SEA, TEX en casa: tendencia al UNDER
+- PIT y MIN: Over en 70% de sus juegos en últimos 30 días
+- PHI: se recupera bien después de derrota, especialmente fin de semana
+
+PATRÓN 7 – DIFERENCIAL DE CALIDAD EXTREMO
+Si un equipo ÉLITE (LAD, MIL, NYY, ATL con más de 47 victorias) enfrenta a un equipo BASURA (menos de 36 victorias), el favorito tiene valor real incluso a precio moderado (-130 a -160).
+
+INSTRUCCIÓN: Si ningún patrón aplica, no mencionar esta sección. Si uno o más aplican, cada experto relevante debe incorporarlo a su análisis de forma natural, en español conversacional, sin mencionar nombres técnicos como "ROI", "ATS", "hit rate" o "patrón #X". Hablar de estos ángulos como parte del análisis, no como metadatos.
+=== FIN PATRONES SITUACIONALES ===

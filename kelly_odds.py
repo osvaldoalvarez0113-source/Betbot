@@ -10468,6 +10468,45 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     Returns a merged dict compatible with the standard analyze_with_claude response,
     or None if no expert could be reached.
     """
+    _PATRONES_MLB_2026 = (
+        "\n\n=== PATRONES SITUACIONALES MLB 2026 (CAPA DE META-ANÁLISIS) ===\n"
+        "Antes de emitir tu veredicto, revisa si el juego activa alguno de estos patrones "
+        "detectados durante la temporada 2026. No son reglas absolutas, pero son señales de "
+        "alta frecuencia que debes mencionar si aplican:\n\n"
+        "PATRÓN 1 – MOMENTUM DE SERIE: Si el equipo analizado ganó el juego anterior en esta "
+        "misma serie (ayer o antes de ayer contra el mismo rival), es señal a favor. Si perdió, "
+        "es señal en contra. El momentum dentro de la serie ha sido el patrón más consistente "
+        "de la temporada.\n\n"
+        "PATRÓN 2 – TRAMPA DEL FAVORITO PESADO: Si el favorito está a -200 o peor, hay que "
+        "decirlo. A ese precio, incluso ganando el 62% del tiempo, el resultado es negativo "
+        "a largo plazo. Solo vale si hay ventaja real de más de 15% en probabilidad vs línea.\n\n"
+        "PATRÓN 3 – OVER EN JUEGO DE DÍA CON TOTAL ALTO: Si el total es 9 o más Y el juego "
+        "es diurno (antes de las 5pm local), el Over tiene ventaja estadística real en 2026.\n\n"
+        "PATRÓN 4 – UNDERDOG VISITANTE CON VALOR: Si un visitante está entre +110 y +160, "
+        "ese rango ha producido valor positivo esta temporada, especialmente en duelos de "
+        "división. No descartar automáticamente al underdog visitante en ese rango.\n\n"
+        "PATRÓN 5 – GOLEADA NO GARANTIZA REBOTE: Si un equipo fue goleado (6+ carreras) en "
+        "el juego anterior, NO asumir que va a rebotar. Los equipos dominantes siguen dominando "
+        "en juegos consecutivos.\n\n"
+        "PATRÓN 6 – PERFILES DE EQUIPO ACTIVOS EN 2026:\n"
+        "- TB en casa: rendimiento sólido\n"
+        "- CWS en casa: win rate muy por encima del mercado\n"
+        "- CLE: fuerte tendencia al bajo, especialmente tras perder ante pitcher derecho\n"
+        "- WSH en casa: tendencia fuerte al alto\n"
+        "- SD, SEA, TEX en casa: tendencia al bajo\n"
+        "- PIT y MIN: alto en 70% de sus juegos en últimos 30 días\n"
+        "- PHI: se recupera bien después de derrota, especialmente fin de semana\n\n"
+        "PATRÓN 7 – DIFERENCIAL DE CALIDAD EXTREMO: Si un equipo ÉLITE (LAD, MIL, NYY, ATL "
+        "con más de 47 victorias) enfrenta a un equipo en mal momento (menos de 36 victorias), "
+        "el favorito tiene valor real incluso a precio moderado (-130 a -160).\n\n"
+        "INSTRUCCIÓN: Si ningún patrón aplica, no mencionar esta sección. Si uno o más aplican, "
+        "incorpóralo a tu análisis de forma natural, en español conversacional, sin mencionar "
+        "nombres técnicos como 'hit rate', 'ATS' o 'patrón #X'. Habla de estos ángulos como "
+        "parte del análisis, no como metadatos.\n"
+        "=== FIN PATRONES SITUACIONALES ==="
+    )
+    _is_mlb = "baseball" in sport.lower()
+
     _EXPERTOS = [
         (
             "El Estadístico",
@@ -10528,7 +10567,8 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
 
     for i, (nombre, extra) in enumerate(_EXPERTOS):
         _panel_model = CLAUDE_PANEL_MODEL  # configurable desde Railway env vars
-        res = analyze_with_claude(game_data, sport, _extra_system=extra,
+        _extra_full  = extra + (_PATRONES_MLB_2026 if _is_mlb else "")
+        res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
                                   _model=_panel_model)
         if res is None:
             print(f"   🎓 {nombre}: no disponible")
