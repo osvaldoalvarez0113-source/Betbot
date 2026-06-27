@@ -5291,6 +5291,30 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             except Exception:
                 pass
 
+        # Fetch enhanced context + adjust p_home by pitcher recent form (BEFORE EV loop)
+        _enh_ctx: dict = {}
+        if is_mlb:
+            try:
+                _enh_ctx = _fetch_enhanced_game_context(
+                    _team_id(home), _team_id(away), h_pid, a_pid, game_date
+                )
+            except Exception as _ece:
+                print(f"  ⚠️  enhanced_ctx error: {_ece}")
+
+            try:
+                _base_p_home = p_home
+                p_home = adjust_probability_for_pitcher_form(
+                    base_prob_home=p_home,
+                    home_era_season=h_era,
+                    away_era_season=a_era,
+                    home_era_last3=_enh_ctx.get("home_pitcher_last3_era_avg"),
+                    away_era_last3=_enh_ctx.get("away_pitcher_last3_era_avg"),
+                )
+                p_away = 1.0 - p_home
+                print(f"[DEBUG] Prob base: {_base_p_home} → Prob ajustada: {p_home}")
+            except Exception as _pfe:
+                print(f"  ⚠️  pitcher form adj error: {_pfe}")
+
         # ML
         for team, true_p, lbl in [
             (home, p_home, f"🔵 {home} ML"),
@@ -5895,28 +5919,6 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             _bp_load_a = fetch_bullpen_load(away)
         except Exception:
             pass
-
-        # Enhanced game context: últimas 3 salidas, bullpen ERA 7d, stats de serie
-        _enh_ctx: dict = {}
-        try:
-            _enh_ctx = _fetch_enhanced_game_context(
-                _team_id(home), _team_id(away), h_pid, a_pid, game_date
-            )
-        except Exception as _ece:
-            print(f"  ⚠️  enhanced_ctx error: {_ece}")
-
-        # Ajuste de p_home por forma reciente del abridor (últimas 3 salidas)
-        try:
-            p_home = adjust_probability_for_pitcher_form(
-                base_prob_home=p_home,
-                home_era_season=h_era,
-                away_era_season=a_era,
-                home_era_last3=_enh_ctx.get("home_pitcher_last3_era_avg"),
-                away_era_last3=_enh_ctx.get("away_pitcher_last3_era_avg"),
-            )
-            p_away = 1.0 - p_home
-        except Exception as _pfe:
-            print(f"  ⚠️  pitcher form adj error: {_pfe}")
 
         # MLB A3: temperature adjustment
         temp_f     = (wind.get("temp_f") if wind else None)
