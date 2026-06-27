@@ -5301,6 +5301,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             except Exception as _ece:
                 print(f"  ⚠️  enhanced_ctx error: {_ece}")
 
+            print(f"[DEBUG ENH] home_last3_era={_enh_ctx.get('home_pitcher_last3_era_avg')} away_last3_era={_enh_ctx.get('away_pitcher_last3_era_avg')}")
+
             try:
                 _base_p_home = p_home
                 p_home = adjust_probability_for_pitcher_form(
