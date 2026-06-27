@@ -5905,6 +5905,19 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         except Exception as _ece:
             print(f"  ⚠️  enhanced_ctx error: {_ece}")
 
+        # Ajuste de p_home por forma reciente del abridor (últimas 3 salidas)
+        try:
+            p_home = adjust_probability_for_pitcher_form(
+                base_prob_home=p_home,
+                home_era_season=h_era,
+                away_era_season=a_era,
+                home_era_last3=_enh_ctx.get("home_pitcher_last3_era_avg"),
+                away_era_last3=_enh_ctx.get("away_pitcher_last3_era_avg"),
+            )
+            p_away = 1.0 - p_home
+        except Exception as _pfe:
+            print(f"  ⚠️  pitcher form adj error: {_pfe}")
+
         # MLB A3: temperature adjustment
         temp_f     = (wind.get("temp_f") if wind else None)
         t_adj, t_label = _temp_run_adj(temp_f)
@@ -10350,6 +10363,41 @@ def analyze_with_claude(game_data: dict, sport: str,
 
 
 _enh_ctx_cache: dict = {}
+
+def adjust_probability_for_pitcher_form(
+    base_prob_home: float,
+    home_era_season: float,
+    away_era_season: float,
+    home_era_last3,
+    away_era_last3,
+) -> float:
+    """
+    Ajusta la probabilidad base del equipo local según la forma reciente de los abridores.
+    ERA ajustada = 40% ERA temporada + 60% ERA últimas 3 salidas.
+    El delta entre el diferencial ajustado y el de temporada se convierte en ±prob (4% por punto ERA).
+    Clamped a ±8pp máximo y al rango [0.30, 0.75].
+    """
+    if home_era_last3 is None and away_era_last3 is None:
+        return base_prob_home
+
+    h_recent = home_era_last3 if home_era_last3 is not None else home_era_season
+    a_recent = away_era_last3 if away_era_last3 is not None else away_era_season
+
+    h_adj = home_era_season * 0.40 + h_recent * 0.60
+    a_adj = away_era_season * 0.40 + a_recent * 0.60
+
+    diff_season  = away_era_season - home_era_season   # positivo = local mejor
+    diff_adjusted = a_adj - h_adj
+
+    delta = diff_adjusted - diff_season
+    prob_adj = max(-0.08, min(0.08, delta * 0.04))
+
+    adjusted = max(0.30, min(0.75, base_prob_home + prob_adj))
+    if abs(prob_adj) > 0.005:
+        print(f"   🎯 Forma reciente ERA: diff_season={diff_season:+.2f} "
+              f"diff_adj={diff_adjusted:+.2f} → p_home {base_prob_home:.3f}→{adjusted:.3f}")
+    return round(adjusted, 4)
+
 
 def _fetch_enhanced_game_context(
     home_team_id, away_team_id, home_pitcher_id, away_pitcher_id, game_date_str: str
