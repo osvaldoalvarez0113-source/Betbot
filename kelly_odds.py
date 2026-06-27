@@ -10191,6 +10191,16 @@ _CLAUDE_SYSTEM = (
     "• K/9 >9.0 confirmado = mencionar como ventaja del pitcher\n"
     "• Sin K/9 confirmado = no mencionar props de ponches\n\n"
 
+    "PONDERACIÓN DE ABRIDOR (obligatoria en béisbol):\n"
+    "• ERA diff >= 1.5: el equipo con mejor ERA tiene ventaja DOMINANTE que supera "
+    "los promedios ofensivos del rival, salvo que el rival cumpla 2 de estas 3: "
+    "OPS > 0.780 | bullpen ERA < 3.50 | Pinnacle > 55% a su favor\n"
+    "• Pitcher + Pinnacle en el mismo lado = señal FUERTE, votar en esa dirección\n"
+    "• Pick CONTRA la ventaja del abridor Y contra Pinnacle = ALTO RIESGO, "
+    "mencionar explícitamente y recomendar stake mínimo\n"
+    "• ERA < 2.50 en últimas 3 salidas vs rival con ERA > 5.00 = "
+    "tratar como ventaja de 2.0 puntos de ERA\n\n"
+
     "RED FLAGS REALES (solo estas justifican vetar):\n"
     "• Lesión confirmada del pitcher titular hoy\n"
     "• Viento >20mph hacia afuera O temperatura <40°F\n"
@@ -10571,6 +10581,38 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         "incorpóralos dentro del campo 'razonamiento' del JSON, en lenguaje directo y sin "
         "mencionar nombres técnicos como 'hit rate', 'ATS' o 'patrón #X'.\n"
         "=== FIN PATRONES SITUACIONALES ===\n\n"
+
+        "=== REGLAS DE PONDERACIÓN OBLIGATORIAS (PRIORIDAD SOBRE PATRONES) ===\n\n"
+
+        "REGLA 1 — VENTAJA DE ABRIDOR (PRIORITARIA):\n"
+        "Si la diferencia de ERA entre los abridores es >= 1.5 puntos, el equipo con ERA inferior "
+        "tiene ventaja DOMINANTE. Esta ventaja supera los promedios ofensivos del rival A MENOS QUE "
+        "se cumplan DOS de estas tres condiciones: "
+        "(a) rival tiene OPS > 0.780, "
+        "(b) bullpen del rival tiene ERA < 3.50, "
+        "(c) Pinnacle da > 55% de probabilidad al rival. "
+        "Si no se cumplen dos de esas tres, la ventaja del abridor es determinante.\n\n"
+
+        "REGLA 2 — CONFIRMACIÓN SHARP:\n"
+        "Si Pinnacle apunta en la misma dirección que la ventaja del abridor, "
+        "esa combinación es señal FUERTE — al menos 2/3 votos del panel deben ir en esa dirección. "
+        "No vetar por razones menores cuando pitcher dominante Y Pinnacle coinciden.\n\n"
+
+        "REGLA 3 — CONTRADICCIÓN INTERNA:\n"
+        "Si el pick va EN CONTRA de la ventaja del abridor Y en contra de Pinnacle al mismo tiempo, "
+        "mencionar en razonamiento: 'PICK DE ALTO RIESGO — modelo contra mercado y contra el montículo'. "
+        "Recomendar stake mínimo en ese caso.\n\n"
+
+        "REGLA 4 — FORMA RECIENTE EQUIVALENTE A ERA:\n"
+        "Si un abridor tiene ERA < 2.50 en sus últimas 3 salidas y el rival tiene ERA > 5.00 "
+        "en sus últimas 3 salidas, tratar eso como ventaja de 2.0 puntos de ERA "
+        "y aplicar la Regla 1 con esa ventaja implícita.\n\n"
+
+        "APLICACIÓN: Estas reglas son prioritarias. No modificas el pick del modelo — "
+        "el usuario decide — pero debes mencionar cualquier contradicción con estas reglas "
+        "dentro del campo razonamiento, de forma directa y sin tecnicismos.\n"
+        "=== FIN REGLAS DE PONDERACIÓN ===\n\n"
+
         "⚠️ FORMATO OBLIGATORIO: Tu respuesta DEBE ser exclusivamente el JSON exacto que se "
         "indica en el mensaje del usuario (con los campos pick, line, confianza, razonamiento, "
         "factores_positivos, factores_negativos, datos_inconsistentes, apostar). "
