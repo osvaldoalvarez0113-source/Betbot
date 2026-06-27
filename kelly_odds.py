@@ -5896,6 +5896,15 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         except Exception:
             pass
 
+        # Enhanced game context: últimas 3 salidas, bullpen ERA 7d, stats de serie
+        _enh_ctx: dict = {}
+        try:
+            _enh_ctx = _fetch_enhanced_game_context(
+                _team_id(home), _team_id(away), h_pid, a_pid, game_date
+            )
+        except Exception as _ece:
+            print(f"  ⚠️  enhanced_ctx error: {_ece}")
+
         # MLB A3: temperature adjustment
         temp_f     = (wind.get("temp_f") if wind else None)
         t_adj, t_label = _temp_run_adj(temp_f)
@@ -5982,6 +5991,14 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             "bat_away":      bat_a,     # MLB A7
             "rlm_data":      rlm_data,  # Public % / RLM (Module B)
             "lineup_data":   _lineup,   # Confirmed lineup (MLB A8)
+            # Enhanced context (last 3 starts, bullpen ERA 7d, serie stats)
+            "enh_h_last3_era":     _enh_ctx.get("home_pitcher_last3_era_avg"),
+            "enh_a_last3_era":     _enh_ctx.get("away_pitcher_last3_era_avg"),
+            "enh_h_last3_txt":     _enh_ctx.get("home_pitcher_last3_txt"),
+            "enh_a_last3_txt":     _enh_ctx.get("away_pitcher_last3_txt"),
+            "enh_h_bullpen_era7d": _enh_ctx.get("home_bullpen_era_7d"),
+            "enh_a_bullpen_era7d": _enh_ctx.get("away_bullpen_era_7d"),
+            "enh_serie_txt":       _enh_ctx.get("serie_txt"),
             "pitch_intel": {            # intelligence rules output
                 "notes":         _pitch_notes,
                 "reasoning":     _pitch_reason,
@@ -10330,6 +10347,159 @@ def analyze_with_claude(game_data: dict, sport: str,
         print(f"  ⚠️  Claude API error: {e}")
         _claude_cache[_ck] = None
         return None
+
+
+_enh_ctx_cache: dict = {}
+
+def _fetch_enhanced_game_context(
+    home_team_id, away_team_id, home_pitcher_id, away_pitcher_id, game_date_str: str
+) -> dict:
+    """
+    Contexto enriquecido via MLB Stats API:
+      1. Últimas 3 salidas reales de cada abridor (solo salidas >= 3 IP)
+      2. ERA del bullpen de los últimos 7 días
+      3. Stats de la serie actual (últimos 5 días entre los dos equipos)
+    Usa _mlb_rest para mantenerse en el mismo cliente HTTP ya configurado.
+    Devuelve dict con claves escalares/string para pasar por _claude_data_g.update().
+    """
+    _ck = f"enh_{home_team_id}_{away_team_id}_{home_pitcher_id}_{away_pitcher_id}_{game_date_str}"
+    if _ck in _enh_ctx_cache:
+        return _enh_ctx_cache[_ck]
+
+    result: dict = {}
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        gd = _dt.strptime(game_date_str, "%Y-%m-%d")
+        seven_ago = (gd - _td(days=7)).strftime("%Y-%m-%d")
+        five_ago  = (gd - _td(days=5)).strftime("%Y-%m-%d")
+        year = gd.year
+    except Exception:
+        _enh_ctx_cache[_ck] = result
+        return result
+
+    # ── 1. Últimas 3 salidas de cada abridor ─────────────────────────────────
+    def _last3(pid, label):
+        if not pid:
+            return
+        try:
+            data = _mlb_rest(f"/people/{pid}/stats",
+                              {"stats": "gameLog", "season": year, "group": "pitching"})
+            splits = (data.get("stats", [{}])[0].get("splits", []) or [])
+            starts = []
+            for s in splits:
+                ip_raw = s.get("stat", {}).get("inningsPitched", "0") or "0"
+                try:
+                    ip = _parse_ip(ip_raw)
+                except Exception:
+                    ip = float(ip_raw)
+                if ip >= 3.0:
+                    er = int(s["stat"].get("earnedRuns", 0) or 0)
+                    era_g = round(er * 9 / max(ip, 0.1), 2)
+                    starts.append({
+                        "date": s.get("date", "?"),
+                        "ip": ip_raw,
+                        "er": er,
+                        "era_game": era_g,
+                        "k": int(s["stat"].get("strikeOuts", 0) or 0),
+                    })
+            last3 = starts[-3:] if len(starts) >= 3 else starts
+            era_avg = round(sum(x["era_game"] for x in last3) / len(last3), 2) if last3 else None
+            result[f"{label}_last3_era_avg"] = era_avg
+            if last3:
+                lines = [f"{x['date']} {x['ip']}IP {x['er']}ER ERA{x['era_game']} K{x['k']}" for x in last3]
+                result[f"{label}_last3_txt"] = " | ".join(lines)
+        except Exception as _e:
+            print(f"  ⚠️  _last3 {label}: {_e}")
+
+    _last3(home_pitcher_id, "home_pitcher")
+    _last3(away_pitcher_id, "away_pitcher")
+
+    # ── 2. Bullpen ERA últimos 7 días ─────────────────────────────────────────
+    def _bullpen_era(team_id, label):
+        if not team_id:
+            return
+        try:
+            data = _mlb_rest(f"/teams/{team_id}/stats", {
+                "stats": "byDateRange", "group": "pitching",
+                "startDate": seven_ago, "endDate": game_date_str, "season": year,
+            })
+            splits = (data.get("stats", [{}])[0].get("splits", []) or [])
+            relievers = [s for s in splits if int((s.get("stat") or {}).get("gamesStarted", 1) or 1) == 0]
+            if not relievers:
+                relievers = splits
+            total_er = sum(float((s.get("stat") or {}).get("earnedRuns", 0) or 0) for s in relievers)
+            total_ip = sum(float((s.get("stat") or {}).get("inningsPitched", 0) or 0) for s in relievers)
+            result[f"{label}_bullpen_era_7d"] = round(total_er * 9 / total_ip, 2) if total_ip > 0 else None
+        except Exception as _e:
+            print(f"  ⚠️  _bullpen_era {label}: {_e}")
+
+    _bullpen_era(home_team_id, "home")
+    _bullpen_era(away_team_id, "away")
+
+    # ── 3. Stats de la serie actual (últimos 5 días) ──────────────────────────
+    def _serie_stats(team_id, opp_id, label):
+        if not team_id or not opp_id:
+            return
+        try:
+            data = _mlb_rest("/schedule", {
+                "teamId": team_id, "startDate": five_ago, "endDate": game_date_str,
+                "sportId": 1, "hydrate": "linescore,teams",
+            })
+            games = []
+            for d in (data.get("dates") or []):
+                for g in (d.get("games") or []):
+                    if (g.get("status") or {}).get("statusCode") != "F":
+                        continue
+                    teams = g.get("teams", {})
+                    h_tid = (teams.get("home", {}).get("team") or {}).get("id")
+                    a_tid = (teams.get("away", {}).get("team") or {}).get("id")
+                    if opp_id not in (h_tid, a_tid):
+                        continue
+                    hs = int(teams.get("home", {}).get("score", 0) or 0)
+                    as_ = int(teams.get("away", {}).get("score", 0) or 0)
+                    is_home = h_tid == team_id
+                    rs = hs if is_home else as_
+                    ra = as_ if is_home else hs
+                    games.append({"rs": rs, "ra": ra, "won": rs > ra, "total": hs + as_})
+            if games:
+                wins = sum(1 for g in games if g["won"])
+                avg_rs = round(sum(g["rs"] for g in games) / len(games), 1)
+                avg_tot = round(sum(g["total"] for g in games) / len(games), 1)
+                result[f"{label}_serie_wins"]    = wins
+                result[f"{label}_serie_games"]   = len(games)
+                result[f"{label}_serie_avg_rs"]  = avg_rs
+                result[f"{label}_serie_avg_tot"] = avg_tot
+        except Exception as _e:
+            print(f"  ⚠️  _serie_stats {label}: {_e}")
+
+    _serie_stats(home_team_id, away_team_id, "home")
+    _serie_stats(away_team_id, home_team_id, "away")
+
+    # ── Formato de texto para el panel ────────────────────────────────────────
+    parts = []
+    h3 = result.get("home_pitcher_last3_txt")
+    a3 = result.get("away_pitcher_last3_txt")
+    if h3:
+        parts.append(f"LOCAL últimas 3 salidas: {h3}")
+    if a3:
+        parts.append(f"VISITANTE últimas 3 salidas: {a3}")
+    hbp = result.get("home_bullpen_era_7d")
+    abp = result.get("away_bullpen_era_7d")
+    if hbp is not None:
+        parts.append(f"Bullpen LOCAL ERA 7d: {hbp:.2f}")
+    if abp is not None:
+        parts.append(f"Bullpen VISITANTE ERA 7d: {abp:.2f}")
+    hw = result.get("home_serie_wins")
+    hn = result.get("home_serie_games")
+    if hw is not None and hn:
+        avg_rs = result.get("home_serie_avg_rs", "?")
+        avg_tot = result.get("home_serie_avg_tot", "?")
+        parts.append(f"Serie actual: LOCAL {hw}-{hn-hw} | prom {avg_rs} carreras | total prom {avg_tot}")
+    if parts:
+        result["serie_txt"] = " || ".join(parts)
+
+    _enh_ctx_cache[_ck] = result
+    return result
 
 
 def _enrich_panel_data(game_data: dict, game_obj: "dict | None" = None) -> dict:
