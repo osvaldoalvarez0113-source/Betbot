@@ -364,8 +364,9 @@ def is_in_season(sport_key):
 
 def game_starts_soon(commence_str, minutes=60):
     try:
-        ct   = datetime.strptime(commence_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
-        diff = (ct - datetime.now(pytz.utc)).total_seconds() / 60
+        ts_clean = (commence_str or "").replace("Z", "").replace("+00:00", "")[:19]
+        ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
+        diff     = (ct_utc - datetime.utcnow()).total_seconds() / 60
         return diff < minutes
     except Exception:
         return False
@@ -373,27 +374,28 @@ def game_starts_soon(commence_str, minutes=60):
 def _game_already_started(time_str: str, grace_min: int = 5) -> bool:
     """
     Returns True if the game started more than grace_min minutes ago.
-    Accepts both 'YYYY-MM-DDTHH:MM:SSZ' and 'YYYY-MM-DDTHH:MM' formats.
+    Compares both timestamps as naive UTC to avoid timezone library issues.
+    Accepts 'YYYY-MM-DDTHH:MM:SSZ', 'YYYY-MM-DDTHH:MM:SS+00:00', 'YYYY-MM-DDTHH:MM'.
     """
     try:
-        ts = time_str.strip()
-        if ts.endswith("Z"):
-            ct = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
-        elif "T" in ts and len(ts) >= 16:
-            naive = datetime.strptime(ts[:16], "%Y-%m-%dT%H:%M")
-            ct = naive.replace(tzinfo=ET)
-        else:
+        ts = (time_str or "").strip()
+        if not ts or "T" not in ts:
             return False
-        elapsed = (datetime.now(pytz.utc) - ct.astimezone(pytz.utc)).total_seconds() / 60
+        # Normalize to naive UTC: strip Z or +00:00 suffix, take first 19 chars
+        ts_clean = ts.replace("Z", "").replace("+00:00", "")[:19]
+        ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
+        now_utc  = datetime.utcnow()
+        elapsed  = (now_utc - ct_utc).total_seconds() / 60
         return elapsed > grace_min
-    except Exception:
+    except Exception as _e:
         return False
 
 def _days_until(commence_str: str) -> float:
-    """Days (float) from now until game. Returns 999 on parse error."""
+    """Days (float) from now until game. Returns 999 on parse error. Uses naive UTC."""
     try:
-        ct = datetime.strptime(commence_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc)
-        return (ct - datetime.now(pytz.utc)).total_seconds() / 86400
+        ts_clean = (commence_str or "").replace("Z", "").replace("+00:00", "")[:19]
+        ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
+        return (ct_utc - datetime.utcnow()).total_seconds() / 86400
     except Exception:
         return 999.0
 
@@ -14086,12 +14088,19 @@ def run_scan():
             # ──────────────────────────────────────────────────────────────
 
             # ── Filter out games that already started (5-min grace) ─────────
-            _before = len(games)
-            games = [
-                g for g in games
-                if not _game_already_started(g.get("commence_time", ""), grace_min=5)
-            ]
-            _skipped = _before - len(games)
+            _now_utc_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S UTC")
+            print(f"  🕐 Hora actual UTC: {_now_utc_str} — evaluando {len(games)} juego(s)")
+            _kept = []
+            for _g in games:
+                _ct = _g.get("commence_time", "")
+                _started = _game_already_started(_ct, grace_min=5)
+                print(f"     {'🚫 YA INICIÓ' if _started else '✅ FUTURO'} "
+                      f"{_g.get('home_team','?')} vs {_g.get('away_team','?')} "
+                      f"| commence={_ct}")
+                if not _started:
+                    _kept.append(_g)
+            _skipped = len(games) - len(_kept)
+            games = _kept
             if _skipped:
                 print(f"  🚫 {sport_key} — {_skipped} juego(s) ya comenzaron, ignorados")
             if not games:
