@@ -30,7 +30,7 @@ except ImportError:
 API_KEY           = os.environ.get("ODDS_API_KEY",       "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY",  "")
 CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
-CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-sonnet-4-6")
+CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-haiku-4-5-20251001")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO       = os.environ.get("GITHUB_REPO",  "osvaldoalvarez0113-source/Betbot")
 BANKROLL_DEFAULT = 1000.0
@@ -322,7 +322,6 @@ MLB_PARK_CITIES = {
 alerted_bets:          set  = set()
 alerted_game_analysis: set  = set()
 _sent_alerts:          dict = {}   # key → {date, odds, edge} for smart dedup
-daily_bets:            list = []
 last_reset:            date = datetime.now(CDT).date()
 last_morning_report:   date = date(2000, 1, 1)   # force first run at 8 AM
 last_weekly_report:    date = date(2000, 1, 1)   # force first run Sunday 9 AM
@@ -625,88 +624,6 @@ import re as _re
 
 # Ordered list: (compiled_regex, replacement).
 # Most-specific patterns first to avoid partial matches.
-_TERM_RULES: "list[tuple]" = []
-
-def _build_term_rules():
-    global _TERM_RULES
-    _raw = [
-        # Pitcher handedness
-        (r'\bLHP\b',                    'pitcher zurdo'),
-        (r'\bRHP\b',                    'pitcher diestro'),
-        # Medical — longest forms first
-        (r'\b60-day\s+(?:IL|DL)\b',    'lista de lesionados (60 días)'),
-        (r'\b15-day\s+(?:IL|DL)\b',    'lista de lesionados (15 días)'),
-        (r'\b10-day\s+(?:IL|DL)\b',    'lista de lesionados (10 días)'),
-        (r'\b7-day\s+(?:IL|DL)\b',     'lista de lesionados (7 días)'),
-        (r'\binjured list\b',           'lista de lesionados'),
-        (r'\bdisabled list\b',          'lista de lesionados'),
-        (r'\b(?:IL|DL)\b',             'lista de lesionados'),
-        # Field positions
-        (r'\bLHP\b',                    'pitcher zurdo'),
-        (r'\bRHP\b',                    'pitcher diestro'),
-        (r'\bDH\b',                     'bateador designado'),
-        (r'\bSP\b',                     'pitcher abridor'),
-        (r'\bRP\b',                     'pitcher relevista'),
-        (r'\bCF\b',                     'jardín central'),
-        (r'\bLF\b',                     'jardín izquierdo'),
-        (r'\bRF\b',                     'jardín derecho'),
-        (r'\b2B\b',                     'segunda base'),
-        (r'\b1B\b',                     'primera base'),
-        (r'\bSS\b',                     'campo corto'),
-        (r'\b3B\b',                     'tercera base'),
-        (r'\bC\b(?=\s+[A-Z][a-z])',     'receptor'),   # "C J.T. Realmuto" only
-        # Stats (xERA before ERA to avoid double-match)
-        (r'\bxERA\b',                   'ERA esperado'),
-        (r'\bERA\b',                    'Promedio de carreras'),
-        (r'\bFIP\b',                    'Rendimiento real'),
-        (r'\bOPS\b',                    'Eficiencia ofensiva'),
-        (r'\bWHIP\b',                   'base-runners por entrada'),
-        (r'\bK/9\b',                    'ponches por 9 innings'),
-        (r'\bK%\b',                     'porcentaje de ponches'),
-        (r'\bBB%\b',                    'porcentaje de bases por bolas'),
-        (r'\bBABIP\b',                  'suerte en contacto'),
-        # Bet-type labels
-        (r'\(ML\)',                      '(apuesta al ganador)'),
-        (r'(?<!\w)ML(?!\s*model|\s*Model)(?!\w)',
-                                         'apuesta al ganador'),
-        (r'\bRL\b',                     'línea de carreras'),
-        (r'\bH2H\b',                    'historial directo'),
-        (r'\bCLV\b',                    'valor vs línea de cierre'),
-        (r'\bEV\b(?=\s*[:\+\-\d])',     'Valor esperado'),
-        # Action words (English fragments that slip into alerts)
-        (r'\bactivated\b',              'regresó de la'),
-        (r'\bplaced on\b',              'colocado en'),
-        (r'\bscratched\b',              'retirado del lineup'),
-        (r'\btransferred\b',            'trasladado a'),
-        (r'\boptioned\b',              'enviado a ligas menores'),
-        (r'\brecalled\b',               'llamado de ligas menores'),
-        (r'\bdesignated for assignment\b', 'designado para asignación'),
-        (r'\bday-to-day\b',             'estado: día a día'),
-        (r'\bquestionable\b',           'dudoso para jugar'),
-        (r'\bdoubtful\b',               'muy dudoso para jugar'),
-        (r'\bruled out\b',              'descartado del juego'),
-        (r'\bnot starting\b',           'no arrancará el juego'),
-        (r'\brookies?\b',               'novato'),
-        (r'\blineup\b',                 'alineación'),
-        (r'\bbullpen\b',                'bullpen (lanzadores de relevo)'),
-        (r'\bstarter\b',                'abridor'),
-        (r'\brelief(?:er)?\b',          'relevista'),
-        (r'\bpostponed\b',              'pospuesto'),
-        (r'\brain delay\b',             'retraso por lluvia'),
-    ]
-    _TERM_RULES = [(_re.compile(pat, _re.IGNORECASE), rep) for pat, rep in _raw]
-
-_build_term_rules()
-
-
-def _translate_terms(text: str) -> str:
-    """
-    Replace all English baseball abbreviations and raw terms with plain Spanish.
-    Applied automatically to every ntfy body before sending.
-    """
-    for pattern, replacement in _TERM_RULES:
-        text = pattern.sub(replacement, text)
-    return text
 
 
 # ── News impact explainer ─────────────────────────────────────────────────────
@@ -818,9 +735,6 @@ def _two_layer_body(layer1: str, layer2: str) -> str:
 
 
 def ntfy_post(title, body, priority="default"):
-    # Apply full Spanish term translation before sending
-    body  = _translate_terms(body)
-    title = _translate_terms(title)
     try:
         resp = requests.post(
             f"https://ntfy.sh/{NOTIFY}",
@@ -2523,8 +2437,61 @@ def fetch_probable_pitchers_today():
                 away_tn = away_t.get('team', {}).get('name', '')
                 home_p  = home_t.get('probablePitcher', {})
                 away_p  = away_t.get('probablePitcher', {})
+
+                def _tbd_sp_fallback(team_name: str) -> dict:
+                    """Find the SP who hasn't pitched in 4+ days as fallback for TBD."""
+                    try:
+                        tid = _team_id(team_name)
+                        if not tid:
+                            return {}
+                        roster = _mlb_rest(f"/teams/{tid}/roster",
+                                           {"rosterType": "active", "season": MLB_YEAR})
+                        cutoff = (datetime.utcnow() - timedelta(days=4)).strftime("%Y-%m-%d")
+                        for p in (roster.get("roster") or []):
+                            pos = (p.get("position") or {}).get("abbreviation", "")
+                            if pos != "SP":
+                                continue
+                            pid = p.get("person", {}).get("id")
+                            pname = p.get("person", {}).get("fullName", "TBD")
+                            if not pid:
+                                continue
+                            try:
+                                glg = _mlb_rest(f"/people/{pid}/stats", {
+                                    "stats": "gameLog", "group": "pitching",
+                                    "season": MLB_YEAR, "gameType": "R",
+                                })
+                                splits = (glg.get("stats", [{}])[0].get("splits", []) or [])
+                                last_date = ""
+                                for sp in splits:
+                                    gd = sp.get("date", "")
+                                    if gd > last_date:
+                                        last_date = gd
+                                if not last_date or last_date < cutoff:
+                                    era = _fetch_pitcher_era_by_id(pid)
+                                    print(f"  🔮 TBD fallback SP [{team_name}]: "
+                                          f"{pname} (last={last_date or 'none'}, ERA={era:.2f})")
+                                    return {"id": pid, "fullName": pname, "_fallback": True, "era": era}
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    return {}
+
+                if not home_p.get('id'):
+                    _fb_h = _tbd_sp_fallback(home_tn)
+                    if _fb_h:
+                        home_p = _fb_h
+                if not away_p.get('id'):
+                    _fb_a = _tbd_sp_fallback(away_tn)
+                    if _fb_a:
+                        away_p = _fb_a
+
                 h_era   = _fetch_pitcher_era_by_id(home_p['id']) if home_p.get('id') else 4.50
+                a_era   = home_p.get('era', 4.50) if home_p.get('_fallback') else h_era
+                h_era   = a_era if home_p.get('_fallback') else h_era
                 a_era   = _fetch_pitcher_era_by_id(away_p['id']) if away_p.get('id') else 4.50
+                if away_p.get('_fallback'):
+                    a_era = away_p.get('era', 4.50)
                 key     = f"{home_tn.lower()}|{away_tn.lower()}"
                 result[key] = {
                     'home_era':  round(h_era, 2),
@@ -3850,8 +3817,11 @@ def get_book_total(game):
                 by_name = {o["name"]: o for o in m.get("outcomes", [])}
                 if "Over" not in by_name or "Under" not in by_name:
                     continue
+                _bl = by_name["Over"]["point"]
+                if not (5.0 <= _bl <= 25.0):
+                    continue
                 return (
-                    by_name["Over"]["point"],
+                    _bl,
                     by_name["Over"]["price"],
                     by_name["Under"]["price"],
                     bk["title"],
@@ -4526,6 +4496,8 @@ def analyze_totals(games, sport_key):
 
 def notify_totals(total_bets, alerted=None):
     global alerted_bets
+    if _bankroll_paused:
+        return
     for b in total_bets:
         # Module 7: stake minimum filter
         if b.get("stake", 0) < MIN_STAKE:
@@ -5006,6 +4978,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
 
     print(f"\n🔍 ANÁLISIS: {home} vs {away}  [{sport_key}]")
 
+    if _game_already_started(commence, grace_min=5):
+        print(f"   🚫 OMITIDO — juego ya comenzó: {commence}")
+        return None
+
     if game_starts_soon(commence, 60) and not force_panel:
         print(f"   ⏰ OMITIDO — inicia en < 60 min")
         return None
@@ -5090,6 +5066,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             pass
         wind           = fetch_wind_forecast(park_city[1], park_city[2], _game_hour_utc) if park_city else None
         w_adj, w_label = wind_run_adj(wind)
+        if wind is not None:
+            w_label = f"{w_label} [forecast]"
+        elif park_city:
+            w_label = f"{w_label} [current]"
 
         half_adj = pitch_adj / 2
         home_exp = max(0.1, home_exp + half_adj + w_adj / 2)
@@ -5862,6 +5842,45 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         except Exception:
             pass
 
+        if umpire:
+            if umpire.get("tendency") == "OVER":
+                home_exp = min(home_exp + 0.15, 12.0)
+                away_exp = min(away_exp + 0.15, 12.0)
+                print(f"   ⚖️  Umpire {umpire.get('name','?')} OVER → +0.15 a ambos totales")
+            elif umpire.get("tendency") == "UNDER":
+                home_exp = max(home_exp - 0.15, 0.1)
+                away_exp = max(away_exp - 0.15, 0.1)
+                print(f"   ⚖️  Umpire {umpire.get('name','?')} UNDER → -0.15 a ambos totales")
+
+        # MLB A8: Serie game number
+        _serie_num   = None
+        _serie_total = None
+        _serie_texto = ""
+        try:
+            _htid = _team_id(home)
+            if _htid:
+                _sched = _mlb_rest("/schedule", {
+                    "teamId": _htid,
+                    "season": MLB_YEAR,
+                    "date":   datetime.now(CDT).strftime("%Y-%m-%d"),
+                    "hydrate": "seriesStatus",
+                })
+                for _de in (_sched.get("dates") or []):
+                    for _sg in (_de.get("games") or []):
+                        _ss = _sg.get("seriesStatus") or {}
+                        _sn = _ss.get("seriesGameNumber")
+                        _st = _ss.get("gamesInSeries")
+                        if _sn and _st:
+                            _serie_num   = int(_sn)
+                            _serie_total = int(_st)
+                            _serie_texto = f"Juego {_serie_num} de {_serie_total} en la serie"
+                            print(f"   📊 Serie: {_serie_texto}")
+                            break
+                    if _serie_num:
+                        break
+        except Exception:
+            pass
+
         # Pitcher pace (pitches per inning — flags short outings)
         _h_pace = _a_pace = None
         try:
@@ -5950,6 +5969,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             "pform_h":       pform_h,   # MLB A1
             "pform_a":       pform_a,   # MLB A1
             "umpire":        umpire,    # MLB A2
+            "serie_juego_numero": _serie_num,    # MLB A8
+            "serie_texto":        _serie_texto,  # MLB A8
             "tbd_note":         tbd_note,           # Fix 5
             "stats_fallback":   _stats_fallback_note,  # set when 4.5 default used
             "pname_home":    h_pname,   # raw pitcher name
@@ -6536,6 +6557,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     _claude_data_g["equipo_visitante"] = f"{away} (VISITANTE ✈️)"
     _claude_data_g["pitcher_local"] = f"{h_pname} — pitcher LOCAL de {home}"
     _claude_data_g["pitcher_visitante"] = f"{a_pname} — pitcher VISITANTE de {away}"
+    if context.get("serie_texto"):
+        _claude_data_g["serie_info"] = context["serie_texto"]
     # ── Señal Pinnacle: confirmación o advertencia antes del panel ─────────
     # Compara la dirección del pick contra el mercado sharp de Pinnacle y
     # añade una cadena de texto que Marco, Víctor y Elena reciben como contexto
@@ -6698,6 +6721,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
 def notify_game_analysis(analyses, sport_key, alerted=None):
     """Send one ntfy alert per game containing full analysis context + top picks."""
     global alerted_game_analysis
+    if _bankroll_paused:
+        return
     is_mlb = "mlb" in sport_key
     emoji  = _sport_emoji(sport_key)
 
@@ -12024,16 +12049,30 @@ def log_bets(bets, sport_key):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def send_daily_summary():
-    if not daily_bets:
-        ntfy_post("BetBot Daily Summary", "No value bets found today.", "default")
+    import csv as _csv
+    today_str = datetime.now(CDT).strftime("%Y-%m-%d")
+    today_bets = []
+    try:
+        if os.path.isfile(BETS_LOG_FILE):
+            with open(BETS_LOG_FILE, "r", newline="", encoding="utf-8") as _f:
+                for row in _csv.DictReader(_f):
+                    if (row.get("date", "") or "").startswith(today_str):
+                        today_bets.append(row)
+    except Exception as _e:
+        print(f"  ⚠️  send_daily_summary CSV read error: {_e}")
+    if not today_bets:
+        ntfy_post("BetBot Daily Summary", "No value bets encontradas hoy.", "default")
         return
-    total_stake = sum(b["stake"] for b in daily_bets)
-    total_ev    = sum(b.get("ev", 0) for b in daily_bets)
-    leagues     = sorted({b.get("sport", "?") for b in daily_bets})
-    high        = sum(1 for b in daily_bets if b["confidence"] == "HIGH")
-    med         = sum(1 for b in daily_bets if b["confidence"] == "MEDIUM")
+    try:
+        total_stake = sum(float(b.get("stake") or 0) for b in today_bets)
+        total_ev    = sum(float(b.get("ev") or 0) for b in today_bets)
+        leagues     = sorted({b.get("sport", "?") for b in today_bets})
+        high        = sum(1 for b in today_bets if (b.get("confidence") or "").upper() == "HIGH")
+        med         = sum(1 for b in today_bets if (b.get("confidence") or "").upper() == "MEDIUM")
+    except Exception:
+        total_stake = total_ev = 0; leagues = []; high = med = 0
     body = (
-        f"Total value bets: {len(daily_bets)}\n"
+        f"Total value bets: {len(today_bets)}\n"
         f"  HIGH: {high}  MEDIUM: {med}\n"
         f"Total stakes: ${round(total_stake, 2)}\n"
         f"Total expected value: ${round(total_ev, 2)}\n"
@@ -12733,7 +12772,7 @@ def send_night_summary():
 
 
 def check_midnight_reset():
-    global alerted_bets, daily_bets, last_reset, _sent_alerts, alerted_game_analysis
+    global alerted_bets, last_reset, _sent_alerts, alerted_game_analysis
     today = datetime.now(CDT).date()
     if today != last_reset:
         print(f"\n🌙 Midnight reset — sending daily summary...")
@@ -12741,7 +12780,6 @@ def check_midnight_reset():
         alerted_bets          = set()
         alerted_game_analysis = set()   # reset daily to avoid unbounded growth
         _sent_alerts          = {}
-        daily_bets            = []
         last_reset            = today
         compute_bankroll_mult()   # Module P: update stake multiplier
 
@@ -13483,7 +13521,7 @@ def _monitor_news() -> list:
         source    = item["source"]
 
         # Translate headline (positions, IL, etc.) to Spanish
-        headline_es = _translate_terms(headline)
+        headline_es = headline
 
         # Conversational explanation based on what happened
         explanation = _explain_news_impact(headline, team, impact)
@@ -14024,7 +14062,10 @@ def _check_cross_game_correlations(all_full_analyses: list):
 
 
 def run_scan():
-    global daily_bets, lineup_scan_counter
+    global lineup_scan_counter
+    if len(_claude_cache) > 200:
+        _claude_cache.clear()
+        print("  🧹 Claude cache limpiado (>200 entradas)")
     prev_map  = load_previous_odds()
     new_map   = {}
     all_bets          = []
@@ -14140,7 +14181,10 @@ def run_scan():
 
             bets, sharp_moves, steam_moves = analyze(games, prev_map, new_map, sport_key)
             total_bets = analyze_totals(games, sport_key)
-            arbs = scan_arbitrage(games, sport_key)
+            if not any(os.environ.get(k) for k in ["BETONLINE_KEY", "SECOND_BOOK"]):
+                arbs = []
+            else:
+                arbs = scan_arbitrage(games, sport_key)
             for m in sharp_moves:
                 m["sport"] = sport_key
             short = sport_key.split("_", 1)[-1].upper()
@@ -14269,6 +14313,11 @@ def run_scan():
     if lineup_scan_counter >= 3:
         check_lineup_changes()
         lineup_scan_counter = 0
+
+    try:
+        _github_push_daily_exposure()
+    except Exception as _ge:
+        print(f"  ⚠️  GitHub exposure sync error: {_ge}")
 
     # Módulos Avanzados — auto-resultados, CLV, contrarian (al final de cada scan)
     if HAS_PAQUETE_AVANZADO:

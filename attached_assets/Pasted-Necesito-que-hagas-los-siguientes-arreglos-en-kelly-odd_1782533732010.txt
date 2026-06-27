@@ -1,0 +1,57 @@
+Necesito que hagas los siguientes arreglos en kelly_odds.py. Son varios pero están claramente definidos. Hazlos todos en orden:
+
+FIX 1 — Sanity check en book totals
+En la función get_book_total(), después de extraer book_line, agrega una validación: si book_line es menor a 5.0 o mayor a 25.0, retornar None en vez de ese dato.
+
+FIX 2 — Llamar _github_push_daily_exposure() en cada scan
+En la función run_scan(), al final, agrega una llamada a _github_push_daily_exposure(). Ahora mismo esa función existe pero nunca se llama, lo que significa que cada redeploy de Railway borra el contador de exposición diaria y se resetea a $0.
+
+FIX 3 — Cambiar default de CLAUDE_PANEL_MODEL a Haiku
+Busca: CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-sonnet-4-6")
+Cámbiala a: CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-haiku-4-5-20251001")
+
+FIX 4 — /analizar no debe analizar juegos pasados
+En analyze_game_full(), el check de _game_already_started() debe ejecutarse SIEMPRE, incluso con force_panel=True. Si el juego ya comenzó hace más de 5 minutos, retornar None aunque sea force_panel.
+
+FIX 5 — Agregar _bankroll_paused a todas las notificaciones
+Las funciones notify_totals() y notify_game_analysis() no verifican _bankroll_paused. Agrega al inicio de cada una: if _bankroll_paused: return
+
+FIX 6 — Limpiar _claude_cache periódicamente
+En run_scan(), al inicio agrega:
+if len(_claude_cache) > 200:
+    _claude_cache.clear()
+    print("  🧹 Claude cache limpiado (>200 entradas)")
+
+FIX 7 — Eliminar sistema de traducción _TERM_RULES
+Elimina completamente: la lista _raw con los patrones de traducción, la función _build_term_rules(), la variable _TERM_RULES, y la función _translate_terms(). En ntfy_post(), elimina las dos líneas que aplican _translate_terms() a body y title.
+
+FIX 8 — Eliminar daily_bets list redundante
+La variable global daily_bets es redundante porque toda la info ya está en bets_log.csv. En send_daily_summary(), reemplaza el uso de daily_bets con una lectura directa del CSV filtrando por fecha de hoy. Elimina las referencias a daily_bets en check_midnight_reset() y donde se haga daily_bets.append() o daily_bets = [].
+
+FIX 9 — Desactivar ARB scanner cuando no hay segundo libro
+En run_scan(), antes de llamar a scan_arbitrage(), agrega:
+if not any(os.environ.get(k) for k in ["BETONLINE_KEY", "SECOND_BOOK"]):
+    arbs = []
+else:
+    arbs = scan_arbitrage(games, sport_key)
+
+FIX 10 — Umpire debe ajustar el total numéricamente
+En analyze_game_full(), después de obtener el umpire, agrega:
+if umpire:
+    if umpire.get("tendency") == "OVER":
+        home_exp = min(home_exp + 0.15, 12.0)
+        away_exp = min(away_exp + 0.15, 12.0)
+    elif umpire.get("tendency") == "UNDER":
+        home_exp = max(home_exp - 0.15, 0.1)
+        away_exp = max(away_exp - 0.15, 0.1)
+
+FIX 11 — Agregar número de juego en la serie al contexto del panel
+En analyze_game_full(), en el bloque MLB, agrega una llamada a _mlb_rest("/schedule", {"teamId": _team_id(home), "season": MLB_YEAR, "date": datetime.now(CDT).strftime("%Y-%m-%d"), "hydrate": "seriesStatus"}). Extrae seriesGameNumber si existe y agrégalo al context como "serie_juego_numero" y a _claude_data_g con texto como "Juego 2 de 3 en la serie".
+
+FIX 12 — Estimación de pitcher cuando es TBD
+En fetch_probable_pitchers_today(), cuando un equipo no tiene probablePitcher confirmado, busca el pitcher SP que no haya lanzado en los últimos 4 días consultando el game log del equipo. Si lo encuentras úsalo como probable con su ERA real. Si no puedes determinarlo, mantén TBD con ERA 4.50.
+
+FIX 13 — Weather siempre debe usar forecast por hora del juego
+En analyze_game_full(), verifica que wind siempre venga de fetch_wind_forecast(). Agrega "[forecast]" o "[current]" al label w_label para que se vea en las alertas cuál fuente se usó.
+
+Después de todos los cambios, haz redeploy en Railway y confirma que no hay errores en los logs.
