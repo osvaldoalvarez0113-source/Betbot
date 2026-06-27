@@ -10430,41 +10430,54 @@ def _fetch_enhanced_game_context(
         return result
 
     # ── 1. Últimas 3 salidas de cada abridor ─────────────────────────────────
-    def _last3(pid, label):
-        if not pid:
+    def get_last_3_starts(pitcher_id, label):
+        if not pitcher_id:
+            result[f"{label}_last3_starts"] = []
+            result[f"{label}_last3_era_avg"] = None
             return
         try:
-            data = _mlb_rest(f"/people/{pid}/stats",
-                              {"stats": "gameLog", "season": year, "group": "pitching"})
-            splits = (data.get("stats", [{}])[0].get("splits", []) or [])
-            starts = []
-            for s in splits:
-                ip_raw = s.get("stat", {}).get("inningsPitched", "0") or "0"
-                try:
-                    ip = _parse_ip(ip_raw)
-                except Exception:
-                    ip = float(ip_raw)
-                if ip >= 3.0:
-                    er = int(s["stat"].get("earnedRuns", 0) or 0)
-                    era_g = round(er * 9 / max(ip, 0.1), 2)
-                    starts.append({
-                        "date": s.get("date", "?"),
-                        "ip": ip_raw,
-                        "er": er,
-                        "era_game": era_g,
-                        "k": int(s["stat"].get("strikeOuts", 0) or 0),
-                    })
+            url = f"{BASE}/people/{pitcher_id}/stats"
+            params = {"stats": "gameLog", "season": year, "group": "pitching"}
+            print(f"[DEBUG API] Fetching stats for pitcher {pitcher_id} ({label})")
+            r = requests.get(url, params=params, timeout=10)
+            print(f"[DEBUG API] Status code: {r.status_code}")
+            raw = r.json()
+            if not raw.get("stats") or not raw["stats"][0].get("splits"):
+                print(f"[DEBUG API] No splits found for {label} pitcher {pitcher_id}")
+                result[f"{label}_last3_starts"] = []
+                result[f"{label}_last3_era_avg"] = None
+                return
+            splits = raw["stats"][0]["splits"]
+            starts = [s for s in splits if float(s["stat"].get("inningsPitched", 0)) >= 3.0]
+            print(f"[DEBUG API] Total starts found for {label}: {len(starts)}")
             last3 = starts[-3:] if len(starts) >= 3 else starts
-            era_avg = round(sum(x["era_game"] for x in last3) / len(last3), 2) if last3 else None
+            entries = []
+            for g in last3:
+                ip = float(g["stat"].get("inningsPitched", 0))
+                er = float(g["stat"].get("earnedRuns", 0))
+                era_game = round(er * 9 / max(ip, 0.1), 2)
+                entries.append({
+                    "date": g["date"],
+                    "ip": ip,
+                    "er": er,
+                    "era_game": era_game,
+                    "k": g["stat"].get("strikeOuts", 0),
+                    "hits": g["stat"].get("hits", 0),
+                })
+            era_avg = round(sum(x["era_game"] for x in entries) / len(entries), 2) if entries else None
+            print(f"[DEBUG API] {label} last3 ERA avg: {era_avg}")
+            result[f"{label}_last3_starts"] = entries
             result[f"{label}_last3_era_avg"] = era_avg
-            if last3:
-                lines = [f"{x['date']} {x['ip']}IP {x['er']}ER ERA{x['era_game']} K{x['k']}" for x in last3]
+            if entries:
+                lines = [f"{x['date']} {x['ip']}IP {x['er']}ER ERA{x['era_game']} K{x['k']}" for x in entries]
                 result[f"{label}_last3_txt"] = " | ".join(lines)
-        except Exception as _e:
-            print(f"  ⚠️  _last3 {label}: {_e}")
+        except Exception as e:
+            print(f"[DEBUG API ERROR] {label} pitcher {pitcher_id}: {e}")
+            result[f"{label}_last3_starts"] = []
+            result[f"{label}_last3_era_avg"] = None
 
-    _last3(home_pitcher_id, "home_pitcher")
-    _last3(away_pitcher_id, "away_pitcher")
+    get_last_3_starts(home_pitcher_id, "home_pitcher")
+    get_last_3_starts(away_pitcher_id, "away_pitcher")
 
     # ── 2. Bullpen ERA últimos 7 días ─────────────────────────────────────────
     def _bullpen_era(team_id, label):
