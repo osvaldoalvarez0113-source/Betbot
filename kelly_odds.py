@@ -4469,7 +4469,7 @@ def analyze_totals(games, sport_key):
             if _tc_claude:
                 _tcc  = _tc_claude.get("confianza", "N/D")
                 _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
-                _tcr  = (_tc_claude.get("razonamiento", "") or "")[:80]
+                _tcr  = (_tc_claude.get("razonamiento", "") or "")[:500]
                 print(f"   🤖 Claude: {_tcc} | apostar:{_tcap} | \"{_tcr}\"")
             if _tc_claude and (
                     not _tc_claude.get("apostar", True)
@@ -6420,7 +6420,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             if _aev_panel:
                 _cc = _aev_panel.get("confianza", "N/D")
                 _ap = "✅" if _aev_panel.get("apostar", True) else "❌"
-                _cr = (_aev_panel.get("razonamiento", "") or "")[:90]
+                _cr = (_aev_panel.get("razonamiento", "") or "")[:500]
                 print(f"   🤖 Claude (EV>15%): {_cc} | apostar:{_ap} | \"{_cr}\"")
             return {
                 "game_id":     game_id,
@@ -6585,7 +6585,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     if _claude_result_g:
         _cc  = _claude_result_g.get("confianza", "N/D")
         _cap = "✅" if _claude_result_g.get("apostar", True) else "❌"
-        _cr  = (_claude_result_g.get("razonamiento", "") or "")[:90]
+        _cr  = (_claude_result_g.get("razonamiento", "") or "")[:500]
         _ci  = _claude_result_g.get("datos_inconsistentes") or []
         print(f"   🤖 Claude: {_cc} | apostar:{_cap} | \"{_cr}\"")
         if _ci:
@@ -7185,7 +7185,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             _ap_n       = "✅ APOSTAR" if _ci_n.get("apostar") is True else (
                           "❌ PASAR" if _ci_n.get("apostar") is False else "⚠️ VERIFICAR")
             _cc_n       = _ci_n.get("confianza", "N/D")
-            _cr_n       = (_ci_n.get("razonamiento") or "")[:200]
+            _cr_n       = (_ci_n.get("razonamiento") or "")[:500]
             _all_mkts_n = a.get("all_markets", {})
             _mkts_txt   = ""
             for _lbl, _m in _all_mkts_n.items():
@@ -7667,7 +7667,7 @@ def build_analizar_text(result: dict) -> list:
             ap = ("✅" if ex.get("apostar") is True
                   else ("❌" if ex.get("apostar") is False else "⚪"))
             ec = _ci_icons.get(ex.get("confianza", ""), "⚪")
-            er = (ex.get("razonamiento") or "sin razonamiento")[:250]
+            er = (ex.get("razonamiento") or "sin razonamiento")[:500]
             p2 += f"<b>{ex['nombre']}</b> {ap} {ec}\n<i>{er}</i>\n\n"
     else:
         # Explicar POR QUÉ no corrió el panel
@@ -10096,7 +10096,7 @@ _CLAUDE_SYSTEM = (
 
     "CÓMO ESCRIBIR (obligatorio en todo momento):\n"
     "• Habla como si le explicaras a un amigo, no como si escribieras un reporte\n"
-    "• Máximo 3 oraciones en tu razonamiento. Cortas y directas.\n"
+    "• Máximo 5 oraciones en tu razonamiento. Directas y completas.\n"
     "• Empieza siempre con el dato más importante del partido\n"
     "• Di claramente SÍ o NO y el motivo en una línea\n"
     "• PROHIBIDO usar estas palabras: EV, umbral, parámetro, métrica, "
@@ -10186,7 +10186,7 @@ def analyze_with_claude(game_data: dict, sport: str,
             f'  "pick": "OVER/UNDER/HOME_ML/AWAY_ML",\n'
             f'  "line": "número de la línea",\n'
             f'  "confianza": "ALTA/MEDIA/BAJA",\n'
-            f'  "razonamiento": "explicación en español de 3-4 oraciones como experto",\n'
+            f'  "razonamiento": "explicación en español de 4-6 oraciones completas como experto",\n'
             f'  "factores_positivos": ["factor1", "factor2"],\n'
             f'  "factores_negativos": ["factor1"],\n'
             f'  "datos_inconsistentes": [],\n'
@@ -10206,7 +10206,7 @@ def analyze_with_claude(game_data: dict, sport: str,
             f'  "pick": "HOME_ML/AWAY_ML/DRAW/OVER/UNDER/HOME_HANDICAP/AWAY_HANDICAP",\n'
             f'  "line": "número o descripción",\n'
             f'  "confianza": "ALTA/MEDIA/BAJA",\n'
-            f'  "razonamiento": "explicación en español de 3-4 oraciones como experto",\n'
+            f'  "razonamiento": "explicación en español de 4-6 oraciones completas como experto",\n'
             f'  "factores_positivos": ["factor1", "factor2"],\n'
             f'  "factores_negativos": ["factor1"],\n'
             f'  "datos_inconsistentes": [],\n'
@@ -10586,7 +10586,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
 
         apostar = res.get("apostar", True)
         conf    = res.get("confianza", "N/D")
-        razon   = (res.get("razonamiento", "") or "")[:80]
+        razon   = (res.get("razonamiento", "") or "")[:500]
         icon    = "✅" if apostar else "❌"
         c_icon  = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
         print(f"   🎓 {nombre}: {c_icon}{conf} apostar={icon} | \"{razon}\"")
@@ -10652,7 +10652,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             "nombre":        _EXPERTOS[i][0],
             "apostar":       r.get("apostar")                          if r else None,
             "confianza":     r.get("confianza", "N/D")                 if r else "N/D",
-            "razonamiento":  (r.get("razonamiento", "") or "")[:250]   if r else "no disponible",
+            "razonamiento":  (r.get("razonamiento", "") or "")[:500]   if r else "no disponible",
         }
         for i, r in enumerate(resultados)
     ]
@@ -10664,7 +10664,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         if r is None:
             continue
         _voto_txt = "SÍ ✅" if r.get("apostar") else "NO ❌"
-        _razon    = (r.get("razonamiento", "") or "").strip()[:220]
+        _razon    = (r.get("razonamiento", "") or "").strip()[:500]
         _expert_lines.append(f"• {exp_nombre} → {_voto_txt}: {_razon}")
 
     if _expert_lines:
@@ -10695,7 +10695,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             "VOTOS RECIBIDOS:\n"
             + "\n".join(_expert_lines) + "\n\n"
             "CÓMO ESCRIBIR (obligatorio):\n"
-            "• Máximo 3 oraciones cortas. No más.\n"
+            "• Máximo 5 oraciones. Completas y directas.\n"
             f"{'• Los tres coinciden — una sola oración basta.' if _all_agree else ''}\n"
             "• Si recomiendas apostar: menciona el equipo, dónde apostar y cuánto. Nada más.\n"
             "• Si no recomiendas: di por qué en una oración y sugiere esperar.\n"
@@ -10709,7 +10709,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
             "No hay ventaja hoy — mejor esperar otro partido.'\n"
             "Con apuesta: 'Cole domina y Pinnacle lo respalda fuerte. "
             "Yankees en casa contra un bullpen cansado. Apuesta Yankees ML en FanDuel, no más de $20.'\n\n"
-            "Responde en máximo 3 oraciones cortas. No más."
+            "Responde en máximo 5 oraciones completas."
         )
         try:
             _syn_client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -10756,13 +10756,13 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
                     _has_pick  = sum(1 for w in _pick_words if w in _st_low)
                     if _has_other >= 2 and _has_pick == 0:
                         print(f"   ⚠️  Síntesis contradictoria (mencionó equipo contrario) — usando razonamiento base")
-                        _syn_text = (base.get("razonamiento", "") or "")[:180]
+                        _syn_text = (base.get("razonamiento", "") or "")[:500]
         _final_razon = f"{_syn_text} {_panel_tag}"
     else:
         # Fallback: usar el razonamiento del experto base si Sonnet falla
         _final_razon = (base.get("razonamiento", "") or "") + f" {_panel_tag}"
 
-    # Hard limit: 200 caracteres máximo sin importar la fuente
+    # Hard limit: 500 caracteres máximo sin importar la fuente
     merged["razonamiento"] = _final_razon[:500]
 
     merged["_votos_favor"] = votos_favor   # expuesto para bypass-veto guard en analyze_game_full
