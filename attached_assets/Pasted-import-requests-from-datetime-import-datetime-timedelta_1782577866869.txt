@@ -1,0 +1,185 @@
+import requests
+from datetime import datetime, timedelta
+
+def get_enhanced_game_context(home_team_id, away_team_id, home_pitcher_id, away_pitcher_id, game_date_str):
+    """
+    Jala contexto enriquecido del MLB Stats API:
+    1. Últimas 3 salidas reales de cada abridor
+    2. ERA del bullpen de los últimos 7 días
+    3. Stats del equipo en la serie actual
+    4. H2H del lineup vs el abridor rival
+    """
+    
+    BASE = "https://statsapi.mlb.com/api/v1"
+    context = {}
+    game_date = datetime.strptime(game_date_str, "%Y-%m-%d")
+    seven_days_ago = (game_date - timedelta(days=7)).strftime("%Y-%m-%d")
+    
+    # ─────────────────────────────────────────
+    # 1. ÚLTIMAS 3 SALIDAS DE CADA ABRIDOR
+    # ─────────────────────────────────────────
+    def get_last_3_starts(pitcher_id, label):
+        try:
+            url = f"{BASE}/people/{pitcher_id}/stats"
+            params = {
+                "stats": "gameLog",
+                "season": game_date.year,
+                "group": "pitching"
+            }
+            r = requests.get(url, params=params, timeout=10)
+            splits = r.json()["stats"][0]["splits"]
+            # Filtrar solo salidas (IP > 3) y tomar las últimas 3
+            starts = [s for s in splits if float(s["stat"].get("inningsPitched", 0)) >= 3.0]
+            last3 = starts[-3:] if len(starts) >= 3 else starts
+            result = []
+            for g in last3:
+                result.append({
+                    "date": g["date"],
+                    "ip": g["stat"]["inningsPitched"],
+                    "er": g["stat"]["earnedRuns"],
+                    "era_game": round(float(g["stat"]["earnedRuns"]) * 9 / max(float(g["stat"]["inningsPitched"]), 0.1), 2),
+                    "k": g["stat"]["strikeOuts"],
+                    "hits": g["stat"]["hits"]
+                })
+            era_avg = round(sum(x["era_game"] for x in result) / len(result), 2) if result else None
+            context[f"{label}_last3_starts"] = result
+            context[f"{label}_last3_era_avg"] = era_avg
+        except Exception as e:
+            context[f"{label}_last3_starts"] = []
+            context[f"{label}_last3_era_avg"] = None
+
+    get_last_3_starts(home_pitcher_id, "home_pitcher")
+    get_last_3_starts(away_pitcher_id, "away_pitcher")
+
+    # ─────────────────────────────────────────
+    # 2. BULLPEN ERA ÚLTIMOS 7 DÍAS
+    # ─────────────────────────────────────────
+    def get_bullpen_era_7d(team_id, label):
+        try:
+            url = f"{BASE}/teams/{team_id}/stats"
+            params = {
+                "stats": "byDateRange",
+                "group": "pitching",
+                "startDate": seven_days_ago,
+                "endDate": game_date_str,
+                "season": game_date.year
+            }
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+            # Buscar stats de relievers (excluir starters por inningsPitched promedio)
+            splits = data["stats"][0]["splits"]
+            relievers = [s for s in splits if s.get("stat", {}).get("gamesStarted", 1) == 0]
+            if not relievers:
+                # Si no hay separación, tomar todos
+                relievers = splits
+            total_er = sum(float(s["stat"].get("earnedRuns", 0)) for s in relievers)
+            total_ip = sum(float(s["stat"].get("inningsPitched", 0)) for s in relievers)
+            bullpen_era = round(total_er * 9 / total_ip, 2) if total_ip > 0 else None
+            context[f"{label}_bullpen_era_7d"] = bullpen_era
+        except Exception as e:
+            context[f"{label}_bullpen_era_7d"] = None
+
+    get_bullpen_era_7d(home_team_id, "home")
+    get_bullpen_era_7d(away_team_id, "away")
+
+    # ─────────────────────────────────────────
+    # 3. STATS EN LA SERIE ACTUAL
+    # ─────────────────────────────────────────
+    def get_series_stats(team_id, opponent_id, label):
+        try:
+            # Buscar juegos de los últimos 5 días entre estos dos equipos
+            series_start = (game_date - timedelta(days=5)).strftime("%Y-%m-%d")
+            url = f"{BASE}/schedule"
+            params = {
+                "teamId": team_id,
+                "startDate": series_start,
+                "endDate": game_date_str,
+                "sportId": 1,
+                "hydrate": "linescore,teams"
+            }
+            r = requests.get(url, params=params, timeout=10)
+            dates = r.json().get("dates", [])
+            series_games = []
+            for d in dates:
+                for g in d.get("games", []):
+                    teams = g.get("teams", {})
+                    home_id = teams.get("home", {}).get("team", {}).get("id")
+                    away_id = teams.get("away", {}).get("team", {}).get("id")
+                    if opponent_id in [home_id, away_id] and g.get("status", {}).get("statusCode") == "F":
+                        home_score = teams["home"].get("score", 0)
+                        away_score = teams["away"].get("score", 0)
+                        won = (home_id == team_id and home_score > away_score) or \
+                              (away_id == team_id and away_score > home_score)
+                        runs_scored = home_score if home_id == team_id else away_score
+                        runs_allowed = away_score if home_id == team_id else home_score
+                        series_games.append({
+                            "date": d["date"],
+                            "runs_scored": runs_scored,
+                            "runs_allowed": runs_allowed,
+                            "won": won,
+                            "total": home_score + away_score
+                        })
+            context[f"{label}_series_games"] = series_games
+            context[f"{label}_series_wins"] = sum(1 for g in series_games if g["won"])
+            context[f"{label}_series_avg_runs_scored"] = round(
+                sum(g["runs_scored"] for g in series_games) / len(series_games), 1
+            ) if series_games else None
+            context[f"{label}_series_avg_total"] = round(
+                sum(g["total"] for g in series_games) / len(series_games), 1
+            ) if series_games else None
+        except Exception as e:
+            context[f"{label}_series_games"] = []
+
+    get_series_stats(home_team_id, away_team_id, "home")
+    get_series_stats(away_team_id, home_team_id, "away")
+
+    # ─────────────────────────────────────────
+    # 4. H2H LINEUP vs ABRIDOR RIVAL
+    # ─────────────────────────────────────────
+    def get_lineup_vs_pitcher(batter_ids, pitcher_id, label):
+        """
+        batter_ids: lista de IDs de los bateadores del lineup
+        """
+        try:
+            results = []
+            for batter_id in batter_ids[:9]:  # Solo los primeros 9
+                url = f"{BASE}/people/{batter_id}/stats"
+                params = {
+                    "stats": "vsPlayer",
+                    "opposingPlayerId": pitcher_id,
+                    "group": "hitting",
+                    "season": game_date.year
+                }
+                r = requests.get(url, params=params, timeout=8)
+                splits = r.json().get("stats", [{}])[0].get("splits", [])
+                if splits:
+                    s = splits[0]["stat"]
+                    ab = int(s.get("atBats", 0))
+                    if ab >= 3:  # Solo incluir si hay muestra significativa
+                        results.append({
+                            "batter_id": batter_id,
+                            "avg": s.get("avg", ".000"),
+                            "ab": ab,
+                            "hits": int(s.get("hits", 0)),
+                            "hr": int(s.get("homeRuns", 0)),
+                            "ops": s.get("ops", ".000")
+                        })
+            context[f"{label}_vs_pitcher"] = results
+            # Promedio del lineup vs ese pitcher
+            if results:
+                avg_ops = round(
+                    sum(float(x["ops"]) for x in results) / len(results), 3
+                )
+                context[f"{label}_lineup_ops_vs_pitcher"] = avg_ops
+            else:
+                context[f"{label}_lineup_ops_vs_pitcher"] = None
+        except Exception as e:
+            context[f"{label}_vs_pitcher"] = []
+            context[f"{label}_lineup_ops_vs_pitcher"] = None
+
+    # Nota: los batter_ids los tienes que pasar desde donde ya jalás el lineup
+    # Por ahora dejamos este campo vacío si no hay lineup disponible
+    context["home_vs_pitcher"] = []
+    context["away_vs_pitcher"] = []
+
+    return context
