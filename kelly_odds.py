@@ -431,6 +431,10 @@ def _timing_check(commence_str: str, is_mlb: bool) -> dict:
       cap_conf      → if True, cap confidence display to MEDIA
     """
     days = _days_until(commence_str)
+    # Skip any game that already started (>5 min grace period)
+    _GRACE_DAYS = 5 / 1440   # 5 minutes in days
+    if days < -_GRACE_DAYS:
+        return {"skip": True, "warn": "", "ev_min": 0, "cap_conf": False}
     if is_mlb:
         # MLB: TODAY only — tomorrow and beyond skipped
         if days > 1:
@@ -14080,6 +14084,20 @@ def run_scan():
                 print(f"  📅 {sport_key} — {len(games)} partido(s) "
                       f"({'hoy' if today_games else '<3 días'})")
             # ──────────────────────────────────────────────────────────────
+
+            # ── Filter out games that already started (5-min grace) ─────────
+            _before = len(games)
+            games = [
+                g for g in games
+                if not _game_already_started(g.get("commence_time", ""), grace_min=5)
+            ]
+            _skipped = _before - len(games)
+            if _skipped:
+                print(f"  🚫 {sport_key} — {_skipped} juego(s) ya comenzaron, ignorados")
+            if not games:
+                print(f"  ⏭  {sport_key} — todos los juegos ya comenzaron")
+                continue
+            # ───────────────────────────────────────────────────────────────
 
             current_games_by_sport[sport_key] = games   # for CLV check
 
