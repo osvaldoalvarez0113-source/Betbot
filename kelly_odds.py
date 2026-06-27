@@ -486,9 +486,14 @@ def kelly_stake(prob, fair_odd, is_parlay_leg: bool = False):
         raw        = max_stake
         stake_warn = f"⚠️ Stake reducido al {int(MAX_SINGLE_BET_PCT*100)}% máximo por reglas de bankroll"
         print(f"  ⚠️  STAKE CAP applied: ${raw:.2f} (multipliers pushed above {MAX_SINGLE_BET_PCT*100:.0f}%)")
-    # Below minimum → no bet
-    if raw < MIN_BET and raw > 0:
-        raw = 0
+    # Below minimum with positive edge → floor at MIN_BET instead of zeroing silently
+    if 0 < raw < MIN_BET:
+        if k > 0:
+            print(f"  ℹ️  STAKE FLOOR: Kelly sugería ${raw:.2f} → mínimo ${MIN_BET:.2f}")
+            raw        = MIN_BET
+            stake_warn = stake_warn or f"ℹ️ Stake mínimo aplicado (Kelly: ${raw:.2f})"
+        else:
+            raw = 0
     stake = round(raw, 2)
     return {
         "stake":      stake,
@@ -10500,10 +10505,14 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         "con más de 47 victorias) enfrenta a un equipo en mal momento (menos de 36 victorias), "
         "el favorito tiene valor real incluso a precio moderado (-130 a -160).\n\n"
         "INSTRUCCIÓN: Si ningún patrón aplica, no mencionar esta sección. Si uno o más aplican, "
-        "incorpóralo a tu análisis de forma natural, en español conversacional, sin mencionar "
-        "nombres técnicos como 'hit rate', 'ATS' o 'patrón #X'. Habla de estos ángulos como "
-        "parte del análisis, no como metadatos.\n"
-        "=== FIN PATRONES SITUACIONALES ==="
+        "incorpóralos dentro del campo 'razonamiento' del JSON, en lenguaje directo y sin "
+        "mencionar nombres técnicos como 'hit rate', 'ATS' o 'patrón #X'.\n"
+        "=== FIN PATRONES SITUACIONALES ===\n\n"
+        "⚠️ FORMATO OBLIGATORIO: Tu respuesta DEBE ser exclusivamente el JSON exacto que se "
+        "indica en el mensaje del usuario (con los campos pick, line, confianza, razonamiento, "
+        "factores_positivos, factores_negativos, datos_inconsistentes, apostar). "
+        "Los patrones son contexto adicional para enriquecer el campo razonamiento — NO cambian "
+        "el formato de salida. NUNCA respondas en texto libre. SOLO JSON válido."
     )
     _is_mlb = "baseball" in sport.lower()
 
