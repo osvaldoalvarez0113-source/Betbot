@@ -1,0 +1,42 @@
+Quiero que el bot analice todos los mercados de forma equilibrada en cada partido, igual que haría un analista humano. Ahora mismo siempre sale OVER/UNDER porque los umbrales favorecen totals. Necesito estos cambios en kelly_odds.py:
+
+FIX 1 — Igualar umbrales de todos los mercados
+En analyze_game_full(), todos los mercados deben competir con el mismo EV mínimo. Cambia EV_MIN_PCT a 3.0 para ML, Run Line, F5 ML, F5 Total y Totals por igual. Elimina cualquier lógica que reduzca el umbral solo para totals o que lo eleve solo para ML.
+
+FIX 2 — Cambiar la calibración Pinnacle para ML
+Actualmente el blend es modelo×0.40 + Pinnacle×0.60, lo que aplana demasiado el edge en ML. Cámbialo a modelo×0.55 + Pinnacle×0.45 para todos los mercados. Pinnacle sigue siendo referencia pero el modelo tiene más peso.
+
+FIX 3 — Bajar PROB_MIN_ML a 0.50
+Actualmente PROB_MIN_ML = 0.52 elimina muchos ML válidos. Cámbialo a 0.50. El filtro real debe ser el EV, no la probabilidad mínima.
+
+FIX 4 — Bajar PROB_MIN_TOTALS a 0.52
+Actualmente está en 0.54 lo que favorece totals artificialmente porque es más fácil llegar a 54% en ese mercado. Bajarlo a 0.52 nivela la competencia.
+
+FIX 5 — El mejor pick debe ser el de mayor EV entre TODOS los mercados
+En analyze_game_full(), después de calcular todos los candidatos (ML, RL, totals, F5 ML, F5 total, props), el top3 ya se ordena por EV. Asegúrate de que NO haya ningún código que priorice totals sobre ML antes de ese ordenamiento. El pick #1 debe ser simplemente el de mayor EV sin importar el mercado.
+
+FIX 6 — Activar F5 ML para todos los juegos, no solo cuando hay candidatos previos
+Actualmente el código tiene esta guardia:
+_has_early_ev = any(c.get("ev_pct", 0) > 3.0 for c in candidates)
+if not _has_early_ev:
+    _f5_data = {}
+Esto hace que F5 ML nunca se evalúe si ML y totals no generaron candidatos primero. Elimina esa guardia. F5 ML debe evaluarse siempre porque a veces ES el mejor mercado del partido independientemente de los otros.
+
+FIX 7 — Run Line debe evaluarse con umbral más bajo cuando hay favorito pesado
+Actualmente el RL +1.5 del underdog solo baja el umbral si hay un favorito a menos de 1.60. Cambia ese threshold a 1.70. Muchos partidos con favorito a -150 o -160 tienen valor real en el RL +1.5 del perro y ahora el bot los descarta.
+
+FIX 8 — En el output del panel, mostrar los top 3 mercados evaluados aunque no sean el pick
+En build_analizar_text(), en la sección de MERCADOS, asegúrate de mostrar TODOS los mercados evaluados con su EV, no solo los que pasaron los filtros. Usa el diccionario all_markets que ya existe. El usuario debe ver: ML local, ML visitante, OVER, UNDER, RL, F5 — con su EV positivo o negativo — para tomar su propia decisión. Marca con ✅ el pick recomendado y con ❌ los que no tienen valor, pero muéstralos todos.
+
+FIX 9 — El panel de expertos debe recibir los top 3 candidatos, no solo el #1
+Actualmente panel_expertos() solo recibe el pick de mayor EV. Cuando force_panel=True (comando /analizar), envía los 3 mejores candidatos al panel para que los expertos puedan comparar y elegir el mejor entre ellos. El veredicto final debe indicar cuál de los 3 prefieren los expertos y por qué.
+
+FIX 10 — Agregar lógica situacional para elegir mercado según el partido
+En analyze_game_full(), antes de ordenar candidates, agrega esta lógica de selección situacional:
+- Si la diferencia de ERA entre pitchers es mayor a 2.0: el ML del equipo con mejor pitcher debe recibir un boost de +0.03 en true_prob antes del cálculo final de EV
+- Si ambos pitchers tienen ERA mayor a 5.0: el OVER recibe boost de +0.03
+- Si ambos pitchers tienen ERA menor a 3.5: el UNDER recibe boost de +0.03
+- Si el pitcher local tiene ERA menor a 2.75 y lanza en casa: F5 ML local recibe boost de +0.02
+Estos boosts son pequeños pero suficientes para que el mercado situacionalmente correcto gane la competencia cuando los EVs están cerca.
+
+Después de los cambios, haz redeploy en Railway y prueba con /analizar en un partido de béisbol de hoy. El output debe mostrar múltiples mercados evaluados y el pick debe variar según el partido, no siempre ser OVER o UNDER.

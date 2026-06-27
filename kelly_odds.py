@@ -3219,7 +3219,7 @@ def _apply_pinnacle_calibration(
             continue
 
         model_p = c["true_prob"]
-        blended = round(model_p * 0.40 + pin_p * 0.60, 4)
+        blended = round(model_p * 0.55 + pin_p * 0.45, 4)
         # Divergencia se mide sobre la prob YA calibrada, no sobre la raw.
         # blended = model×40% + Pinnacle×60% → la distancia restante con Pinnacle
         # es siempre mucho menor que la distancia del modelo crudo.
@@ -4950,8 +4950,8 @@ def _data_completeness_score(context: dict, sport: str,
 EV_MIN_PCT       = 3.0   # minimum EV% to include a bet in Full Game Analysis
 PROB_MIN         = 0.50  # global fallback minimum true probability
 # Improvement 2: per-type confidence thresholds (backtesting-calibrated)
-PROB_MIN_TOTALS  = 0.54  # FIXED: threshold realista post-calibración Pinnacle 60/40
-PROB_MIN_ML      = 0.52  # FIXED: threshold realista post-calibración Pinnacle 60/40
+PROB_MIN_TOTALS  = 0.52  # EV es el filtro real — nivel la competencia entre mercados
+PROB_MIN_ML      = 0.50  # EV es el filtro real — elimina sesgo contra ML
 # PROB_MIN_LIVE  = 0.65  # DESACTIVADO — live betting deshabilitado
 PROB_MIN_PREMIUM = 0.70  # Premium alerts — 70% minimum
 _RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
@@ -5309,7 +5309,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             _all_evs.append((lbl, round(ev, 1)))
             _all_mkts[lbl] = {"prob": true_p_capped, "ev_pct": round(ev, 1),
                                "odds": odds, "book": book}
-            _ev_min_ml = EV_MIN_PCT * _perf_adj.get("h2h", 1.0)
+            _ev_min_ml = EV_MIN_PCT
             if ev >= _ev_min_ml and r["stake"] > 0:
                 # Improvement 2: ML requires ≥62% probability (checked after cap)
                 if true_p_capped < PROB_MIN_ML:
@@ -5498,14 +5498,13 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 _all_evs.append((side_label, round(ev, 1)))
                 _all_mkts[side_label] = {"prob": p, "ev_pct": round(ev, 1),
                                          "odds": odds, "book": bk_name}
-                _ev_min_tot = EV_MIN_PCT * _perf_adj.get("totals", 1.0)
+                _ev_min_tot = EV_MIN_PCT
                 if ev >= _ev_min_tot and r["stake"] > 0:
                     _tot_cands.append({"label": side_label, "true_prob": p, "odds": odds,
                                        "book": bk_name, "ev_pct": round(ev, 1),
                                        "stake": r["stake"], "kelly_pct": r["kelly_pct"]})
-            # Solo el lado con mayor EV va al panel de expertos
-            if _tot_cands:
-                candidates.append(max(_tot_cands, key=lambda x: x["ev_pct"]))
+            # Ambos lados (OVER y UNDER) compiten con ML/RL por EV
+            candidates.extend(_tot_cands)
 
         if totals_data and candidates:
             _std_line = totals_data[0]
@@ -5529,10 +5528,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                         print(f"   📊 Línea alternativa: {_alt_lbl} EV+{_alt_ev:.1f}%")
 
         # Run line
-        # FILTRO 1: si hay favorito pesado en ML (odds < 1.60), reducir umbral para RL +1.5 del perro
+        # FILTRO 1: si hay favorito pesado en ML (odds < 1.70), reducir umbral para RL +1.5 del perro
         _heavy_fav_ml = None
         for _t, _od_pair in h2h_odds.items():
-            if _od_pair[0] < 1.60:
+            if _od_pair[0] < 1.70:
                 _heavy_fav_ml = _t
                 break
 
@@ -5566,15 +5565,9 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
 
         # ── F5 ML (primera mitad — moneyline primeras 5 entradas) ────────────
         # F5 odds se obtienen por endpoint de evento (no en get_odds principal)
-        # GUARDIA DE API: solo pedir si ya hay al menos un candidato con EV > 3%.
-        # Si no hay valor en ML/totals/spreads, es improbable que F5/hits/props
-        # lo tengan — ahorra ~60-70% de llamadas al Odds API por scan.
+        # F5 se evalúa siempre: puede ser el mejor mercado del partido
         _has_early_ev = any(c.get("ev_pct", 0) > 3.0 for c in candidates)
-        if not _has_early_ev:
-            print(f"   ⏭️  F5/props skip — sin candidatos EV>3% en ML/totals/spreads")
-            _f5_data = {}
-        else:
-            _f5_data = _fetch_f5_odds(game_id)
+        _f5_data = _fetch_f5_odds(game_id)
         f5_h2h = _extract_f5_h2h_best(_f5_data)
         if f5_h2h:
             _era_diff_f5 = a_era_eff - h_era_eff   # positivo = pitcher local mejor
@@ -6382,14 +6375,34 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         )
         print(f"   📈 EVs calculados: {_ev_strs}")
 
-    # FILTRO 3: priorizar F5 cuando ambos abridores tienen ERA < 4.00 confirmada
-    if is_mlb and h_pname not in ("TBD", "", "SIN CONFIRMAR") and a_pname not in ("TBD", "", "SIN CONFIRMAR"):
-        if h_era < 4.00 and a_era < 4.00:
-            _f5_cands = [c for c in candidates if "F5" in c.get("label", "")]
-            _otros    = [c for c in candidates if "F5" not in c.get("label", "")]
-            if _f5_cands:
-                candidates = sorted(_f5_cands, key=lambda x: x["ev_pct"], reverse=True) + _otros
-                print(f"   ⚾ FILTRO 3: F5 priorizado — ERA {h_era:.2f}/{a_era:.2f} confirmadas")
+    # FIX 10: Boosts situacionales antes del sort — mercado con mejor contexto gana
+    if is_mlb:
+        _era_diff_sit = abs(h_era_eff - a_era_eff) if h_era_eff and a_era_eff else 0.0
+        for _c in candidates:
+            _lbl = _c.get("label", "")
+            _boost = 0.0
+            # Ventaja de pitcher dominante → boost ML del equipo con mejor ERA
+            if _era_diff_sit > 2.0:
+                _better_team = home if h_era_eff < a_era_eff else away
+                if _better_team in _lbl and "F5" not in _lbl and "RL" not in _lbl and "OVER" not in _lbl and "UNDER" not in _lbl:
+                    _boost = 0.03
+            # Ambos con ERA > 5.0 → juego alto en carreras → OVER
+            if h_era_eff and a_era_eff and h_era_eff > 5.0 and a_era_eff > 5.0:
+                if "OVER" in _lbl:
+                    _boost = 0.03
+            # Ambos con ERA < 3.5 → duelo de pitcheo → UNDER
+            if h_era_eff and a_era_eff and h_era_eff < 3.5 and a_era_eff < 3.5:
+                if "UNDER" in _lbl:
+                    _boost = 0.03
+            # Pitcher local élite en casa → boost F5 ML local
+            if h_era_eff and h_era_eff < 2.75 and "F5" in _lbl and home in _lbl:
+                _boost = max(_boost, 0.02)
+            if _boost > 0:
+                _new_p = min(0.92, _c["true_prob"] + _boost)
+                _new_ev = round((_new_p * _c["odds"] - 1) * 100, 1)
+                print(f"   🎯 Boost situacional {_lbl}: prob {_c['true_prob']:.3f}→{_new_p:.3f} EV {_c['ev_pct']:+.1f}→{_new_ev:+.1f}%")
+                _c["true_prob"] = _new_p
+                _c["ev_pct"]    = _new_ev
 
     # Drop any pick whose true probability is below the minimum threshold
     candidates = [c for c in candidates if c["true_prob"] >= PROB_MIN]
@@ -6549,6 +6562,17 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         "odds":      top3[0]["odds"],
         "stake":     top3[0]["stake"],
     }
+    # FIX 9: Panel recibe los top3 para comparar y elegir el mejor (cuando force_panel)
+    if force_panel and len(top3) > 1:
+        _alt_picks_str = " | ".join(
+            f"#{i+2} {c['label']} EV{c['ev_pct']:+.1f}% @{c['odds']:.2f}"
+            for i, c in enumerate(top3[1:3])
+        )
+        _claude_data_g["alternativas_panel"] = (
+            f"Compara estos candidatos y elige el mejor: "
+            f"#1 {top3[0]['label']} EV{top3[0]['ev_pct']:+.1f}% @{top3[0]['odds']:.2f} | "
+            f"{_alt_picks_str}"
+        )
     _claude_data_g.update({
         k: v for k, v in context.items()
         if isinstance(v, (str, int, float, bool, type(None)))
@@ -7670,16 +7694,24 @@ def build_analizar_text(result: dict) -> list:
         if ctx.get("line_moved") and ctx.get("line_note"):
             p1 += f"📉 {ctx['line_note']}\n"
 
-    # ── MERCADOS tabla limpia ─────────────────────────────────────────────────
+    # ── MERCADOS tabla completa — todos los mercados evaluados ────────────────
     p1 += f"{'─'*22}\n📊 <b>MERCADOS</b>\n{'─'*22}\n"
     _has_k = False
     if all_mkts:
-        for lbl, m in all_mkts.items():
-            bk = m.get("book", "")
-            if bk != "Props" and not _is_us_book(bk):
-                continue
+        # Ordenar: picks recomendados primero (por EV desc), luego el resto
+        _mkt_picks   = [(lbl, m) for lbl, m in all_mkts.items() if lbl in cand_lbs]
+        _mkt_others  = [(lbl, m) for lbl, m in all_mkts.items() if lbl not in cand_lbs]
+        _mkt_picks.sort(key=lambda x: x[1].get("ev_pct", 0), reverse=True)
+        _mkt_others.sort(key=lambda x: x[1].get("ev_pct", 0), reverse=True)
+        for lbl, m in (_mkt_picks + _mkt_others):
             is_pick = lbl in cand_lbs
-            p1 += _mkt_row(lbl, m, is_pick) + "\n"
+            ev_val  = m.get("ev_pct", 0)
+            icon    = "✅" if is_pick else ("❌" if ev_val < 0 else "➖")
+            bk = m.get("book", "")
+            odds_s = f"{m.get('odds', 0):.2f}" if m.get("odds") else "?"
+            prob_s = f"{round(m.get('prob', 0)*100)}%"
+            ev_s   = f"{ev_val:+.1f}%"
+            p1 += f"{icon} <b>{lbl}</b>  EV {ev_s}  Prob {prob_s}  @{odds_s} [{bk}]\n"
             if "⚡" in lbl:
                 _has_k = True
         if not _has_k and is_mlb:
