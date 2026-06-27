@@ -1,0 +1,184 @@
+import requests
+from datetime import datetime, timedelta
+
+def get_enhanced_game_context(home_team_id, away_team_id, home_pitcher_id, away_pitcher_id, game_date_str):
+    BASE = "https://statsapi.mlb.com/api/v1"
+    context = {}
+    game_date = datetime.strptime(game_date_str, "%Y-%m-%d")
+    seven_days_ago = (game_date - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    def get_last_3_starts(pitcher_id, label):
+        try:
+            url = f"{BASE}/people/{pitcher_id}/stats"
+            params = {"stats": "gameLog", "season": game_date.year, "group": "pitching"}
+            r = requests.get(url, params=params, timeout=10)
+            splits = r.json()["stats"][0]["splits"]
+            starts = [s for s in splits if float(s["stat"].get("inningsPitched", 0)) >= 3.0]
+            last3 = starts[-3:] if len(starts) >= 3 else starts
+            result = []
+            for g in last3:
+                result.append({
+                    "date": g["date"],
+                    "ip": g["stat"]["inningsPitched"],
+                    "er": g["stat"]["earnedRuns"],
+                    "era_game": round(float(g["stat"]["earnedRuns"]) * 9 / max(float(g["stat"]["inningsPitched"]), 0.1), 2),
+                    "k": g["stat"]["strikeOuts"],
+                    "hits": g["stat"]["hits"]
+                })
+            era_avg = round(sum(x["era_game"] for x in result) / len(result), 2) if result else None
+            context[f"{label}_last3_starts"] = result
+            context[f"{label}_last3_era_avg"] = era_avg
+        except Exception:
+            context[f"{label}_last3_starts"] = []
+            context[f"{label}_last3_era_avg"] = None
+
+    get_last_3_starts(home_pitcher_id, "home_pitcher")
+    get_last_3_starts(away_pitcher_id, "away_pitcher")
+
+    def get_bullpen_era_7d(team_id, label):
+        try:
+            url = f"{BASE}/teams/{team_id}/stats"
+            params = {
+                "stats": "byDateRange",
+                "group": "pitching",
+                "startDate": seven_days_ago,
+                "endDate": game_date_str,
+                "season": game_date.year
+            }
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+            splits = data["stats"][0]["splits"]
+            relievers = [s for s in splits if s.get("stat", {}).get("gamesStarted", 1) == 0]
+            if not relievers:
+                relievers = splits
+            total_er = sum(float(s["stat"].get("earnedRuns", 0)) for s in relievers)
+            total_ip = sum(float(s["stat"].get("inningsPitched", 0)) for s in relievers)
+            context[f"{label}_bullpen_era_7d"] = round(total_er * 9 / total_ip, 2) if total_ip > 0 else None
+        except Exception:
+            context[f"{label}_bullpen_era_7d"] = None
+
+    get_bullpen_era_7d(home_team_id, "home")
+    get_bullpen_era_7d(away_team_id, "away")
+
+    def get_series_stats(team_id, opponent_id, label):
+        try:
+            series_start = (game_date - timedelta(days=5)).strftime("%Y-%m-%d")
+            url = f"{BASE}/schedule"
+            params = {
+                "teamId": team_id,
+                "startDate": series_start,
+                "endDate": game_date_str,
+                "sportId": 1,
+                "hydrate": "linescore,teams"
+            }
+            r = requests.get(url, params=params, timeout=10)
+            dates = r.json().get("dates", [])
+            series_games = []
+            for d in dates:
+                for g in d.get("games", []):
+                    teams = g.get("teams", {})
+                    home_id = teams.get("home", {}).get("team", {}).get("id")
+                    away_id = teams.get("away", {}).get("team", {}).get("id")
+                    if opponent_id in [home_id, away_id] and g.get("status", {}).get("statusCode") == "F":
+                        home_score = teams["home"].get("score", 0)
+                        away_score = teams["away"].get("score", 0)
+                        won = (home_id == team_id and home_score > away_score) or \
+                              (away_id == team_id and away_score > home_score)
+                        runs_scored = home_score if home_id == team_id else away_score
+                        runs_allowed = away_score if home_id == team_id else home_score
+                        series_games.append({
+                            "date": d["date"],
+                            "runs_scored": runs_scored,
+                            "runs_allowed": runs_allowed,
+                            "won": won,
+                            "total": home_score + away_score
+                        })
+            context[f"{label}_series_games"] = series_games
+            context[f"{label}_series_wins"] = sum(1 for g in series_games if g["won"])
+            context[f"{label}_series_avg_runs_scored"] = round(
+                sum(g["runs_scored"] for g in series_games) / len(series_games), 1
+            ) if series_games else None
+            context[f"{label}_series_avg_total"] = round(
+                sum(g["total"] for g in series_games) / len(series_games), 1
+            ) if series_games else None
+        except Exception:
+            context[f"{label}_series_games"] = []
+
+    get_series_stats(home_team_id, away_team_id, "home")
+    get_series_stats(away_team_id, home_team_id, "away")
+
+    context["home_vs_pitcher"] = []
+    context["away_vs_pitcher"] = []
+    return context
+
+
+def adjust_probability_for_pitcher_form(
+    base_prob_home: float,
+    home_era_season: float,
+    away_era_season: float,
+    home_era_last3,
+    away_era_last3
+) -> float:
+    if home_era_last3 is None and away_era_last3 is None:
+        return base_prob_home
+
+    home_era_recent = home_era_last3 if home_era_last3 is not None else home_era_season
+    away_era_recent = away_era_last3 if away_era_last3 is not None else away_era_season
+
+    home_era_adjusted = (home_era_season * 0.40) + (home_era_recent * 0.60)
+    away_era_adjusted = (away_era_season * 0.40) + (away_era_recent * 0.60)
+
+    diff_season = away_era_season - home_era_season
+    diff_adjusted = away_era_adjusted - home_era_adjusted
+    delta = diff_adjusted - diff_season
+
+    prob_adjustment = delta * 0.04
+    prob_adjustment = max(-0.08, min(0.08, prob_adjustment))
+
+    adjusted_prob = base_prob_home + prob_adjustment
+    adjusted_prob = max(0.30, min(0.75, adjusted_prob))
+
+    return round(adjusted_prob, 4)
+
+
+# ─────────────────────────────────────────
+# INTEGRACIÓN — agrega esto donde calculas la probabilidad base:
+# ─────────────────────────────────────────
+
+# Paso 1: jalar contexto enriquecido
+enhanced = get_enhanced_game_context(
+    home_team_id=home_id,
+    away_team_id=away_id,
+    home_pitcher_id=home_pitcher_id,
+    away_pitcher_id=away_pitcher_id,
+    game_date_str=game_date  # formato "YYYY-MM-DD"
+)
+
+# Paso 2: ajustar probabilidad base con forma reciente
+win_prob = adjust_probability_for_pitcher_form(
+    base_prob_home=base_model_probability,
+    home_era_season=home_pitcher_era_season,
+    away_era_season=away_pitcher_era_season,
+    home_era_last3=enhanced.get("home_pitcher_last3_era_avg"),
+    away_era_last3=enhanced.get("away_pitcher_last3_era_avg")
+)
+
+# Paso 3: agregar contexto enriquecido al prompt del panel
+context_extra = f"""
+CONTEXTO ENRIQUECIDO:
+
+ABRIDOR LOCAL ultimas 3 salidas: {enhanced.get('home_pitcher_last3_starts', 'N/D')}
+ERA promedio ultimas 3: {enhanced.get('home_pitcher_last3_era_avg', 'N/D')}
+
+ABRIDOR VISITANTE ultimas 3 salidas: {enhanced.get('away_pitcher_last3_starts', 'N/D')}
+ERA promedio ultimas 3: {enhanced.get('away_pitcher_last3_era_avg', 'N/D')}
+
+BULLPEN LOCAL ultimos 7 dias ERA: {enhanced.get('home_bullpen_era_7d', 'N/D')}
+BULLPEN VISITANTE ultimos 7 dias ERA: {enhanced.get('away_bullpen_era_7d', 'N/D')}
+
+SERIE ACTUAL:
+  Juegos previos local: {enhanced.get('home_series_games', [])}
+  Victorias local en serie: {enhanced.get('home_series_wins', 0)}
+  Promedio carreras anotadas local: {enhanced.get('home_series_avg_runs_scored', 'N/D')}
+  Promedio total de la serie: {enhanced.get('home_series_avg_total', 'N/D')}
+"""
