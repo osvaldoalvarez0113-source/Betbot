@@ -1,0 +1,160 @@
+En el archivo kelly_odds.py, necesito que hagas los siguientes cambios para forzar diversificación de mercados en los picks:
+
+CAMBIO 1 — Agrega estas funciones nuevas después de las funciones de probabilidad existentes (busca donde está adjust_probability_for_pitcher_form o similar):
+
+# ============================================================
+# MARKET DIVERSIFICATION ENGINE
+# ============================================================
+
+def get_market_priority_for_game(home_era, away_era):
+    """
+    Determina el mercado prioritario según el mismatch de ERA.
+    Retorna lista ordenada de mercados a evaluar.
+    """
+    try:
+        era_diff = abs(float(home_era or 4.50) - float(away_era or 4.50))
+        
+        if era_diff >= 2.0:
+            return ['ML', 'F5', 'RL', 'TOTAL']
+        elif era_diff >= 1.0:
+            return ['ML', 'F5', 'TOTAL', 'RL']
+        elif float(home_era or 4.50) < 3.50 and float(away_era or 4.50) < 3.50:
+            return ['TOTAL', 'F5', 'ML', 'RL']
+        else:
+            return ['ML', 'TOTAL', 'F5', 'RL']
+    except Exception as e:
+        logger.error(f"[MARKET_PRIORITY] Error: {e}")
+        return ['ML', 'TOTAL', 'F5', 'RL']
+
+
+def pitcher_mismatch_ml_boost(home_era, away_era, base_prob, favored_is_home=True):
+    """
+    Ajusta la probabilidad ML cuando hay mismatch significativo de ERA.
+    Cap de ±8pp igual que el sistema existente.
+    """
+    try:
+        era_diff = abs(float(home_era or 4.50) - float(away_era or 4.50))
+        
+        if era_diff >= 3.0:
+            boost = 0.07
+        elif era_diff >= 2.0:
+            boost = 0.05
+        elif era_diff >= 1.5:
+            boost = 0.03
+        elif era_diff >= 1.0:
+            boost = 0.015
+        else:
+            boost = 0.0
+
+        adjusted = min(float(base_prob) + boost, float(base_prob) + 0.08)
+        adjusted = max(adjusted, 0.0)
+        adjusted = min(adjusted, 1.0)
+
+        logger.info(
+            f"[ML_BOOST] ERA diff={era_diff:.2f} | "
+            f"boost=+{boost*100:.1f}pp | "
+            f"{float(base_prob)*100:.1f}% → {adjusted*100:.1f}%"
+        )
+        return adjusted
+    except Exception as e:
+        logger.error(f"[ML_BOOST] Error: {e}")
+        return base_prob
+
+
+def enforce_market_diversity(picks_list, max_totals=2):
+    """
+    Post-procesa la lista de picks para garantizar diversidad de mercados.
+    Si hay más de max_totals OVER/UNDER, elimina los de menor probabilidad.
+    """
+    if not picks_list:
+        return picks_list
+
+    try:
+        TOTAL_MARKETS = {'OVER', 'UNDER', 'TOTAL'}
+
+        totals = [
+            p for p in picks_list
+            if str(p.get('market', '') or p.get('tipo', '') or '').upper() in TOTAL_MARKETS
+        ]
+        non_totals = [
+            p for p in picks_list
+            if str(p.get('market', '') or p.get('tipo', '') or '').upper() not in TOTAL_MARKETS
+        ]
+
+        before = len(totals)
+
+        if len(totals) > max_totals:
+            totals.sort(
+                key=lambda x: float(x.get('probability', x.get('probabilidad', 0)) or 0),
+                reverse=True
+            )
+            totals = totals[:max_totals]
+
+        result = non_totals + totals
+        after = len(totals)
+
+        logger.info(
+            f"[DIVERSITY] Totals antes={before} | después={after} | "
+            f"ML/RL/F5={len(non_totals)} | total picks={len(result)}"
+        )
+
+        return result
+
+    except Exception as e:
+        logger.error(f"[DIVERSITY] Error: {e}")
+        return picks_list
+
+
+---
+
+CAMBIO 2 — Modifica el system prompt del panel de expertos. Busca donde se define el string del system prompt de Marco, Víctor y Elena. Agrega esta variable y concaténala al final del system prompt existente:
+
+PANEL_DIVERSITY_ADDENDUM = """
+
+══════════════════════════════════════════════
+REGLA DE DIVERSIDAD DE MERCADOS — OBLIGATORIA
+══════════════════════════════════════════════
+
+Esta regla tiene la misma prioridad que el consenso 2/3.
+
+1. En cualquier sesión de picks, MÁXIMO 2 picks pueden ser OVER o UNDER de carreras totales.
+
+2. Si ya hay 2 totales propuestos, los picks restantes DEBEN ser uno de estos:
+   - Moneyline (ML) — ¿quién gana el juego?
+   - Run line (-1.5 / +1.5) — ¿gana por más de 1?
+   - Primeros 5 innings (F5) — ¿quién va ganando al medio?
+   - Prop de strikeouts si hay valor claro
+
+3. Cuando la diferencia de ERA entre los pitchers titulares es mayor o igual a 1.5 puntos,
+   el mercado PRINCIPAL a evaluar debe ser ML o F5, NO el total.
+   Ejemplo: pitcher con ERA 1.40 vs pitcher con ERA 5.35 → evalúen ML primero.
+
+4. Antes de proponer cualquier pick, el panel debe preguntarse:
+   ¿Hay ventaja de pitcher tan grande que el ML tiene más valor que apostar el total?
+
+Violar esta regla es motivo de veto automático del pick.
+"""
+
+Luego donde construyes el system prompt del panel, agrégale el addendum así:
+panel_system_prompt = panel_system_prompt + PANEL_DIVERSITY_ADDENDUM
+
+
+---
+
+CAMBIO 3 — Llama a enforce_market_diversity en el flujo principal. Busca donde se genera la lista final de picks, justo antes de formatear la notificación de Telegram o ntfy. Agrega esto:
+
+# Aplicar diversificación de mercados
+if picks_list:
+    picks_list = enforce_market_diversity(picks_list, max_totals=2)
+    logger.info(f"[MAIN] Picks después de diversificación: {len(picks_list)}")
+
+Y donde calculas la probabilidad ML de un juego, busca donde usas el ERA del pitcher para ajustar probabilidad y agrega:
+
+# Boost de ML por mismatch de ERA
+if game.get('market') in ['ML', 'F5'] and home_era and away_era:
+    game['probability'] = pitcher_mismatch_ml_boost(
+        home_era=home_era,
+        away_era=away_era,
+        base_prob=game['probability'],
+        favored_is_home=(home_era < away_era)
+    )

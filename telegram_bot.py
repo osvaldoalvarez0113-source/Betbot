@@ -190,6 +190,35 @@ def _cmd_mispicks(chat_id: str):
     _send(chat_id, "\n".join(lines))
 
 
+def _enforce_market_diversity(picks_list, max_totals=2):
+    """Limita a max_totals picks de OVER/UNDER; preserva ML, RL, F5."""
+    if not picks_list:
+        return picks_list
+    try:
+        TOTAL_KEYWORDS = {'OVER', 'UNDER', 'TOTAL'}
+
+        def _is_total(p):
+            for key in ('market', 'tipo', 'label'):
+                val = str(p.get(key) or '').upper()
+                if any(kw in val for kw in TOTAL_KEYWORDS):
+                    return True
+            return False
+
+        totals     = [p for p in picks_list if _is_total(p)]
+        non_totals = [p for p in picks_list if not _is_total(p)]
+        before = len(totals)
+        if len(totals) > max_totals:
+            totals.sort(key=lambda x: float(x.get('ev', 0) or 0), reverse=True)
+            totals = totals[:max_totals]
+        result = non_totals + totals
+        print(f"[DIVERSITY] Totals antes={before} | después={len(totals)} | "
+              f"ML/RL/F5={len(non_totals)} | total picks={len(result)}")
+        return result
+    except Exception as e:
+        print(f"[DIVERSITY] Error: {e}")
+        return picks_list
+
+
 def _cmd_best_picks(chat_id: str, sport_key: str, emoji: str, label: str):
     """Analyze all games for sport_key, return top-5 picks by EV in one message."""
     if not _get_odds_fn or not _analyze_fn:
@@ -260,6 +289,9 @@ def _cmd_best_picks(chat_id: str, sport_key: str, emoji: str, label: str):
 
     # Sort: panel-approved first, then by EV descending
     all_picks.sort(key=lambda x: (not x["panel_ok"], -x["ev"]))
+    if all_picks:
+        all_picks = _enforce_market_diversity(all_picks, max_totals=2)
+        print(f"[MAIN] Picks después de diversificación: {len(all_picks)}")
     top5 = all_picks[:5]
 
     rank_emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
