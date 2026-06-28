@@ -5317,6 +5317,19 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             except Exception as _pfe:
                 print(f"  ⚠️  pitcher form adj error: {_pfe}")
 
+        # Boost adicional por mismatch de ERA en mercado ML
+        if is_mlb and h_era is not None and a_era is not None:
+            try:
+                p_home = pitcher_mismatch_ml_boost(
+                    home_era=h_era,
+                    away_era=a_era,
+                    base_prob=p_home,
+                    favored_is_home=(h_era <= a_era),
+                )
+                p_away = 1.0 - p_home
+            except Exception as _mmb_e:
+                print(f"  ⚠️  pitcher_mismatch_ml_boost error: {_mmb_e}")
+
         # ML
         for team, true_p, lbl in [
             (home, p_home, f"🔵 {home} ML"),
@@ -10245,6 +10258,32 @@ _CLAUDE_SYSTEM = (
     "factores_positivos, factores_negativos, datos_inconsistentes."
 )
 
+PANEL_DIVERSITY_ADDENDUM = """
+
+══════════════════════════════════════════════
+REGLA DE DIVERSIDAD DE MERCADOS — OBLIGATORIA
+══════════════════════════════════════════════
+
+Esta regla tiene la misma prioridad que el consenso 2/3.
+
+1. En cualquier sesión de picks, MÁXIMO 2 picks pueden ser OVER o UNDER de carreras totales.
+
+2. Si ya hay 2 totales propuestos, los picks restantes DEBEN ser uno de estos:
+   - Moneyline (ML) — ¿quién gana el juego?
+   - Run line (-1.5 / +1.5) — ¿gana por más de 1?
+   - Primeros 5 innings (F5) — ¿quién va ganando al medio?
+   - Prop de strikeouts si hay valor claro
+
+3. Cuando la diferencia de ERA entre los pitchers titulares es mayor o igual a 1.5 puntos,
+   el mercado PRINCIPAL a evaluar debe ser ML o F5, NO el total.
+   Ejemplo: pitcher con ERA 1.40 vs pitcher con ERA 5.35 → evalúen ML primero.
+
+4. Antes de proponer cualquier pick, el panel debe preguntarse:
+   ¿Hay ventaja de pitcher tan grande que el ML tiene más valor que apostar el total?
+
+Violar esta regla es motivo de veto automático del pick.
+"""
+
 
 def analyze_with_claude(game_data: dict, sport: str,
                         _extra_system: str = "",
@@ -10401,6 +10440,94 @@ def adjust_probability_for_pitcher_form(
         print(f"   🎯 Forma reciente ERA: diff_season={diff_season:+.2f} "
               f"diff_adj={diff_adjusted:+.2f} → p_home {base_prob_home:.3f}→{adjusted:.3f}")
     return round(adjusted, 4)
+
+
+# ============================================================
+# MARKET DIVERSIFICATION ENGINE
+# ============================================================
+
+def get_market_priority_for_game(home_era, away_era):
+    """
+    Determina el mercado prioritario según el mismatch de ERA.
+    Retorna lista ordenada de mercados a evaluar.
+    """
+    try:
+        era_diff = abs(float(home_era or 4.50) - float(away_era or 4.50))
+        if era_diff >= 2.0:
+            return ['ML', 'F5', 'RL', 'TOTAL']
+        elif era_diff >= 1.0:
+            return ['ML', 'F5', 'TOTAL', 'RL']
+        elif float(home_era or 4.50) < 3.50 and float(away_era or 4.50) < 3.50:
+            return ['TOTAL', 'F5', 'ML', 'RL']
+        else:
+            return ['ML', 'TOTAL', 'F5', 'RL']
+    except Exception as e:
+        print(f"[MARKET_PRIORITY] Error: {e}")
+        return ['ML', 'TOTAL', 'F5', 'RL']
+
+
+def pitcher_mismatch_ml_boost(home_era, away_era, base_prob, favored_is_home=True):
+    """
+    Ajusta la probabilidad ML cuando hay mismatch significativo de ERA.
+    Cap de ±8pp igual que el sistema existente.
+    """
+    try:
+        era_diff = abs(float(home_era or 4.50) - float(away_era or 4.50))
+        if era_diff >= 3.0:
+            boost = 0.07
+        elif era_diff >= 2.0:
+            boost = 0.05
+        elif era_diff >= 1.5:
+            boost = 0.03
+        elif era_diff >= 1.0:
+            boost = 0.015
+        else:
+            boost = 0.0
+        adjusted = min(float(base_prob) + boost, float(base_prob) + 0.08)
+        adjusted = max(0.0, min(1.0, adjusted))
+        if boost > 0.0:
+            print(f"[ML_BOOST] ERA diff={era_diff:.2f} | boost=+{boost*100:.1f}pp | "
+                  f"{float(base_prob)*100:.1f}% → {adjusted*100:.1f}%")
+        return adjusted
+    except Exception as e:
+        print(f"[ML_BOOST] Error: {e}")
+        return base_prob
+
+
+def enforce_market_diversity(picks_list, max_totals=2):
+    """
+    Post-procesa la lista de picks para garantizar diversidad de mercados.
+    Si hay más de max_totals OVER/UNDER, elimina los de menor EV.
+    Acepta dicts con clave 'market', 'tipo' o 'label'.
+    """
+    if not picks_list:
+        return picks_list
+    try:
+        TOTAL_KEYWORDS = {'OVER', 'UNDER', 'TOTAL'}
+
+        def _is_total(p):
+            for key in ('market', 'tipo', 'label'):
+                val = str(p.get(key) or '').upper()
+                if any(kw in val for kw in TOTAL_KEYWORDS):
+                    return True
+            return False
+
+        totals     = [p for p in picks_list if _is_total(p)]
+        non_totals = [p for p in picks_list if not _is_total(p)]
+        before = len(totals)
+        if len(totals) > max_totals:
+            totals.sort(
+                key=lambda x: float(x.get('ev', x.get('ev_pct', x.get('probability', 0))) or 0),
+                reverse=True,
+            )
+            totals = totals[:max_totals]
+        result = non_totals + totals
+        print(f"[DIVERSITY] Totals antes={before} | después={len(totals)} | "
+              f"ML/RL/F5={len(non_totals)} | total picks={len(result)}")
+        return result
+    except Exception as e:
+        print(f"[DIVERSITY] Error: {e}")
+        return picks_list
 
 
 def _fetch_enhanced_game_context(
@@ -10916,7 +11043,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
 
     for i, (nombre, extra) in enumerate(_EXPERTOS):
         _panel_model = CLAUDE_PANEL_MODEL  # configurable desde Railway env vars
-        _extra_full  = extra + (_PATRONES_MLB_2026 if _is_mlb else "")
+        _extra_full  = extra + (_PATRONES_MLB_2026 if _is_mlb else "") + PANEL_DIVERSITY_ADDENDUM
         res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
                                   _model=_panel_model)
         if res is None:
