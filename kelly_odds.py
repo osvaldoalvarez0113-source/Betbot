@@ -360,6 +360,42 @@ MLB_PARK_CF_BEARING = {
     "Washington Nationals":    20,    # Nationals Park — CF toward NNE
 }
 
+# ── MLB STADIUM TIMEZONE ─────────────────────────────────────────────────────
+# Local timezone for each MLB home stadium.  Used to compute local game times
+# for GETAWAY_DAY and TIMEZONE_FATIGUE situational flags.
+MLB_STADIUM_TIMEZONE = {
+    "Arizona Diamondbacks":   "America/Phoenix",       # no DST
+    "Atlanta Braves":          "America/New_York",
+    "Baltimore Orioles":       "America/New_York",
+    "Boston Red Sox":          "America/New_York",
+    "Chicago Cubs":            "America/Chicago",
+    "Chicago White Sox":       "America/Chicago",
+    "Cincinnati Reds":         "America/New_York",
+    "Cleveland Guardians":     "America/New_York",
+    "Colorado Rockies":        "America/Denver",
+    "Detroit Tigers":          "America/Detroit",
+    "Houston Astros":          "America/Chicago",
+    "Kansas City Royals":      "America/Chicago",
+    "Los Angeles Angels":      "America/Los_Angeles",
+    "Los Angeles Dodgers":     "America/Los_Angeles",
+    "Miami Marlins":           "America/New_York",
+    "Milwaukee Brewers":       "America/Chicago",
+    "Minnesota Twins":         "America/Chicago",
+    "New York Mets":           "America/New_York",
+    "New York Yankees":        "America/New_York",
+    "Oakland Athletics":       "America/Los_Angeles",
+    "Philadelphia Phillies":   "America/New_York",
+    "Pittsburgh Pirates":      "America/New_York",
+    "San Diego Padres":        "America/Los_Angeles",
+    "San Francisco Giants":    "America/Los_Angeles",
+    "Seattle Mariners":        "America/Los_Angeles",
+    "St. Louis Cardinals":     "America/Chicago",
+    "Tampa Bay Rays":          "America/New_York",
+    "Texas Rangers":           "America/Chicago",
+    "Toronto Blue Jays":       "America/Toronto",
+    "Washington Nationals":    "America/New_York",
+}
+
 # ── RUNTIME STATE ─────────────────────────────────────────────────────────────
 alerted_bets:          set  = set()
 alerted_game_analysis: set  = set()
@@ -5575,7 +5611,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         if is_mlb:
             try:
                 _enh_ctx = _fetch_enhanced_game_context(
-                    _team_id(home), _team_id(away), h_pid, a_pid, game_date
+                    _team_id(home), _team_id(away), h_pid, a_pid, game_date,
+                    home_name=home, away_name=away, commence_utc=commence,
                 )
             except Exception as _ece:
                 import datetime as _dt_enh
@@ -10838,8 +10875,206 @@ def enforce_market_diversity(picks_list, max_totals=2):
         return picks_list
 
 
+_sit_flags_cache: dict = {}
+
+
+def _fetch_situational_flags(
+    home_team_id, away_team_id,
+    home_name: str, away_name: str,
+    game_date_str: str,
+    commence_utc: str = "",
+) -> dict:
+    """
+    Compute 4 situational fatigue flags (MLB calendar/logistics — no narrative).
+
+    Keys returned (only set when flag is active):
+      sit_getaway_{h|a}            True | "LAST_OF_SERIES"
+      sit_getaway_detail_{h|a}     human-readable detail string
+      sit_tz_fatigue_a             True
+      sit_tz_fatigue_detail_a      human-readable detail string
+      sit_bullpen_fatigue_{h|a}    True
+      sit_bullpen_days_{h|a}       int (number of days with reliever appearances)
+      sit_dh_g2                    True
+      sit_flags_txt                aggregated block (present only when ≥1 flag active)
+    """
+    _ck = f"sit_{home_team_id}_{away_team_id}_{game_date_str}"
+    if _ck in _sit_flags_cache:
+        return _sit_flags_cache[_ck]
+
+    flags: dict = {}
+
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        import pytz as _pytz
+
+        gd        = _dt.strptime(game_date_str, "%Y-%m-%d")
+        yesterday = (gd - _td(days=1)).strftime("%Y-%m-%d")
+        three_ago = (gd - _td(days=3)).strftime("%Y-%m-%d")
+        year      = gd.year
+
+        # Parse today's game start time in UTC
+        today_utc_dt = None
+        if commence_utc:
+            try:
+                today_utc_dt = _dt.fromisoformat(
+                    commence_utc.replace("Z", "+00:00")
+                ).astimezone(_pytz.utc)
+            except Exception:
+                pass
+
+        # ── Flag 4: Doubleheader G2 ───────────────────────────────────────
+        try:
+            _dsched = _mlb_rest("/schedule", {
+                "teamId": home_team_id, "date": game_date_str, "sportId": 1,
+            })
+            for _dd in _dsched.get("dates", []):
+                for _dg in _dd.get("games", []):
+                    if _dg.get("gameNumber", 1) == 2:
+                        _dt2   = _dg.get("teams", {})
+                        _h2_id = (_dt2.get("home", {}).get("team") or {}).get("id")
+                        _a2_id = (_dt2.get("away", {}).get("team") or {}).get("id")
+                        if home_team_id in (_h2_id, _a2_id) or away_team_id in (_h2_id, _a2_id):
+                            flags["sit_dh_g2"] = True
+        except Exception:
+            pass
+
+        # ── Flag 3: Bullpen fatigue (relievers in 2+ of last 3 days) ─────
+        def _bp_fatigue(team_id, label):
+            try:
+                data   = _mlb_rest(f"/teams/{team_id}/stats", {
+                    "stats": "gameLog", "group": "pitching", "season": year,
+                    "startDate": three_ago, "endDate": yesterday,
+                })
+                splits = (data.get("stats") or [{}])[0].get("splits") or []
+                relief_days: set = set()
+                for _s in splits:
+                    gs = int((_s.get("stat") or {}).get("gamesStarted", 0) or 0)
+                    if gs == 0:
+                        _gdate = (_s.get("date") or "")[:10]
+                        if _gdate >= three_ago:
+                            relief_days.add(_gdate)
+                days = len(relief_days)
+                if days >= 2:
+                    flags[f"sit_bullpen_fatigue_{label}"] = True
+                    flags[f"sit_bullpen_days_{label}"]    = days
+            except Exception:
+                pass
+
+        _bp_fatigue(home_team_id, "h")
+        _bp_fatigue(away_team_id, "a")
+
+        # ── Yesterday's game helper ───────────────────────────────────────
+        def _yesterday_game_info(team_id):
+            try:
+                data = _mlb_rest("/schedule", {
+                    "teamId": team_id, "date": yesterday, "sportId": 1,
+                    "hydrate": "team",
+                })
+                for _dd in data.get("dates", []):
+                    for _dg in _dd.get("games", []):
+                        if (_dg.get("status") or {}).get("statusCode", "") == "F":
+                            return (
+                                _dg.get("gameDate", ""),
+                                _dg.get("seriesGameNumber"),
+                                _dg.get("gamesInSeries"),
+                            )
+            except Exception:
+                pass
+            return None, None, None
+
+        h_yd_utc, h_sg, h_gs = _yesterday_game_info(home_team_id)
+        a_yd_utc, a_sg, a_gs = _yesterday_game_info(away_team_id)
+
+        home_tz_str = MLB_STADIUM_TIMEZONE.get(home_name)
+        away_tz_str = MLB_STADIUM_TIMEZONE.get(away_name)
+
+        # ── Flag 1: Getaway day (night game yday → day game today) ────────
+        for _lbl, _yd_utc, _sg, _gs, _tz_str in [
+            ("h", h_yd_utc, h_sg, h_gs, home_tz_str),
+            ("a", a_yd_utc, a_sg, a_gs, away_tz_str),
+        ]:
+            if not _yd_utc or not _tz_str:
+                continue
+            try:
+                _tz      = _pytz.timezone(_tz_str)
+                _yd_dt   = _dt.fromisoformat(_yd_utc.replace("Z", "+00:00")).astimezone(_pytz.utc)
+                _yd_loc  = _yd_dt.astimezone(_tz)
+                _yd_hour = _yd_loc.hour
+
+                _td_hour = None
+                if today_utc_dt is not None:
+                    _td_hour = today_utc_dt.astimezone(_tz).hour
+
+                if _yd_hour >= 18 and _td_hour is not None and _td_hour < 16:
+                    _val = "LAST_OF_SERIES" if (_sg and _gs and _sg == _gs) else True
+                    flags[f"sit_getaway_{_lbl}"] = _val
+                    _series_note = (f" — ÚLTIMO DE SERIE ({_sg}/{_gs})"
+                                    if _val == "LAST_OF_SERIES" else "")
+                    flags[f"sit_getaway_detail_{_lbl}"] = (
+                        f"Ayer juego nocturno ({_yd_loc.strftime('%I:%M %p')} local); "
+                        f"hoy juego diurno (~{_td_hour:02d}:00 local){_series_note}"
+                    )
+            except Exception:
+                pass
+
+        # ── Flag 2: Timezone fatigue (away team traveled 2+ hrs east) ────
+        if away_tz_str and home_tz_str and away_tz_str != home_tz_str:
+            try:
+                _ref     = _dt.utcnow().replace(tzinfo=_pytz.utc)
+                _atz     = _pytz.timezone(away_tz_str)
+                _htz     = _pytz.timezone(home_tz_str)
+                _a_off   = _atz.utcoffset(_ref).total_seconds() / 3600
+                _h_off   = _htz.utcoffset(_ref).total_seconds() / 3600
+                _tz_diff = _h_off - _a_off   # positive = game location is later tz
+                if abs(_tz_diff) >= 2 and today_utc_dt is not None:
+                    _body_hour = today_utc_dt.astimezone(_atz).hour
+                    if _body_hour < 13:   # before 1 PM on away team's body clock
+                        flags["sit_tz_fatigue_a"] = True
+                        _dir = "→ EAST" if _tz_diff > 0 else "→ WEST"
+                        flags["sit_tz_fatigue_detail_a"] = (
+                            f"Viaje {away_tz_str.split('/')[-1].replace('_', ' ')} "
+                            f"{_dir} ({abs(_tz_diff):.0f}h diff) — "
+                            f"juego es {today_utc_dt.astimezone(_atz).strftime('%I:%M %p')} "
+                            f"en el reloj biológico del visitante"
+                        )
+            except Exception:
+                pass
+
+        # ── Aggregated human-readable flag block ──────────────────────────
+        _flag_lines = []
+        for _fl, _fshort in [("h", "LOCAL"), ("a", "VISITANTE")]:
+            _gw = flags.get(f"sit_getaway_{_fl}")
+            if _gw:
+                _det = flags.get(f"sit_getaway_detail_{_fl}", "")
+                _tag = "GETAWAY_DAY [ÚLTIMO DE SERIE]" if _gw == "LAST_OF_SERIES" else "GETAWAY_DAY"
+                _flag_lines.append(f"⚑ {_tag} [{_fshort}]: {_det}")
+            if flags.get(f"sit_bullpen_fatigue_{_fl}"):
+                _days = flags.get(f"sit_bullpen_days_{_fl}", 2)
+                _flag_lines.append(
+                    f"⚑ BULLPEN_FATIGUE [{_fshort}]: relevistas usados en {_days}/3 últimos días"
+                )
+        if flags.get("sit_tz_fatigue_a"):
+            _flag_lines.append(
+                f"⚑ TIMEZONE_FATIGUE [VISITANTE]: {flags.get('sit_tz_fatigue_detail_a', '')}"
+            )
+        if flags.get("sit_dh_g2"):
+            _flag_lines.append("⚑ DOUBLEHEADER_G2: Segundo juego del dobleheader hoy")
+
+        if _flag_lines:
+            flags["sit_flags_txt"] = "\n".join(_flag_lines)
+            print(f"  🚩 Banderas situacionales ({len(_flag_lines)}): "
+                  f"{' | '.join(f.split('[')[0].strip() for f in _flag_lines)}")
+
+    except Exception as _sf_e:
+        print(f"  ⚠️  _fetch_situational_flags error: {_sf_e}")
+
+    _sit_flags_cache[_ck] = flags
+    return flags
+
+
 def _fetch_enhanced_game_context(
-    home_team_id, away_team_id, home_pitcher_id, away_pitcher_id, game_date_str: str
+    home_team_id, away_team_id, home_pitcher_id, away_pitcher_id, game_date_str: str,
+    home_name: str = "", away_name: str = "", commence_utc: str = "",
 ) -> dict:
     """
     Contexto enriquecido via MLB Stats API:
@@ -10997,6 +11232,18 @@ def _fetch_enhanced_game_context(
         parts.append(f"Serie actual: LOCAL {hw}-{hn-hw} | prom {avg_rs} carreras | total prom {avg_tot}")
     if parts:
         result["serie_txt"] = " || ".join(parts)
+
+    # ── 4. Situational flags (GETAWAY_DAY, TIMEZONE_FATIGUE, BULLPEN_FATIGUE, DH_G2) ──
+    if home_name and away_name:
+        try:
+            _sit = _fetch_situational_flags(
+                home_team_id, away_team_id,
+                home_name, away_name,
+                game_date_str, commence_utc=commence_utc,
+            )
+            result.update(_sit)
+        except Exception as _sf_e:
+            print(f"  ⚠️  situational_flags call error: {_sf_e}")
 
     _enh_ctx_cache[_ck] = result
     return result
@@ -11204,6 +11451,32 @@ def _generar_narrativa(context: dict, candidates: list, home: str, away: str,
             return ""
 
 
+def _build_elena_situational_addendum(game_data: dict) -> str:
+    """
+    Build a dynamic system-prompt addendum for Elena (El Abogado del Diablo)
+    when situational fatigue flags are present in game_data.
+    Returns empty string when no flags are active — Elena's base prompt is
+    unchanged in that case (she should NOT mention this topic at all).
+    """
+    flags_txt = game_data.get("sit_flags_txt", "")
+    if not flags_txt:
+        return ""
+    return (
+        "\n\n━━━ DATOS SITUACIONALES CONFIRMADOS (ESTE PARTIDO) ━━━\n"
+        "El sistema de monitoreo detectó automáticamente los siguientes factores "
+        "de fatiga real de calendario — NO son narrativa ni opinión, son datos "
+        "medibles del schedule de MLB:\n\n"
+        f"{flags_txt}\n\n"
+        "INSTRUCCIÓN CRÍTICA PARA ELENA:\n"
+        "Si alguna de estas banderas aplica al EQUIPO FAVORITO del pick en análisis, "
+        "trátala como evidencia concreta de un factor oculto negativo. "
+        "Nómbrala explícitamente en tu oración 1 y explica por qué es relevante HOY. "
+        "Tu veto (apostar=false) o duda (confianza=BAJA) se mantiene aunque Marco y "
+        "Víctor voten a favor — estos datos del calendario pesan más que el consenso. "
+        "Si la bandera aplica al EQUIPO DESFAVORITO, ignórala."
+    )
+
+
 def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     """
     Panel of 3 expert personas — each calls analyze_with_claude with its own
@@ -11382,6 +11655,13 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     for i, (nombre, extra) in enumerate(_EXPERTOS):
         _panel_model = CLAUDE_PANEL_MODEL  # configurable desde Railway env vars
         _extra_full  = extra + (_PATRONES_MLB_2026 if _is_mlb else "") + PANEL_DIVERSITY_ADDENDUM
+        # Elena (index 2): inject situational fatigue flags when present
+        if i == 2 and _is_mlb:
+            _elena_sit = _build_elena_situational_addendum(game_data)
+            if _elena_sit:
+                _extra_full += _elena_sit
+                _n_flags = len(game_data.get("sit_flags_txt", "").splitlines())
+                print(f"   🚩 Elena: {_n_flags} bandera(s) situacional(es) inyectada(s)")
         res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
                                   _model=_panel_model)
         if res is None:
