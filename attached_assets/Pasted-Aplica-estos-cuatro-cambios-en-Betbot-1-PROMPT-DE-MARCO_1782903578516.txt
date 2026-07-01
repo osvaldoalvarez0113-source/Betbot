@@ -1,0 +1,59 @@
+Aplica estos cuatro cambios en Betbot:
+
+1. PROMPT DE MARCO "EL ESTADÍSTICO" — MÉTRICAS PURAS
+
+Encuentra el system prompt de Marco en el panel de expertos.
+
+Restringe su análisis EXCLUSIVAMENTE a estas métricas predictivas: 
+xERA, Barrel%, Hard-Hit%, Whiff%.
+
+Agrega una instrucción explícita: Marco NO debe opinar sobre rachas, 
+motivación, momentum, ni narrativa del equipo. Si no tiene data 
+suficiente de estas 4 métricas para un juego, debe decirlo en vez 
+de rellenar con opinión cualitativa.
+
+2. PROMPT DE ELENA "EL ABOGADO DEL DIABLO" — CAZAR FACTORES OCULTOS
+
+Encuentra el system prompt de Elena.
+
+Refuerza su rol: cuando Marco y Víctor coincidan en ir con el favorito, 
+Elena debe buscar activamente factores negativos ocultos antes de dar 
+su voto. Ejemplos a considerar: tercer juego de una serie con viaje 
+nocturno de por medio, bullpen con uso pesado en días consecutivos, 
+lineup debilitado.
+
+Si Elena encuentra un argumento sólido con estos factores, su voto 
+de veto (0/3) o duda debe mantenerse con fuerza — no debe ceder 
+solo porque los otros dos coinciden.
+
+3. TEAM TOTALS COMO MERCADO ACTIVO
+
+Busca dónde se calcula el total combinado de carreras (probablemente 
+ya existe una proyección de carreras por equipo por separado, home 
+y away, antes de sumarlas para el total).
+
+Expón esas proyecciones individuales como un mercado propio: "Team 
+Total [Equipo] Over/Under [línea]". 
+
+Debe pasar por el mismo edge filter (≥5%) y el mismo panel de consenso 
+2-de-3 que los demás mercados. Agrégalo a la lista de mercados activos 
+junto a ML, run line, O/U, F5 ML, F5 total, hits total, strikeout props.
+
+4. VIENTO POR DIRECCIÓN, NO SOLO VELOCIDAD
+
+En el módulo de clima (OpenMeteo), ya se usa la velocidad del viento. 
+Agrega ahora la dirección.
+
+Crea una tabla de referencia fija con la orientación de home plate 
+hacia el jardín central para cada estadio de MLB (dato estático, no 
+cambia).
+
+Con eso, calcula si el viento sopla "hacia afuera" (out) o "hacia 
+adentro" (in) relativo a cada estadio específico:
+
+- Si sopla hacia afuera a más de 15 mph: ajusta al alza la probabilidad 
+  del Over y da un pequeño boost a bateadores con perfil flyball.
+- Si sopla hacia adentro a más de 15 mph: ajusta al alza la probabilidad 
+  del Under y da un pequeño boost a pitchers groundball.
+- Si es menos de 15 mph o el estadio es techado/cerrado, no aplica 
+  ajuste.
