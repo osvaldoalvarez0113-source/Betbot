@@ -279,6 +279,11 @@ def _is_us_book(title: str) -> bool:
 OPENWEATHER_KEY   = os.environ.get("OPENWEATHER_API_KEY", "")
 BANKROLL_LOG_FILE      = "bankroll_log.csv"
 CLV_LOG_FILE           = "clv_log.csv"
+
+# Pinnacle calibration weights — model vs Pinnacle implied probability
+# 70% model (Pyth/ELO/Poisson/panel), 30% Pinnacle sharp line
+PINNACLE_BLEND_MODEL   = 0.70   # weight for our model probability
+PINNACLE_BLEND_SHARP   = 0.30   # weight for Pinnacle implied probability
 PENDING_BETS_FILE      = "pending_bets.json"
 CONFIRM_FILE           = "pending_confirm.json"   # bets awaiting user confirmation
 _LINE_HISTORY_FILE     = "line_history.json"      # 1B: multi-scan totals line tracker
@@ -3170,9 +3175,10 @@ def _apply_pinnacle_calibration(
     de Pinnacle y aplica un filtro de divergencia.
 
     Para cada candidato donde Pinnacle tiene odds disponibles:
-      prob_final = (prob_modelo × 0.4) + (prob_pinnacle × 0.6)
+      prob_final = (prob_modelo × 0.70) + (prob_pinnacle × 0.30)
 
-    Pinnacle pesa 60% porque es el mercado sharp más calibrado del mundo.
+    Modelo pesa 70% (Pyth/ELO/Poisson/panel expertos).
+    Pinnacle pesa 30% como referencia sharp calibrada pero subordinada al modelo.
     Luego se recalculan EV y stake con la probabilidad ajustada.
 
     Si |prob_modelo − prob_pinnacle| > 25 pp:
@@ -3219,11 +3225,9 @@ def _apply_pinnacle_calibration(
             continue
 
         model_p = c["true_prob"]
-        blended = round(model_p * 0.55 + pin_p * 0.45, 4)
-        # Divergencia se mide sobre la prob YA calibrada, no sobre la raw.
-        # blended = model×40% + Pinnacle×60% → la distancia restante con Pinnacle
-        # es siempre mucho menor que la distancia del modelo crudo.
-        # Ejemplo: model=87.2%, pin=50% → blended=64.9% → div=14.9pp (no 37.2pp)
+        blended = round(model_p * PINNACLE_BLEND_MODEL + pin_p * PINNACLE_BLEND_SHARP, 4)
+        # Divergencia se mide sobre la prob YA calibrada (modelo 70% / Pinnacle 30%).
+        # Ejemplo: model=87.2%, pin=50% → blended=76.0% → div=26pp
         div_pp  = abs(blended - pin_p) * 100
 
         # Recomputar EV y stake con prob calibrada
@@ -8641,30 +8645,50 @@ def check_closing_lines(current_games_by_sport):
             remaining.append(bet)
             continue
 
+        # Closing decimal odds for the bet side
+        closing_odds = None
+        bet_side = bet.get('bet_side', '').upper()
+        if bd and len(bd) >= 3:
+            closing_odds = bd[2] if bet_side == 'UNDER' else bd[1]  # bd=(line,over,under,book)
+
         try:
             al = float(bet.get('book_line', closing_line))
-            # CLV for totals: positive means the line moved in our favour
-            clv = (al - closing_line) if bet.get('bet_side') == 'UNDER' \
-                  else (closing_line - al)
+            # CLV for totals (run-line diff): positive = line moved in our favour
+            clv = (al - closing_line) if bet_side == 'UNDER' else (closing_line - al)
         except Exception:
             clv = None
 
+        # CLV% = implied_prob_at_alert - implied_prob_at_close (positive = beat closing)
+        clv_pct = None
+        try:
+            alert_dec = float(bet.get('alert_odds') or 0)
+            close_dec = float(closing_odds or 0)
+            if alert_dec > 1.0 and close_dec > 1.0:
+                p_alert = 1.0 / alert_dec
+                p_close = 1.0 / close_dec
+                clv_pct = round((p_alert - p_close) * 100, 2)
+        except Exception:
+            clv_pct = None
+
         clv_rows.append({
-            'alert_time':   bet.get('alert_time', ''),
-            'clv_time':     datetime.now(CDT).strftime('%Y-%m-%d %H:%M CDT'),
-            'match':        bet.get('match', ''),
-            'sport':        bet.get('sport', ''),
-            'market_type':  bet.get('market_type', 'totals'),
-            'bet_side':     bet.get('bet_side', ''),
-            'book_line':    bet.get('book_line', ''),
-            'alert_odds':   bet.get('alert_odds', ''),
-            'closing_line': closing_line,
-            'clv':          round(clv, 2) if clv is not None else '',
+            'alert_time':    bet.get('alert_time', ''),
+            'clv_time':      datetime.now(CDT).strftime('%Y-%m-%d %H:%M CDT'),
+            'match':         bet.get('match', ''),
+            'sport':         bet.get('sport', ''),
+            'market_type':   bet.get('market_type', 'totals'),
+            'bet_side':      bet.get('bet_side', ''),
+            'book_line':     bet.get('book_line', ''),
+            'alert_odds':    bet.get('alert_odds', ''),
+            'closing_line':  closing_line,
+            'closing_odds':  closing_odds if closing_odds else '',
+            'clv':           round(clv, 2) if clv is not None else '',
+            'clv_pct':       clv_pct if clv_pct is not None else '',
         })
 
     if clv_rows:
         clv_fields = ['alert_time', 'clv_time', 'match', 'sport', 'market_type',
-                      'bet_side', 'book_line', 'alert_odds', 'closing_line', 'clv']
+                      'bet_side', 'book_line', 'alert_odds', 'closing_line',
+                      'closing_odds', 'clv', 'clv_pct']
         exists = os.path.exists(CLV_LOG_FILE)
         with open(CLV_LOG_FILE, 'a', newline='') as f:
             w = csv.DictWriter(f, fieldnames=clv_fields, extrasaction='ignore')
