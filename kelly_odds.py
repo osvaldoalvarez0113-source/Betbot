@@ -323,6 +323,43 @@ MLB_PARK_CITIES = {
     "Washington Nationals":   ("Washington DC",  38.8730,  -77.0074),
 }
 
+# ── MLB BALLPARK CENTER-FIELD BEARING ─────────────────────────────────────────
+# Compass bearing (degrees) from home plate pointing toward center field.
+# None = retractable roof or dome → no wind adjustment applies.
+# Used to compute park-specific OUT/IN/CROSS wind label.
+MLB_PARK_CF_BEARING = {
+    "Arizona Diamondbacks":   None,   # Chase Field — retractable roof
+    "Atlanta Braves":          40,    # Truist Park — CF toward NE
+    "Baltimore Orioles":       60,    # Camden Yards — CF toward ENE
+    "Boston Red Sox":          55,    # Fenway Park — CF toward NE
+    "Chicago Cubs":            75,    # Wrigley Field — CF toward ENE
+    "Chicago White Sox":      355,    # Guaranteed Rate Field — CF toward N
+    "Cincinnati Reds":         15,    # Great American Ball Park — CF toward NNE
+    "Cleveland Guardians":    310,    # Progressive Field — CF toward NW
+    "Colorado Rockies":         5,    # Coors Field — CF toward N
+    "Detroit Tigers":          40,    # Comerica Park — CF toward NE
+    "Houston Astros":         None,   # Minute Maid Park — retractable roof
+    "Kansas City Royals":      10,    # Kauffman Stadium — CF toward NNE
+    "Los Angeles Angels":     325,    # Angel Stadium — CF toward NW
+    "Los Angeles Dodgers":    340,    # Dodger Stadium — CF toward NNW
+    "Miami Marlins":          None,   # loanDepot park — retractable roof
+    "Milwaukee Brewers":      None,   # American Family Field — retractable roof
+    "Minnesota Twins":        295,    # Target Field — CF toward NW
+    "New York Mets":           25,    # Citi Field — CF toward NNE
+    "New York Yankees":         5,    # Yankee Stadium — CF toward N
+    "Oakland Athletics":      355,    # RingCentral Coliseum — CF toward N
+    "Philadelphia Phillies":   20,    # Citizens Bank Park — CF toward NNE
+    "Pittsburgh Pirates":      30,    # PNC Park — CF toward NE
+    "San Diego Padres":         0,    # Petco Park — CF toward N
+    "San Francisco Giants":    50,    # Oracle Park — CF toward NE
+    "Seattle Mariners":       None,   # T-Mobile Park — retractable roof
+    "St. Louis Cardinals":     15,    # Busch Stadium — CF toward NNE
+    "Tampa Bay Rays":         None,   # Tropicana Field — dome
+    "Texas Rangers":          None,   # Globe Life Field — retractable roof
+    "Toronto Blue Jays":      None,   # Rogers Centre — retractable roof
+    "Washington Nationals":    20,    # Nationals Park — CF toward NNE
+}
+
 # ── RUNTIME STATE ─────────────────────────────────────────────────────────────
 alerted_bets:          set  = set()
 alerted_game_analysis: set  = set()
@@ -3708,11 +3745,45 @@ def fetch_wc_team_form(team_name):
 
 # ── IMPROVEMENT 5: MLB WEATHER / WIND ─────────────────────────────────────────
 
-def fetch_wind(lat, lon):
+def _wind_label_for_park(wind_deg: float, cf_bearing) -> str:
+    """
+    Compute OUT/IN/CROSS relative to a specific ballpark's orientation.
+
+    cf_bearing: compass bearing from home plate to center field (0-360°).
+                None → fall back to generic cardinal labelling.
+    wind_deg:   meteorological wind direction (degrees FROM which wind blows).
+    """
+    if cf_bearing is None:
+        # Generic fallback — same logic as original code
+        if 225 <= wind_deg <= 315:
+            return 'OUT'
+        elif 45 <= wind_deg <= 135:
+            return 'IN'
+        return 'CROSS'
+    # Wind travels TOWARD: (wind_deg + 180) % 360
+    wind_toward = (wind_deg + 180) % 360
+    # Angle relative to CF bearing (0° = perfect tailwind = OUT)
+    rel = (wind_toward - cf_bearing + 360) % 360
+    if rel <= 45 or rel >= 315:
+        return 'OUT'
+    elif 135 <= rel <= 225:
+        return 'IN'
+    return 'CROSS'
+
+
+def fetch_wind(lat, lon, cf_bearing=None):
     """
     Current wind from OpenWeatherMap (imperial units).
     Cached 30 min per location. Returns dict or None.
+
+    cf_bearing: compass bearing from home plate to center field (degrees).
+                When provided, OUT/IN/CROSS is computed relative to the
+                specific ballpark rather than generic cardinal direction.
+                None = retractable/dome stadium → returns None immediately.
     """
+    if cf_bearing is not None and not isinstance(cf_bearing, (int, float)):
+        # None sentinel for roofed stadiums — no wind applies
+        return None
     if not OPENWEATHER_KEY:
         return None
     city_key = f"{lat},{lon}"
@@ -3720,6 +3791,10 @@ def fetch_wind(lat, lon):
     if cached:
         age_min = (datetime.now(pytz.utc) - cached['fetched_at']).total_seconds() / 60
         if age_min < 30:
+            # Re-label with park-specific bearing if caller provides one
+            if cf_bearing is not None:
+                cached = dict(cached)
+                cached['label'] = _wind_label_for_park(cached.get('deg', 0), cf_bearing)
             return cached
     try:
         r = requests.get(
@@ -3734,12 +3809,7 @@ def fetch_wind(lat, lon):
         speed = round(float(w.get('speed', 0)), 1)
         deg   = float(w.get('deg', 0))
         temp_f = jd.get('main', {}).get('temp', None)   # °F (imperial units)
-        if 225 <= deg <= 315:
-            label = 'OUT'
-        elif 45 <= deg <= 135:
-            label = 'IN'
-        else:
-            label = 'CROSS'
+        label = _wind_label_for_park(deg, cf_bearing)
         result = {'speed': speed, 'deg': deg, 'label': label,
                   'temp_f': temp_f, 'fetched_at': datetime.now(pytz.utc)}
         _weather_cache[city_key] = result
@@ -3748,7 +3818,15 @@ def fetch_wind(lat, lon):
         return None
 
 _hourly_weather_cache: dict = {}
-def fetch_wind_forecast(lat: float, lon: float, game_hour_utc: int) -> "dict | None":
+def fetch_wind_forecast(lat: float, lon: float, game_hour_utc: int,
+                        cf_bearing=None) -> "dict | None":
+    """
+    Forecast wind at game time from OpenWeatherMap.
+    cf_bearing: compass bearing from home plate to CF — enables park-specific
+                OUT/IN labelling. None = roofed stadium, returns None.
+    """
+    if cf_bearing is not None and not isinstance(cf_bearing, (int, float)):
+        return None   # roofed/dome stadium sentinel
     if not OPENWEATHER_KEY:
         return None
     city_key = f"forecast_{lat:.2f},{lon:.2f}_{game_hour_utc}"
@@ -3756,13 +3834,16 @@ def fetch_wind_forecast(lat: float, lon: float, game_hour_utc: int) -> "dict | N
     if cached:
         age_min = (datetime.now(pytz.utc) - cached['fetched_at']).total_seconds() / 60
         if age_min < 60:
+            if cf_bearing is not None:
+                cached = dict(cached)
+                cached['label'] = _wind_label_for_park(cached.get('deg', 0), cf_bearing)
             return cached
     try:
         r = requests.get('https://api.openweathermap.org/data/2.5/forecast',
                          params={'lat': lat, 'lon': lon, 'appid': OPENWEATHER_KEY,
                                  'units': 'imperial', 'cnt': 16}, timeout=8)
         if r.status_code != 200:
-            return fetch_wind(lat, lon)
+            return fetch_wind(lat, lon, cf_bearing=cf_bearing)
         forecasts = r.json().get('list', [])
         best = None; best_diff = 999
         for fc in forecasts:
@@ -3771,20 +3852,18 @@ def fetch_wind_forecast(lat: float, lon: float, game_hour_utc: int) -> "dict | N
             if diff < best_diff:
                 best_diff = diff; best = fc
         if not best:
-            return fetch_wind(lat, lon)
+            return fetch_wind(lat, lon, cf_bearing=cf_bearing)
         w = best.get('wind', {})
         speed = round(float(w.get('speed', 0)), 1)
         deg = float(w.get('deg', 0))
         temp_f = best.get('main', {}).get('temp', None)
-        if 225 <= deg <= 315: label = 'OUT'
-        elif 45 <= deg <= 135: label = 'IN'
-        else: label = 'CROSS'
+        label = _wind_label_for_park(deg, cf_bearing)
         result = {'speed': speed, 'deg': deg, 'label': label,
                   'temp_f': temp_f, 'fetched_at': datetime.now(pytz.utc), 'source': 'forecast'}
         _hourly_weather_cache[city_key] = result
         return result
     except Exception:
-        return fetch_wind(lat, lon)
+        return fetch_wind(lat, lon, cf_bearing=cf_bearing)
 
 def wind_run_adj(wind):
     """
@@ -3831,6 +3910,40 @@ def get_book_total(game):
                     bk["title"],
                 )
     return None
+
+def get_book_team_totals(game: dict) -> dict:
+    """
+    Extract team total lines from the alternate_team_totals / team_totals market
+    in Bovada or Bodog bookmakers.
+
+    Returns:
+        {team_name: {'over_line': float, 'over_odds': float, 'under_line': float, 'under_odds': float}}
+        Empty dict if the market is not present.
+    """
+    result: dict = {}
+    for bk in game.get("bookmakers", []):
+        if bk["title"].lower() not in ("bovada", "bodog"):
+            continue
+        for m in bk.get("markets", []):
+            if m["key"] not in ("alternate_team_totals", "team_totals"):
+                continue
+            for o in m.get("outcomes", []):
+                team = o.get("name", "")
+                desc = (o.get("description", "") or "").upper()
+                line = o.get("point")
+                odds = o.get("price")
+                if not team or line is None or odds is None:
+                    continue
+                if team not in result:
+                    result[team] = {}
+                if "OVER" in desc:
+                    result[team]["over_line"] = float(line)
+                    result[team]["over_odds"] = float(odds)
+                elif "UNDER" in desc:
+                    result[team]["under_line"] = float(line)
+                    result[team]["under_odds"] = float(odds)
+    return result
+
 
 def get_alternate_totals(game: dict, standard_line: float) -> list:
     alt_lines = []
@@ -4224,7 +4337,8 @@ def analyze_totals(games, sport_key):
 
             # Improvement 5: wind adjustment
             park_city      = MLB_PARK_CITIES.get(home)
-            wind           = fetch_wind(park_city[1], park_city[2]) if park_city else None
+            _cf_bearing    = MLB_PARK_CF_BEARING.get(home)
+            wind           = fetch_wind(park_city[1], park_city[2], cf_bearing=_cf_bearing) if park_city else None
             w_adj, w_label = wind_run_adj(wind)
 
             our_line  = round(base_line + pitch_adj + w_adj, 1)
@@ -4497,6 +4611,165 @@ def analyze_totals(games, sport_key):
         })
 
     return total_bets
+
+def analyze_team_totals(games, sport_key):
+    """
+    Scan team-total (alternate_team_totals) lines for MLB games.
+
+    For each team in each game:
+      - Project runs using the same RS/RA Pythagorean model as analyze_totals
+      - Compare vs Bovada alternate_team_totals book line
+      - Edge threshold: 0.5 runs (half the combined-total threshold)
+      - Panel expertos required when edge ≥ 1.0 runs (same logic as main totals)
+    Picks go into the same total_bets list format so they share notify_totals.
+    """
+    if "mlb" not in sport_key:
+        return []
+
+    team_total_bets = []
+    LEAGUE_AVG  = 4.5
+    TT_THRESHOLD = 0.5   # edge threshold in individual runs
+
+    pitchers = fetch_probable_pitchers_today()
+
+    for g in games:
+        game_id    = g.get("id", "")
+        home, away = g["home_team"], g["away_team"]
+        commence   = g.get("commence_time", "")
+
+        if game_starts_soon(commence, 60):
+            continue
+        tc = _timing_check(commence, True)
+        if tc["skip"]:
+            continue
+
+        # Need team run stats for projections
+        h_rs = fetch_team_run_stats(home)
+        a_rs = fetch_team_run_stats(away)
+        if h_rs is None or a_rs is None:
+            continue
+
+        park   = MLB_PARK_FACTORS.get(home, 1.0)
+        home_exp = h_rs["rs_pg"] * (a_rs["ra_pg"] / LEAGUE_AVG) * park
+        away_exp = a_rs["rs_pg"] * (h_rs["ra_pg"] / LEAGUE_AVG) * park
+
+        # Pitcher adjustment (split proportionally: half each)
+        p_data    = _lookup_pitcher_data(home, away, pitchers)
+        h_era     = p_data.get("home_era", 4.50)
+        a_era     = p_data.get("away_era", 4.50)
+        h_pname   = p_data.get("home_name", "TBD")
+        a_pname   = p_data.get("away_name", "TBD")
+        pitch_adj = pitcher_run_adjustment(h_era, a_era)
+        home_exp  = round(home_exp + pitch_adj * 0.5, 2)
+        away_exp  = round(away_exp + pitch_adj * 0.5, 2)
+
+        # Wind adjustment (split equally)
+        park_city   = MLB_PARK_CITIES.get(home)
+        _cf_bearing = MLB_PARK_CF_BEARING.get(home)
+        wind        = fetch_wind(park_city[1], park_city[2], cf_bearing=_cf_bearing) if park_city else None
+        w_adj, _    = wind_run_adj(wind)
+        home_exp    = round(home_exp + w_adj * 0.5, 2)
+        away_exp    = round(away_exp + w_adj * 0.5, 2)
+
+        # Look for book team total lines from Bovada
+        team_lines = get_book_team_totals(g)
+        if not team_lines:
+            continue
+
+        for team_name, proj in [(home, home_exp), (away, away_exp)]:
+            lines = team_lines.get(team_name, {})
+            book_line = lines.get("over_line") or lines.get("under_line")
+            if book_line is None:
+                continue
+            over_odds  = lines.get("over_odds", 1.91)
+            under_odds = lines.get("under_odds", 1.91)
+
+            diff     = proj - book_line
+            if abs(diff) < TT_THRESHOLD:
+                continue
+
+            bet_over  = diff > 0
+            bet_side  = "OVER" if bet_over else "UNDER"
+            bet_odds  = over_odds if bet_over else under_odds
+            edge_val  = round(abs(diff), 2)
+
+            true_prob = poisson_ou_prob(proj, book_line, bet_over)
+            r = kelly_stake(true_prob, bet_odds)
+            if not r["has_value"] or r["stake"] <= 0:
+                continue
+
+            conf = "HIGH" if edge_val >= TT_THRESHOLD * 2 else "MEDIUM"
+
+            # Panel when edge ≥ 1.0 runs
+            _tc_data = {
+                "match":       f"{home} vs {away}",
+                "sport":       sport_key,
+                "bet_side":    f"Team Total {bet_side} — {team_name}",
+                "book_line":   book_line,
+                "our_line":    proj,
+                "edge":        edge_val,
+                "odds":        bet_odds,
+                "confidence":  conf,
+                "pitcher_home": f"{h_pname} (ERA {h_era:.2f})",
+                "pitcher_away": f"{a_pname} (ERA {a_era:.2f})",
+            }
+            _tc_claude = None
+            if edge_val >= 1.0:
+                _tc_data.update(_enrich_panel_data(_tc_data, g))
+                _tc_claude = panel_expertos(_tc_data, "MLB")
+                if _tc_claude and (
+                        not _tc_claude.get("apostar", True)
+                        or _tc_claude.get("confianza") == "BAJA"):
+                    print(f"   ❌ TEAM TOTAL rechazado — panel veta "
+                          f"{team_name} {bet_side} {book_line}")
+                    continue
+            else:
+                print(f"   ℹ️  Team Total panel omitido — edge {edge_val:.2f} runs")
+
+            print(f"   ✅ TEAM TOTAL: {team_name} {bet_side} {book_line} "
+                  f"(proj={proj:.1f}) edge={edge_val:.2f}")
+
+            _ev_pct = round((true_prob * bet_odds - 1) * 100, 1)
+            _ev_d   = round(r["stake"] * _ev_pct / 100, 2)
+            team_total_bets.append({
+                "match":        f"{home} vs {away}",
+                "team":         f"{team_name} {bet_side}",
+                "side":         str(book_line),
+                "odds":         bet_odds,
+                "edge":         edge_val,
+                "ev_pct":       _ev_pct,
+                "stake":        r["stake"],
+                "kelly_pct":    r["kelly_pct"],
+                "confidence":   conf,
+                "time":         commence[:16],
+                "game_id":      game_id,
+                "bookmaker":    "Bovada",
+                "market_type":  "team_totals",
+                "line_moved":   False,
+                "line_dir":     "",
+                "line_delta":   0.0,
+                "closing_edge": "",
+                "ev":           _ev_d,
+                "roi":          round(_ev_d / BANKROLL * 100, 3),
+                "value_pct":    0,
+                "elo_prob":     0,
+                "bovada_odds":  None,
+                "book_line":    book_line,
+                "our_line":     proj,
+                "edge_unit":    "runs",
+                "sport":        sport_key.split("_", 1)[-1].upper(),
+                "claude_intel": _tc_claude,
+                "data_verified": True,
+                "pitcher_home": f"{h_pname} (ERA {h_era:.2f})",
+                "pitcher_away": f"{a_pname} (ERA {a_era:.2f})",
+                "wind_info":    "",
+                "form_home":    "",
+                "form_away":    "",
+                "pitch_adj":    round(pitch_adj * 0.5, 2),
+            })
+
+    return team_total_bets
+
 
 def notify_totals(total_bets, alerted=None):
     global alerted_bets
@@ -5068,7 +5341,9 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             _game_hour_utc = datetime.fromisoformat(commence.replace("Z", "+00:00")).hour
         except Exception:
             pass
-        wind           = fetch_wind_forecast(park_city[1], park_city[2], _game_hour_utc) if park_city else None
+        _cf_bearing_ag = MLB_PARK_CF_BEARING.get(home)
+        wind           = fetch_wind_forecast(park_city[1], park_city[2], _game_hour_utc,
+                                             cf_bearing=_cf_bearing_ag) if park_city else None
         w_adj, w_label = wind_run_adj(wind)
         if wind is not None:
             w_label = f"{w_label} [forecast]"
@@ -8817,7 +9092,7 @@ def get_odds(sport_key):
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
             params={"apiKey": API_KEY, "regions": "us,us2,eu,uk,au",
-                    "markets": "h2h,totals", "oddsFormat": "decimal"},
+                    "markets": "h2h,totals,alternate_team_totals", "oddsFormat": "decimal"},
             timeout=10,
         )
         if r.status_code == 429:
@@ -11019,18 +11294,33 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     _EXPERTOS = [
         (
             "El Estadístico",
-            "Eres Marco, El Estadístico. Hablas de números pero en lenguaje simple.\n\n"
+            "Eres Marco, El Estadístico. Tu análisis se basa EXCLUSIVAMENTE en métricas "
+            "Statcast predictivas. Nada de narrativa ni opinión cualitativa.\n\n"
+            "MÉTRICAS PERMITIDAS (las únicas que puedes usar):\n"
+            "• xERA — ERA esperada por calidad de contacto (supera a ERA real en predicción)\n"
+            "• Barrel% — contacto élite (ángulo 8-32° + velocidad ≥98 mph)\n"
+            "• Hard-Hit% — % de bateos a ≥95 mph (potencia ofensiva real)\n"
+            "• Whiff% — % de swings fallados (dominancia del pitcher)\n\n"
+            "PROTOCOLO SIN DATOS:\n"
+            "Si no tienes datos concretos de al menos 2 de estas 4 métricas para el partido, "
+            "debes escribir exactamente: 'Sin data Statcast suficiente para este partido.' "
+            "y votar apostar=false. Nunca rellenes con opinión cualitativa.\n\n"
+            "PROHIBICIONES ABSOLUTAS:\n"
+            "• NUNCA mencionar ERA cruda, K/9, FIP, WHIP — son métricas lagging, no predictivas\n"
+            "• NUNCA opinar sobre: rachas, momentum, motivación, narrativa del equipo, "
+            "'el equipo viene de...', 'el pitcher está caliente' u otras frases de tendencia\n"
+            "• NUNCA mencionar: EV%, probabilidad implícita, Kelly, divergencia Pinnacle\n\n"
             "CÓMO ESCRIBIR:\n"
             "• 2 oraciones máximo\n"
-            "• Oración 1: el número más importante del partido (ERA diff, K/9, FIP)\n"
-            "• Oración 2: lo que ese número significa para apostar\n"
-            "• Ejemplo correcto: 'Wrobleski tiene ERA 2.62 vs Keller 4.81 — "
-            "diferencia de 2 puntos favorece claramente a los Dodgers. "
-            "A -101 en el RL vale la pena.'\n"
-            "• PROHIBIDO mencionar: EV%, probabilidad implícita, Kelly, divergencia\n\n"
+            "• Oración 1: métrica Statcast más relevante con diferencia concreta entre pitchers\n"
+            "• Oración 2: lo que ese número significa para el pick de HOY\n"
+            "• Ejemplo: 'Glasnow xERA 2.81 vs Keller xERA 4.62, Whiff% 31% vs 18% — "
+            "diferencia real de dominancia de pitcheo. Favorece Under si el lineup contrario "
+            "tiene Barrel% bajo.'\n\n"
             "VOTO:\n"
-            "Si los números respaldan el pick → SÍ con confianza ALTA o MEDIA\n"
-            "Si los números no cuadran → NO con razón específica en 1 línea",
+            "Datos Statcast respaldan el pick → apostar=true, confianza ALTA o MEDIA\n"
+            "Datos Statcast contradicen el pick → apostar=false con razón en 1 línea\n"
+            "Sin data suficiente → apostar=false, confianza BAJA",
         ),
         (
             "El Sharp",
@@ -11050,19 +11340,34 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
         (
             "El Abogado del Diablo",
             "Eres Elena. Tu único trabajo es nombrar UN riesgo operacional concreto de hoy, "
-            "o declarar que no existe ninguno. Nada de estadísticas, nada de mercado.\n\n"
+            "o declarar que no existe ninguno. Nada de estadísticas de pitcher, nada de mercado.\n\n"
+            "MODO CAZA DE FACTORES OCULTOS (crítico):\n"
+            "Cuando Marco y Víctor coincidan en ir con el favorito, tu rol se intensifica: "
+            "DEBES buscar activamente factores negativos ocultos antes de dar tu voto. "
+            "Los analistas comunes ignoran estos — tú no:\n"
+            "  → ¿Es el 3er juego consecutivo de una serie con viaje nocturno entre ciudades?\n"
+            "    (fatiga acumulada invisible en los números actuales)\n"
+            "  → ¿El bullpen del equipo favorito lanzó >4 innings en CADA uno de los 2 días previos?\n"
+            "    (brazos agotados que no aparecen en las estadísticas de ERA)\n"
+            "  → ¿El lineup del favorito tiene bateadores clave descansando hoy? "
+            "(platoon, day off programado, jugador que entró tarde en el juego anterior)\n"
+            "Si encuentras evidencia sólida de UNO de estos factores: "
+            "tu veto (apostar=false) o duda (confianza=BAJA) debe mantenerse con firmeza. "
+            "La presión del consenso de los otros dos NO cambia tu voto si tienes datos reales.\n\n"
             "REGLAS DE SALIDA (obligatorias):\n"
             "• Tu razonamiento debe ser EXACTAMENTE 2 oraciones.\n"
             "• Oración 1: el único riesgo real que encontraste (o 'Sin red flags confirmadas hoy.').\n"
             "• Oración 2: tu voto directo.\n"
             "• PROHIBIDO mencionar EV, ERA, Pinnacle, odds — eso es territorio de Marco y Víctor.\n"
-            "• Si no hay red flag real: voto Sí obligatorio. No inventes riesgos.\n\n"
+            "• Si no hay red flag real NI factor oculto: voto Sí obligatorio. No inventes.\n\n"
             "CHECKLIST (evalúa en orden, para en el primero que active):\n"
             "a) LESIÓN confirmada del pitcher titular o bateador clave HOY → red flag real.\n"
             "b) CLIMA: viento > 20 mph hacia afuera O temperatura < 40°F → red flag real.\n"
             "c) BULLPEN: > 15 innings lanzados en últimos 3 días → red flag real.\n"
             "d) FATIGA: pitcher lanzó > 100 pitches hace < 4 días → red flag real.\n"
-            "e) H2H con pitchers IDÉNTICOS a hoy que contradiga el pick → red flag real.\n"
+            "e) 3er juego de serie + viaje nocturno intercity la noche anterior → red flag real.\n"
+            "f) Bullpen favorito agotado (>4 inn/día × 2 días consecutivos) → red flag real.\n"
+            "g) H2H con pitchers IDÉNTICOS a hoy que contradiga el pick → red flag real.\n"
             "ERA alta del rival NO es red flag — es ventaja para el pick.",
         ),
     ]
@@ -14650,6 +14955,14 @@ def run_scan():
 
             bets, sharp_moves, steam_moves = analyze(games, prev_map, new_map, sport_key)
             total_bets = analyze_totals(games, sport_key)
+            # Team totals — MLB only; reuses the same games list and notify_totals path
+            try:
+                _tt_bets = analyze_team_totals(games, sport_key)
+                if _tt_bets:
+                    print(f"  ⚾ Team Totals: {len(_tt_bets)} pick(s) encontrado(s)")
+                    total_bets = total_bets + _tt_bets
+            except Exception as _tte:
+                print(f"  ⚠️  analyze_team_totals error: {_tte}")
             if not any(os.environ.get(k) for k in ["BETONLINE_KEY", "SECOND_BOOK"]):
                 arbs = []
             else:
