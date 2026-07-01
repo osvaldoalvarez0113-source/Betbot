@@ -5299,7 +5299,16 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                     _team_id(home), _team_id(away), h_pid, a_pid, game_date
                 )
             except Exception as _ece:
-                print(f"  ⚠️  enhanced_ctx error: {_ece}")
+                import datetime as _dt_enh
+                _ts_enh = _dt_enh.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                _game_name_enh = f"{home} vs {away}"
+                _err_type = type(_ece).__name__
+                print(
+                    f"[SKIP] {_game_name_enh} — _enh_ctx falló: "
+                    f"{_err_type}: {_ece}. Juego excluido del análisis. [{_ts_enh}]"
+                )
+                return {"skipped": True, "match": _game_name_enh,
+                        "skip_reason": f"{_err_type}: {_ece}"}
 
             print(f"[DEBUG ENH] home_last3_era={_enh_ctx.get('home_pitcher_last3_era_avg')} away_last3_era={_enh_ctx.get('away_pitcher_last3_era_avg')}")
 
@@ -14630,13 +14639,26 @@ def run_scan():
 
             # Full game analysis (Module 7)
             full_analyses = []
+            _enh_ctx_skipped: list = []
             for g in games:
                 try:
                     result = analyze_game_full(g, sport_key, prev_map)
-                    if result:
+                    if result and result.get("skipped"):
+                        _enh_ctx_skipped.append(result)
+                    elif result:
                         full_analyses.append(result)
                 except Exception as _fe:
                     pass
+
+            if _enh_ctx_skipped:
+                print(
+                    f"\n⛔ [{short}] RESUMEN DE SKIPS — "
+                    f"{len(_enh_ctx_skipped)} juego(s) excluido(s) por fallo de _enh_ctx:"
+                )
+                for _sk in _enh_ctx_skipped:
+                    print(f"   • {_sk['match']}: {_sk['skip_reason']}")
+            elif games and "mlb" in sport_key:
+                print(f"   ✅ [{short}] _enh_ctx OK — todos los {len(games)} juego(s) procesados")
 
             # ── Module P: PREMIUM signal injection ─────────────────────────
             if not _bankroll_paused:
