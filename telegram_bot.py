@@ -415,23 +415,71 @@ def _cmd_reporte(chat_id: str):
 
 
 def _cmd_clv(chat_id: str):
+    import csv as _csv, os as _os
+    CLV_CSV = "clv_log.csv"
+
+    if not _os.path.exists(CLV_CSV):
+        _send(chat_id, "📈 Sin datos de CLV todavía.\nLos picks registrados se trackean automáticamente.")
+        return
+
     try:
-        from paquete_avanzado import clv_tracker
-        txt = clv_tracker.reporte_clv()
-    except Exception:
-        clv_data = _load_json(CLV_FILE, {"picks": []})
-        con_clv  = [p for p in clv_data.get("picks", []) if p.get("clv_pct") is not None]
-        if not con_clv:
-            txt = "Sin datos de CLV todavía. Necesitas al menos 20 picks resueltos."
-        else:
-            prom = sum(p["clv_pct"] for p in con_clv) / len(con_clv)
-            txt  = (
-                f"📈 REPORTE CLV\n"
-                f"{'─'*28}\n"
-                f"Picks medidos: {len(con_clv)}\n"
-                f"CLV promedio: {prom:+.2f}%"
-            )
-    _send(chat_id, f"<pre>{txt}</pre>")
+        with_clv   = []   # rows where clv_pct is a valid number
+        sin_dato   = 0    # rows missing closing odds
+
+        with open(CLV_CSV, newline="", encoding="utf-8") as _f:
+            for row in _csv.DictReader(_f):
+                raw = row.get("clv_pct", "")
+                if raw == "" or raw is None:
+                    sin_dato += 1
+                else:
+                    try:
+                        with_clv.append({
+                            "match":   row.get("match", "?"),
+                            "market":  row.get("market_type", ""),
+                            "side":    row.get("bet_side", ""),
+                            "clv_pct": float(raw),
+                        })
+                    except Exception:
+                        sin_dato += 1
+
+        if not with_clv:
+            _send(chat_id,
+                  f"📈 CLV: sin datos calculados todavía.\n"
+                  f"Picks sin línea de cierre: {sin_dato}")
+            return
+
+        prom      = sum(p["clv_pct"] for p in with_clv) / len(with_clv)
+        positivos = sum(1 for p in with_clv if p["clv_pct"] > 0)
+        negativos = sum(1 for p in with_clv if p["clv_pct"] <= 0)
+        beat_rate = positivos / len(with_clv) * 100
+
+        # Best and worst picks
+        best  = max(with_clv, key=lambda x: x["clv_pct"])
+        worst = min(with_clv, key=lambda x: x["clv_pct"])
+
+        verdict = "💎 Modelo con edge real" if prom > 0 else "⚠️ Apostando en mal momento — revisar timing"
+
+        txt = (
+            f"📈 <b>REPORTE CLOSING LINE VALUE (CLV)</b>\n"
+            f"{'─'*32}\n"
+            f"Picks medidos:       {len(with_clv)}\n"
+            f"Sin dato (excluidos):{sin_dato}\n"
+            f"{'─'*32}\n"
+            f"CLV promedio:        {prom:+.2f}%  {'✅' if prom > 0 else '❌'}\n"
+            f"Beat rate cierre:    {beat_rate:.0f}%  "
+            f"({positivos} ganaron / {negativos} no)\n"
+            f"{'─'*32}\n"
+            f"Mejor pick:  {best['match'][:28]}\n"
+            f"             {best['side']} → CLV {best['clv_pct']:+.2f}%\n"
+            f"Peor pick:   {worst['match'][:28]}\n"
+            f"             {worst['side']} → CLV {worst['clv_pct']:+.2f}%\n"
+            f"{'─'*32}\n"
+            f"→ {verdict}"
+        )
+    except Exception as e:
+        txt = f"⚠️ Error leyendo CLV: {e}"
+
+    _send(chat_id, txt)
 
 
 def _cmd_estado(chat_id: str):
