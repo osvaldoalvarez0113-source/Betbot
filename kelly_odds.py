@@ -30,7 +30,7 @@ except ImportError:
 API_KEY           = os.environ.get("ODDS_API_KEY",       "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY",  "")
 CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
-CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-haiku-4-5-20251001")
+CLAUDE_PANEL_MODEL = os.environ.get("CLAUDE_PANEL_MODEL", "claude-sonnet-4-5")
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO       = os.environ.get("GITHUB_REPO",  "osvaldoalvarez0113-source/Betbot")
 BANKROLL_DEFAULT = 1000.0
@@ -10708,7 +10708,7 @@ def analyze_with_claude(game_data: dict, sport: str,
         )
 
     try:
-        client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
+        client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=30.0)
         msg    = client.messages.create(
             model=(_model or CLAUDE_MODEL),
             max_tokens=1024,
