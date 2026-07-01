@@ -1,0 +1,53 @@
+Crea un nuevo módulo de contexto situacional que se sume a 
+get_enhanced_game_context() y alimente específicamente el prompt 
+de Elena "El Abogado del Diablo". Implementa estos 4 patrones, 
+todos con base en fatiga real de calendario/logística — NO 
+narrativa ni rachas:
+
+1. DAY GAME AFTER NIGHT GAME / GETAWAY DAY
+   - Compara la hora de inicio del juego de ayer del equipo (si jugó) 
+     contra el juego de hoy.
+   - Si ayer fue juego nocturno (después de las 6PM hora local) y 
+     hoy es juego diurno (antes de las 4PM hora local), marca la 
+     bandera GETAWAY_DAY = True para ese equipo.
+   - Usa el endpoint de schedule de MLB Stats API para confirmar 
+     si además es el último juego de la serie/home stand antes de 
+     viajar (eso refuerza la bandera).
+
+2. VIAJE TRANSCONTINENTAL CON CAMBIO DE HORARIO FUERTE
+   - Crea una tabla estática de zona horaria por estadio de MLB 
+     (dato fijo, similar a la tabla de orientación que ya hicimos 
+     para el viento).
+   - Compara la zona horaria del último juego del equipo contra la 
+     zona horaria del juego de hoy.
+   - Si la diferencia es de 2+ horas Y el juego de hoy es diurno o 
+     temprano relativo a su reloj biológico (ej. equipo de costa 
+     oeste jugando un 1PM ET), marca TIMEZONE_FATIGUE = True.
+
+3. BULLPEN QUEMADO EN ÚLTIMO JUEGO DE SERIE
+   - Usa el endpoint de schedule para identificar si el juego de 
+     hoy es el último de la serie actual.
+   - Si es así, cuenta cuántas veces aparecieron los relevistas 
+     principales (cerrador + setup men) del equipo en los últimos 
+     2-3 días usando MLB Stats API game logs.
+   - Si el cerrador o el setup principal lanzaron en 2 de los 
+     últimos 3 días, marca BULLPEN_FATIGUE = True junto con el 
+     conteo exacto de apariciones.
+
+4. JUEGO 2 DE DOUBLEHEADER
+   - Usa el campo gameNumber del schedule de MLB Stats API.
+   - Si gameNumber = 2 para el día de hoy, marca DOUBLEHEADER_G2 = True.
+
+INTEGRACIÓN:
+Agrega estas 4 banderas (con su detalle, ej. "BULLPEN_FATIGUE: 
+cerrador lanzó ayer y antier") al enhanced_context que ya se pasa 
+al panel de expertos.
+
+En el prompt de Elena específicamente, agrega la instrucción: si 
+alguna de estas 4 banderas está activa para el equipo favorito, 
+Elena debe considerarlo como evidencia concreta de un factor oculto 
+negativo — no como narrativa, sino como dato de fatiga real que 
+puede inflar el riesgo del pick.
+
+Si ninguna bandera está activa, Elena no debe mencionar nada de 
+esto — solo se activa cuando hay data real detrás.
