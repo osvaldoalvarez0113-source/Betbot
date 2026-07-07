@@ -5609,6 +5609,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         # Fetch enhanced context + adjust p_home by pitcher recent form (BEFORE EV loop)
         _enh_ctx: dict = {}
         if is_mlb:
+            game_date = commence[:10]   # fix: define before _fetch_enhanced_game_context call
             try:
                 _enh_ctx = _fetch_enhanced_game_context(
                     _team_id(home), _team_id(away), h_pid, a_pid, game_date,
@@ -11106,12 +11107,9 @@ def _fetch_enhanced_game_context(
             result[f"{label}_last3_era_avg"] = None
             return
         try:
-            url = f"{BASE}/people/{pitcher_id}/stats"
-            params = {"stats": "gameLog", "season": year, "group": "pitching"}
             print(f"[DEBUG API] Fetching stats for pitcher {pitcher_id} ({label})")
-            r = requests.get(url, params=params, timeout=10)
-            print(f"[DEBUG API] Status code: {r.status_code}")
-            raw = r.json()
+            raw = _mlb_rest(f"/people/{pitcher_id}/stats",
+                            {"stats": "gameLog", "season": year, "group": "pitching"})
             if not raw.get("stats") or not raw["stats"][0].get("splits"):
                 print(f"[DEBUG API] No splits found for {label} pitcher {pitcher_id}")
                 result[f"{label}_last3_starts"] = []

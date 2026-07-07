@@ -1,0 +1,106 @@
+INSTRUCCIONES PARA REPLIT AGENT — Fix de 2 bugs críticos en kelly_odds.py
+
+Son dos correcciones quirúrgicas. NO reescribas nada más, NO refactorices,
+solo aplica estos dos cambios exactos.
+
+═══════════════════════════════════════
+BUG 1: game_date usado antes de definirse (UnboundLocalError)
+═══════════════════════════════════════
+
+PROBLEMA:
+En analyze_game_full(), dentro del bloque MLB, se llama:
+
+    _enh_ctx = _fetch_enhanced_game_context(
+        _team_id(home), _team_id(away), h_pid, a_pid, game_date,
+        home_name=home, away_name=away, commence_utc=commence,
+    )
+
+pero game_date se define MÁS ABAJO en la misma función (en el bloque
+del umpire: "game_date = commence[:10]"). Python la trata como local
+no inicializada → UnboundLocalError → el juego se marca como skipped
+con "[SKIP] ... _enh_ctx falló".
+
+FIX:
+En analyze_game_full(), justo ANTES de la llamada a
+_fetch_enhanced_game_context (dentro del bloque "if is_mlb:" donde
+se construye _enh_ctx), agrega esta línea:
+
+    game_date = commence[:10]
+
+Es decir, el bloque debe quedar así:
+
+    _enh_ctx: dict = {}
+    if is_mlb:
+        game_date = commence[:10]   # ← LÍNEA NUEVA (fix UnboundLocalError)
+        try:
+            _enh_ctx = _fetch_enhanced_game_context(
+                _team_id(home), _team_id(away), h_pid, a_pid, game_date,
+                home_name=home, away_name=away, commence_utc=commence,
+            )
+        ...
+
+NO elimines la definición posterior en el bloque del umpire
+(game_date = commence[:10] ahí abajo) — es inofensiva, solo reasigna
+el mismo valor. Menos riesgo dejarla.
+
+═══════════════════════════════════════
+BUG 2: variable BASE inexistente en get_last_3_starts (NameError)
+═══════════════════════════════════════
+
+PROBLEMA:
+Dentro de _fetch_enhanced_game_context(), la función interna
+get_last_3_starts usa:
+
+    url = f"{BASE}/people/{pitcher_id}/stats"
+    params = {"stats": "gameLog", "season": year, "group": "pitching"}
+    r = requests.get(url, params=params, timeout=10)
+    raw = r.json()
+
+BASE no existe en ningún lugar del archivo → NameError en cada llamada
+→ el feature de "últimas 3 salidas del pitcher" NUNCA ha retornado data
+(siempre cae al except y devuelve None).
+
+FIX:
+Reemplaza esas líneas para usar el helper _mlb_rest que ya existe en
+el proyecto (mismo patrón que el resto del código). El bloque debe
+quedar así:
+
+    def get_last_3_starts(pitcher_id, label):
+        if not pitcher_id:
+            result[f"{label}_last3_starts"] = []
+            result[f"{label}_last3_era_avg"] = None
+            return
+        try:
+            print(f"[DEBUG API] Fetching stats for pitcher {pitcher_id} ({label})")
+            raw = _mlb_rest(f"/people/{pitcher_id}/stats",
+                            {"stats": "gameLog", "season": year, "group": "pitching"})
+            if not raw.get("stats") or not raw["stats"][0].get("splits"):
+                print(f"[DEBUG API] No splits found for {label} pitcher {pitcher_id}")
+                result[f"{label}_last3_starts"] = []
+                result[f"{label}_last3_era_avg"] = None
+                return
+            splits = raw["stats"][0]["splits"]
+            ... (el resto de la función queda EXACTAMENTE igual desde aquí)
+
+Es decir: eliminar las 3 líneas de url/params/r = requests.get y la
+línea "print(f"[DEBUG API] Status code...")", y reemplazarlas por la
+única llamada a _mlb_rest. Todo lo demás de la función (el parsing de
+splits, starts, entries, era_avg) NO se toca.
+
+═══════════════════════════════════════
+VERIFICACIÓN POST-FIX
+═══════════════════════════════════════
+
+Después de aplicar ambos fixes, en los logs de Railway del próximo scan
+de MLB deberíamos ver:
+
+1. Ya NO aparece "[SKIP] ... _enh_ctx falló: UnboundLocalError"
+2. Aparece "[DEBUG API] Fetching stats for pitcher..." seguido de
+   "[DEBUG API] Total starts found..." con números reales
+3. Aparece "[DEBUG ENH] home_last3_era=X.XX away_last3_era=X.XX" con
+   valores numéricos en vez de None
+4. Aparece "[DEBUG] Prob base: X → Prob ajustada: Y" indicando que el
+   ajuste por forma reciente del pitcher está funcionando por primera vez
+
+Cambios incrementales y quirúrgicos únicamente — no tocar Kelly, ROI,
+panel de expertos, ni ninguna otra función.
