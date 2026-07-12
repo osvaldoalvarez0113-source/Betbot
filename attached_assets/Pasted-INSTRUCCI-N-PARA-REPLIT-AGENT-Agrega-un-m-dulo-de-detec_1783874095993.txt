@@ -1,0 +1,136 @@
+INSTRUCCIÓN PARA REPLIT AGENT:
+
+Agrega un módulo de detección de patrones de getaway day a kelly_odds.py.
+Debe integrarse con el módulo situacional existente que alimenta el análisis
+de Elena, y enviar alertas por Telegram y ntfy (topic: my-bets) cuando detecte
+patrones activos. No modifiques otras funciones. Usa este código:
+
+import requests
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+MLB_API = "https://statsapi.mlb.com/api/v1"
+
+def detectar_patrones_getaway():
+    """
+    Detecta patrones de fatiga/situacionales del slate de hoy:
+    1. Getaway day masivo (todos los juegos de día / último día antes de break)
+    2. Bullpen games (abridor con pocas entradas = opener)
+    3. Bullpens quemados (equipos que jugaron doubleheader o extra innings ayer)
+    Retorna lista de alertas en español pa' Telegram/ntfy.
+    """
+    tz = ZoneInfo("America/Chicago")
+    hoy = datetime.now(tz).strftime("%Y-%m-%d")
+    ayer = (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
+    alertas = []
+
+    # --- Slate de hoy ---
+    try:
+        r = requests.get(f"{MLB_API}/schedule", params={
+            "sportId": 1, "date": hoy,
+            "hydrate": "probablePitcher"
+        }, timeout=10)
+        juegos_hoy = r.json().get("dates", [{}])[0].get("games", [])
+    except Exception as e:
+        return [f"⚠️ Error MLB API: {e}"]
+
+    if not juegos_hoy:
+        return []
+
+    # --- PATRÓN 1: Getaway day masivo ---
+    # Si TODOS los juegos empiezan antes de las 5PM CT = día de viaje
+    horas = []
+    for j in juegos_hoy:
+        h = datetime.fromisoformat(j["gameDate"].replace("Z", "+00:00")).astimezone(tz)
+        horas.append(h.hour)
+    if horas and max(horas) < 17:
+        alertas.append(
+            "🚨 GETAWAY DAY MASIVO: todos los juegos son de día. "
+            "Patrón: lean UNDER general, lineups B posibles, "
+            "abridores con correa corta. Verificar lineups confirmados "
+            "antes de apostar."
+        )
+
+    # --- PATRÓN 2: Bullpen games (openers) ---
+    for j in juegos_hoy:
+        for lado, etiqueta in [("away", "🅰️"), ("home", "🏠")]:
+            p = j["teams"][lado].get("probablePitcher")
+            if not p:
+                continue
+            try:
+                sr = requests.get(f"{MLB_API}/people/{p['id']}", params={
+                    "hydrate": "stats(group=[pitching],type=[season])"
+                }, timeout=10).json()
+                s = sr["people"][0]["stats"][0]["splits"][0]["stat"]
+                ip = float(s.get("inningsPitched", "0").replace(".1", ".33").replace(".2", ".67"))
+                gs = int(s.get("gamesStarted", 0))
+                # Abridor con <35 IP en temporada a estas alturas = opener/spot start
+                if ip < 35:
+                    equipo = j["teams"][lado]["team"]["name"]
+                    rival = j["teams"]["home" if lado == "away" else "away"]["team"]["name"]
+                    alertas.append(
+                        f"🚨 POSIBLE BULLPEN GAME: {equipo} abre con "
+                        f"{p['fullName']} (solo {ip:.0f} IP en la temporada). "
+                        f"Ángulo: ML del rival ({rival}) y over si el "
+                        f"bullpen se estira."
+                    )
+            except Exception:
+                continue
+
+    # --- PATRÓN 3: Bullpens quemados (ayer jugaron doble o extras) ---
+    try:
+        r = requests.get(f"{MLB_API}/schedule", params={
+            "sportId": 1, "date": ayer, "hydrate": "linescore"
+        }, timeout=10)
+        juegos_ayer = r.json().get("dates", [{}])[0].get("games", [])
+    except Exception:
+        juegos_ayer = []
+
+    equipos_cansados = {}
+    for j in juegos_ayer:
+        try:
+            innings = len(j.get("linescore", {}).get("innings", []))
+        except Exception:
+            innings = 9
+        for lado in ["away", "home"]:
+            tid = j["teams"][lado]["team"]["id"]
+            nombre = j["teams"][lado]["team"]["name"]
+            if tid not in equipos_cansados:
+                equipos_cansados[tid] = {"nombre": nombre, "juegos": 0, "innings": 0}
+            equipos_cansados[tid]["juegos"] += 1
+            equipos_cansados[tid]["innings"] += innings
+
+    for tid, info in equipos_cansados.items():
+        if info["juegos"] >= 2 or info["innings"] >= 11:
+            # Verificar si juega hoy
+            for j in juegos_hoy:
+                ids_hoy = [j["teams"]["away"]["team"]["id"],
+                           j["teams"]["home"]["team"]["id"]]
+                if tid in ids_hoy:
+                    razon = (f"{info['juegos']} juegos" if info["juegos"] >= 2
+                             else f"{info['innings']} innings")
+                    alertas.append(
+                        f"🚨 BULLPEN QUEMADO: {info['nombre']} cargó {razon} "
+                        f"ayer. Ángulo: over live si el abridor de hoy sale "
+                        f"antes del 6to inning."
+                    )
+    return alertas
+
+async def cmd_patrones(update, context):
+    """Handler del comando /patrones"""
+    await update.message.reply_text("⏳ Escaneando patrones del slate...")
+    alertas = detectar_patrones_getaway()
+    if not alertas:
+        await update.message.reply_text("✅ Sin patrones situacionales fuertes hoy.")
+        return
+    texto = "\n\n".join(alertas)
+    for i in range(0, len(texto), 4000):
+        await update.message.reply_text(texto[i:i+4000])
+
+INTEGRACIÓN:
+1. Registrar handler: application.add_handler(CommandHandler("patrones", cmd_patrones))
+2. En el scan loop principal, llamar detectar_patrones_getaway() una vez al día
+   a las 9:00 AM CT y enviar las alertas automáticamente por ntfy (topic my-bets)
+   y Telegram (Chat ID 955204527), reusando las funciones de notificación existentes.
+3. Pasar las alertas activas como contexto adicional al prompt de Elena en el
+   panel de expertos, pa' que las incorpore en su análisis de cada juego.

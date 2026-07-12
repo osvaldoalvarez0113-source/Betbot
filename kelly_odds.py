@@ -410,6 +410,8 @@ last_night_summary: date = date(2000, 1, 1)  # 11 PM nightly summary tracker
 last_mlb_card:     date = date(2000, 1, 1)  # 2 PM ET MLB daily card
 last_soccer_card:  date = date(2000, 1, 1)  # 10 AM ET soccer daily card
 last_backtest_report: date = date(2000, 1, 1)  # Sunday 10 AM ET backtest
+last_patrones_scan:   date = date(2000, 1, 1)  # 9 AM CT daily getaway-day scan
+_patrones_activos:    list = []                 # slate-wide pattern alerts for today
 _kelly_monthly_mult: float = 1.0  # Improvement 4: monthly ROI-based Kelly multiplier
 _perf_adj: dict = {}   # ajustes por tipo de mercado basados en resultados reales
 _line_history:    dict = {}       # 1B: game_id → [{time, total, ml_home, ml_away}]
@@ -11475,6 +11477,118 @@ def _build_elena_situational_addendum(game_data: dict) -> str:
     )
 
 
+def detectar_patrones_getaway() -> list:
+    """
+    Detecta patrones de fatiga/situacionales del slate de hoy:
+      1. Getaway day masivo (todos los juegos empiezan antes de las 5 PM CT)
+      2. Bullpen games (opener con <35 IP en temporada = spot start)
+      3. Bullpens quemados (dobleheader o extra innings el día anterior)
+
+    Actualiza el global _patrones_activos y retorna la lista de alertas.
+    """
+    global _patrones_activos
+    hoy  = datetime.now(CDT).strftime("%Y-%m-%d")
+    ayer = (datetime.now(CDT) - timedelta(days=1)).strftime("%Y-%m-%d")
+    alertas: list = []
+
+    # ── Slate de hoy ─────────────────────────────────────────────────────────
+    datos_hoy  = _mlb_rest("/schedule", {"sportId": 1, "date": hoy,
+                                         "hydrate": "probablePitcher,team"})
+    juegos_hoy = datos_hoy.get("dates", [{}])[0].get("games", [])
+    if not juegos_hoy:
+        _patrones_activos = []
+        return []
+
+    # ── PATRÓN 1: Getaway day masivo ─────────────────────────────────────────
+    horas = []
+    for j in juegos_hoy:
+        try:
+            h = datetime.fromisoformat(
+                j["gameDate"].replace("Z", "+00:00")
+            ).astimezone(CDT)
+            horas.append(h.hour)
+        except Exception:
+            pass
+    if horas and max(horas) < 17:
+        alertas.append(
+            "🚨 GETAWAY DAY MASIVO: todos los juegos son de día (antes de las 5 PM CT). "
+            "Patrón: lean UNDER general, lineups B posibles, abridores con correa corta. "
+            "Verificar lineups confirmados antes de apostar."
+        )
+
+    # ── PATRÓN 2: Bullpen games (openers) ────────────────────────────────────
+    for j in juegos_hoy:
+        for lado in ["away", "home"]:
+            p = j["teams"][lado].get("probablePitcher")
+            if not p:
+                continue
+            try:
+                pr = _mlb_rest(f"/people/{p['id']}",
+                               {"hydrate": "stats(group=[pitching],type=[season])"})
+                splits = (pr.get("people", [{}])[0]
+                            .get("stats", [{}])[0]
+                            .get("splits", []))
+                if not splits:
+                    continue
+                s      = splits[0]["stat"]
+                ip_raw = s.get("inningsPitched", "0")
+                ip     = float(
+                    ip_raw.replace(".1", ".33").replace(".2", ".67")
+                )
+                if ip < 35:
+                    equipo = j["teams"][lado]["team"]["name"]
+                    otro   = "home" if lado == "away" else "away"
+                    rival  = j["teams"][otro]["team"]["name"]
+                    alertas.append(
+                        f"🚨 POSIBLE BULLPEN GAME: {equipo} abre con "
+                        f"{p['fullName']} (solo {ip:.0f} IP en temporada). "
+                        f"Ángulo: ML de {rival} y over si el bullpen se estira."
+                    )
+            except Exception:
+                continue
+
+    # ── PATRÓN 3: Bullpens quemados (dobleheader o extras ayer) ──────────────
+    datos_ayer  = _mlb_rest("/schedule", {"sportId": 1, "date": ayer,
+                                          "hydrate": "linescore"})
+    juegos_ayer = datos_ayer.get("dates", [{}])[0].get("games", [])
+    equipos_cansados: dict = {}
+    for j in juegos_ayer:
+        try:
+            innings = len(j.get("linescore", {}).get("innings", []))
+        except Exception:
+            innings = 9
+        for lado in ["away", "home"]:
+            try:
+                tid    = j["teams"][lado]["team"]["id"]
+                nombre = j["teams"][lado]["team"]["name"]
+                if tid not in equipos_cansados:
+                    equipos_cansados[tid] = {"nombre": nombre, "juegos": 0, "innings": 0}
+                equipos_cansados[tid]["juegos"]  += 1
+                equipos_cansados[tid]["innings"] += innings
+            except Exception:
+                pass
+
+    ids_hoy: set = set()
+    for j in juegos_hoy:
+        for lado in ["away", "home"]:
+            try:
+                ids_hoy.add(j["teams"][lado]["team"]["id"])
+            except Exception:
+                pass
+
+    for tid, info in equipos_cansados.items():
+        if (info["juegos"] >= 2 or info["innings"] >= 11) and tid in ids_hoy:
+            razon = (f"{info['juegos']} juegos" if info["juegos"] >= 2
+                     else f"{info['innings']} innings")
+            alertas.append(
+                f"🚨 BULLPEN QUEMADO: {info['nombre']} cargó {razon} ayer. "
+                f"Ángulo: over live si el abridor de hoy sale antes del 6to inning."
+            )
+
+    _patrones_activos = alertas
+    return alertas
+
+
 def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     """
     Panel of 3 expert personas — each calls analyze_with_claude with its own
@@ -11660,6 +11774,18 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
                 _extra_full += _elena_sit
                 _n_flags = len(game_data.get("sit_flags_txt", "").splitlines())
                 print(f"   🚩 Elena: {_n_flags} bandera(s) situacional(es) inyectada(s)")
+            # Inject slate-wide getaway-day / bullpen pattern alerts when active
+            if _patrones_activos:
+                _slate_txt  = "\n".join(f"• {a}" for a in _patrones_activos)
+                _extra_full += (
+                    "\n\n━━━ ALERTAS DE PATRONES DEL SLATE (HOY) ━━━\n"
+                    "El sistema detectó los siguientes patrones activos en el slate de hoy. "
+                    "Úsalos como contexto de mercado general al evaluar este partido:\n\n"
+                    f"{_slate_txt}\n\n"
+                    "Si alguno de estos patrones aplica directamente al equipo favorito "
+                    "de este pick, menciónalo explícitamente en tu análisis."
+                )
+                print(f"   🗓️  Elena: {len(_patrones_activos)} patrón(es) de slate inyectado(s)")
         res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
                                   _model=_panel_model)
         if res is None:
@@ -15479,7 +15605,8 @@ if __name__ == "__main__":
         from telegram_bot import iniciar_telegram as _iniciar_tg
         _iniciar_tg(analyze_fn=analyze_game_full, get_odds_fn=get_odds,
                     build_text_fn=build_analizar_text,
-                    get_hoy_fn=get_today_hoy_summary)
+                    get_hoy_fn=get_today_hoy_summary,
+                    get_patrones_fn=detectar_patrones_getaway)
     except Exception as _tge:
         print(f"  ⚠️  Telegram bot startup skipped: {_tge}")
 
@@ -15504,6 +15631,25 @@ if __name__ == "__main__":
                     morning_report()
                 except Exception as e:
                     print(f"  ⚠️  Morning report error: {e}")
+
+            # Getaway-day / bullpen pattern scan at 9 AM CT (= 10 AM ET) — once per day
+            if now_et.hour == 10 and now_et.minute < 10 and last_patrones_scan < now_et.date():
+                try:
+                    _alerts = detectar_patrones_getaway()
+                    last_patrones_scan = now_et.date()
+                    if _alerts:
+                        _body = "\n\n".join(_alerts)
+                        ntfy_post("🚨 PATRONES SITUACIONALES", _body, "high")
+                        if _tg_broadcast_fn:
+                            _tg_broadcast_fn(
+                                ["955204527"],
+                                "🚨 PATRONES SITUACIONALES\n\n" + _body,
+                            )
+                        print(f"  🚨 Patrones getaway: {len(_alerts)} alerta(s) enviada(s)")
+                    else:
+                        print("  ✅ Patrones getaway: sin alertas activas hoy")
+                except Exception as e:
+                    print(f"  ⚠️  Patrones getaway scan error: {e}")
 
             # Weekly summary every Sunday at 9 AM ET — Module 10
             if now_et.weekday() == 6 and now_et.hour == 9 and last_weekly_report < now_et.date():

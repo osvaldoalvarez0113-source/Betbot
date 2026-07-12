@@ -52,6 +52,7 @@ _analyze_fn          = None
 _get_odds_fn         = None
 _build_text_fn       = None
 _get_hoy_fn          = None
+_get_patrones_fn     = None
 _start_time          = datetime.datetime.now()
 _last_scan_time      = None   # updated by kelly_odds integration if desired
 
@@ -1039,8 +1040,29 @@ def _cmd_pitchers(chat_id: str):
         _send(chat_id, f"⚠️ Error consultando MLB Stats API: {e}")
 
 
+def _cmd_patrones(chat_id: str):
+    """
+    /patrones — Detecta patrones situacionales del slate de MLB de hoy:
+    getaway day masivo, bullpen games (openers), bullpens quemados.
+    """
+    if not _get_patrones_fn:
+        _send(chat_id, "⚠️ Módulo /patrones no disponible (bot en modo básico).")
+        return
+    _send(chat_id, "⏳ Escaneando patrones del slate de hoy...")
+    try:
+        alertas = _get_patrones_fn()
+        if not alertas:
+            _send(chat_id, "✅ Sin patrones situacionales fuertes hoy.")
+            return
+        texto = "\n\n".join(alertas)
+        for i in range(0, len(texto), 4000):
+            _send(chat_id, texto[i:i+4000])
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error escaneando patrones: {e}")
+
+
 def _cmd_bulk_analysis(chat_id: str, sport_key: str, emoji: str, label: str):
-    """Shared logic for /mlb and /mundial — analyzes all games for a sport key."""
+    """Shared logic for /mlb y /mundial — analyzes all games for a sport key."""
     if not _get_odds_fn or not _analyze_fn:
         _send(chat_id, "⚠️ Módulo de análisis no disponible (bot en modo básico).")
         return
@@ -1704,6 +1726,7 @@ def _dispatch(update: dict):
         "/estado":   lambda: _cmd_estado(chat_id),
         "/hoy":      lambda: _cmd_hoy(chat_id),
         "/pitchers": lambda: _cmd_pitchers(chat_id),
+        "/patrones": lambda: _cmd_patrones(chat_id),
         "/analizar": lambda: _cmd_analizar(chat_id, args),
         "/mlb":      lambda: _cmd_mlb(chat_id),
         "/mundial":  lambda: _cmd_mundial(chat_id),
@@ -1789,18 +1812,20 @@ def _polling_loop():
 
 # ── Public entry point ──────────────────────────────────────────
 
-def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None, get_hoy_fn=None):
+def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None,
+                     get_hoy_fn=None, get_patrones_fn=None):
     """
     Inicia el bot de Telegram en un hilo daemon.
     Llamar una sola vez al arranque del bot, antes del while True:.
 
     Args:
-        analyze_fn:    referencia a analyze_game_full(game, sport_key, prev_map)
-        get_odds_fn:   referencia a get_odds(sport_key) → list[dict]
-        build_text_fn: referencia a build_analizar_text(result) → list[str]
-        get_hoy_fn:    referencia a get_today_hoy_summary() → list[str]
+        analyze_fn:      referencia a analyze_game_full(game, sport_key, prev_map)
+        get_odds_fn:     referencia a get_odds(sport_key) → list[dict]
+        build_text_fn:   referencia a build_analizar_text(result) → list[str]
+        get_hoy_fn:      referencia a get_today_hoy_summary() → list[str]
+        get_patrones_fn: referencia a detectar_patrones_getaway() → list[str]
     """
-    global _analyze_fn, _get_odds_fn, _build_text_fn, _get_hoy_fn
+    global _analyze_fn, _get_odds_fn, _build_text_fn, _get_hoy_fn, _get_patrones_fn
 
     if not TELEGRAM_TOKEN:
         print("  ⚠️  Telegram: TELEGRAM_TOKEN no configurado — bot desactivado")
@@ -1856,10 +1881,11 @@ def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None, get_
     except Exception as _dwe:
         print(f"  ⚠️  Telegram: deleteWebhook falló: {_dwe}")
 
-    _analyze_fn    = analyze_fn
-    _get_odds_fn   = get_odds_fn
-    _build_text_fn = build_text_fn
-    _get_hoy_fn    = get_hoy_fn
+    _analyze_fn      = analyze_fn
+    _get_odds_fn     = get_odds_fn
+    _build_text_fn   = build_text_fn
+    _get_hoy_fn      = get_hoy_fn
+    _get_patrones_fn = get_patrones_fn
 
     # Auto-broadcast a Telegram deshabilitado intencionalmente.
     # Las alertas automáticas van solo a ntfy. Telegram responde únicamente
