@@ -24,6 +24,7 @@ import time
 import threading
 import datetime
 import urllib.request
+from zoneinfo import ZoneInfo
 import urllib.parse
 import urllib.error
 
@@ -961,6 +962,83 @@ def _cmd_hoy(chat_id: str):
         _send(chat_id, f"⚠️ Error obteniendo juegos: {e}")
 
 
+def _cmd_pitchers(chat_id: str):
+    """
+    /pitchers — Abridores confirmados de hoy directo del MLB Stats API.
+    Muestra equipo, hora, pitcher con récord/ERA/K de la temporada.
+    """
+    _send(chat_id, "⏳ Consultando MLB Stats API...")
+    try:
+        hoy = datetime.datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
+        MLB_API = "https://statsapi.mlb.com/api/v1"
+
+        # ── Fetch schedule ────────────────────────────────────────────────
+        params = urllib.parse.urlencode({
+            "sportId": 1, "date": hoy,
+            "hydrate": "probablePitcher,linescore,team",
+        })
+        with urllib.request.urlopen(f"{MLB_API}/schedule?{params}", timeout=10) as _r:
+            sched = json.loads(_r.read())
+
+        if not sched.get("dates"):
+            _send(chat_id, "No hay juegos programados hoy.")
+            return
+
+        lineas = [f"⚾ ABRIDORES CONFIRMADOS — {hoy}\n"]
+
+        def _pitcher_info(lado):
+            p = lado.get("probablePitcher")
+            if not p:
+                return "TBD ❓"
+            pid    = p["id"]
+            nombre = p["fullName"]
+            try:
+                sp = urllib.parse.urlencode(
+                    {"hydrate": "stats(group=[pitching],type=[season])"}
+                )
+                with urllib.request.urlopen(
+                    f"{MLB_API}/people/{pid}?{sp}", timeout=10
+                ) as _sr:
+                    pr = json.loads(_sr.read())
+                splits = pr["people"][0]["stats"][0]["splits"]
+                s   = splits[0]["stat"]
+                era = s.get("era", "?")
+                w   = s.get("wins", "?")
+                l   = s.get("losses", "?")
+                so  = s.get("strikeOuts", "?")
+                return f"{nombre} ({w}-{l}, {era} ERA, {so} K)"
+            except Exception:
+                return f"{nombre} (stats no disp.)"
+
+        for juego in sched["dates"][0]["games"]:
+            away   = juego["teams"]["away"]
+            home   = juego["teams"]["home"]
+            estado = juego["status"]["abstractGameState"]
+            hora_utc = datetime.datetime.fromisoformat(
+                juego["gameDate"].replace("Z", "+00:00")
+            )
+            hora_ct = hora_utc.astimezone(
+                ZoneInfo("America/Chicago")
+            ).strftime("%I:%M%p CT")
+            marca = (
+                "🔴 LIVE"    if estado == "Live"  else
+                "✅ Final"   if estado == "Final" else
+                hora_ct
+            )
+            lineas.append(
+                f"{away['team']['name']} @ {home['team']['name']} — {marca}\n"
+                f"  🅰️ {_pitcher_info(away)}\n"
+                f"  🏠 {_pitcher_info(home)}\n"
+            )
+
+        texto = "\n".join(lineas)
+        for i in range(0, len(texto), 4000):
+            _send(chat_id, texto[i:i+4000])
+
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error consultando MLB Stats API: {e}")
+
+
 def _cmd_bulk_analysis(chat_id: str, sport_key: str, emoji: str, label: str):
     """Shared logic for /mlb and /mundial — analyzes all games for a sport key."""
     if not _get_odds_fn or not _analyze_fn:
@@ -1625,6 +1703,7 @@ def _dispatch(update: dict):
         "/clv":      lambda: _cmd_clv(chat_id),
         "/estado":   lambda: _cmd_estado(chat_id),
         "/hoy":      lambda: _cmd_hoy(chat_id),
+        "/pitchers": lambda: _cmd_pitchers(chat_id),
         "/analizar": lambda: _cmd_analizar(chat_id, args),
         "/mlb":      lambda: _cmd_mlb(chat_id),
         "/mundial":  lambda: _cmd_mundial(chat_id),

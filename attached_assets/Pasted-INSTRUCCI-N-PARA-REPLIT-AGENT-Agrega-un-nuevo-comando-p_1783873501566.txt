@@ -1,0 +1,78 @@
+INSTRUCCIÓN PARA REPLIT AGENT:
+
+Agrega un nuevo comando /pitchers al bot de Telegram en kelly_odds.py. 
+Integra el handler al dispatcher existente igual que /analizar y /hoy. 
+No modifiques ninguna otra función. Usa el código siguiente:
+
+import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+MLB_API = "https://statsapi.mlb.com/api/v1"
+
+def obtener_pitchers_hoy():
+    """Abridores confirmados de hoy directo del MLB Stats API (fuente oficial)."""
+    hoy = datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
+    url = f"{MLB_API}/schedule"
+    params = {
+        "sportId": 1,
+        "date": hoy,
+        "hydrate": "probablePitcher,linescore,team"
+    }
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        return f"⚠️ Error consultando MLB API: {e}"
+
+    if not data.get("dates"):
+        return "No hay juegos programados hoy."
+
+    lineas = [f"⚾ ABRIDORES CONFIRMADOS — {hoy}\n"]
+    for juego in data["dates"][0]["games"]:
+        away = juego["teams"]["away"]
+        home = juego["teams"]["home"]
+        estado = juego["status"]["abstractGameState"]  # Preview/Live/Final
+
+        hora_utc = datetime.fromisoformat(juego["gameDate"].replace("Z", "+00:00"))
+        hora_ct = hora_utc.astimezone(ZoneInfo("America/Chicago")).strftime("%I:%M%p CT")
+
+        def info_pitcher(lado):
+            p = lado.get("probablePitcher")
+            if not p:
+                return "TBD ❓"
+            pid = p["id"]
+            nombre = p["fullName"]
+            try:
+                stats_url = f"{MLB_API}/people/{pid}"
+                sp = {"hydrate": "stats(group=[pitching],type=[season])"}
+                sr = requests.get(stats_url, params=sp, timeout=10).json()
+                splits = sr["people"][0]["stats"][0]["splits"]
+                s = splits[0]["stat"]
+                era = s.get("era", "?")
+                w = s.get("wins", "?")
+                l = s.get("losses", "?")
+                so = s.get("strikeOuts", "?")
+                return f"{nombre} ({w}-{l}, {era} ERA, {so} K)"
+            except Exception:
+                return f"{nombre} (stats no disp.)"
+
+        marca = "🔴 LIVE" if estado == "Live" else ("✅ Final" if estado == "Final" else hora_ct)
+        lineas.append(
+            f"{away['team']['name']} @ {home['team']['name']} — {marca}\n"
+            f"  🅰️ {info_pitcher(away)}\n"
+            f"  🏠 {info_pitcher(home)}\n"
+        )
+    return "\n".join(lineas)
+
+async def cmd_pitchers(update, context):
+    """Handler del comando /pitchers"""
+    await update.message.reply_text("⏳ Consultando MLB Stats API...")
+    texto = obtener_pitchers_hoy()
+    # Telegram limita mensajes a 4096 caracteres — dividir si es necesario
+    for i in range(0, len(texto), 4000):
+        await update.message.reply_text(texto[i:i+4000])
+
+REGISTRO (agregar donde están los demás handlers):
+application.add_handler(CommandHandler("pitchers", cmd_pitchers))
