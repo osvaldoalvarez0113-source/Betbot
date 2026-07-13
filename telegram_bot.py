@@ -24,6 +24,7 @@ import time
 import threading
 import datetime
 import urllib.request
+from zoneinfo import ZoneInfo
 import urllib.parse
 import urllib.error
 
@@ -51,6 +52,7 @@ _analyze_fn          = None
 _get_odds_fn         = None
 _build_text_fn       = None
 _get_hoy_fn          = None
+_get_patrones_fn     = None
 _start_time          = datetime.datetime.now()
 _last_scan_time      = None   # updated by kelly_odds integration if desired
 
@@ -961,8 +963,106 @@ def _cmd_hoy(chat_id: str):
         _send(chat_id, f"⚠️ Error obteniendo juegos: {e}")
 
 
+def _cmd_pitchers(chat_id: str):
+    """
+    /pitchers — Abridores confirmados de hoy directo del MLB Stats API.
+    Muestra equipo, hora, pitcher con récord/ERA/K de la temporada.
+    """
+    _send(chat_id, "⏳ Consultando MLB Stats API...")
+    try:
+        hoy = datetime.datetime.now(ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
+        MLB_API = "https://statsapi.mlb.com/api/v1"
+
+        # ── Fetch schedule ────────────────────────────────────────────────
+        params = urllib.parse.urlencode({
+            "sportId": 1, "date": hoy,
+            "hydrate": "probablePitcher,linescore,team",
+        })
+        with urllib.request.urlopen(f"{MLB_API}/schedule?{params}", timeout=10) as _r:
+            sched = json.loads(_r.read())
+
+        if not sched.get("dates"):
+            _send(chat_id, "No hay juegos programados hoy.")
+            return
+
+        lineas = [f"⚾ ABRIDORES CONFIRMADOS — {hoy}\n"]
+
+        def _pitcher_info(lado):
+            p = lado.get("probablePitcher")
+            if not p:
+                return "TBD ❓"
+            pid    = p["id"]
+            nombre = p["fullName"]
+            try:
+                sp = urllib.parse.urlencode(
+                    {"hydrate": "stats(group=[pitching],type=[season])"}
+                )
+                with urllib.request.urlopen(
+                    f"{MLB_API}/people/{pid}?{sp}", timeout=10
+                ) as _sr:
+                    pr = json.loads(_sr.read())
+                splits = pr["people"][0]["stats"][0]["splits"]
+                s   = splits[0]["stat"]
+                era = s.get("era", "?")
+                w   = s.get("wins", "?")
+                l   = s.get("losses", "?")
+                so  = s.get("strikeOuts", "?")
+                return f"{nombre} ({w}-{l}, {era} ERA, {so} K)"
+            except Exception:
+                return f"{nombre} (stats no disp.)"
+
+        for juego in sched["dates"][0]["games"]:
+            away   = juego["teams"]["away"]
+            home   = juego["teams"]["home"]
+            estado = juego["status"]["abstractGameState"]
+            hora_utc = datetime.datetime.fromisoformat(
+                juego["gameDate"].replace("Z", "+00:00")
+            )
+            hora_ct = hora_utc.astimezone(
+                ZoneInfo("America/Chicago")
+            ).strftime("%I:%M%p CT")
+            marca = (
+                "🔴 LIVE"    if estado == "Live"  else
+                "✅ Final"   if estado == "Final" else
+                hora_ct
+            )
+            lineas.append(
+                f"{away['team']['name']} @ {home['team']['name']} — {marca}\n"
+                f"  🅰️ {_pitcher_info(away)}\n"
+                f"  🏠 {_pitcher_info(home)}\n"
+            )
+
+        texto = "\n".join(lineas)
+        for i in range(0, len(texto), 4000):
+            _send(chat_id, texto[i:i+4000])
+
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error consultando MLB Stats API: {e}")
+
+
+def _cmd_patrones(chat_id: str):
+    """
+    /patrones — Detecta patrones situacionales del slate de MLB de hoy:
+    getaway day masivo, bullpen games (openers), bullpens quemados.
+    """
+    if not _get_patrones_fn:
+        _send(chat_id, "⚠️ Módulo /patrones no disponible (bot en modo básico).")
+        return
+    _send(chat_id, "⏳ Escaneando patrones del slate de hoy...")
+    try:
+        alertas = _get_patrones_fn()
+        if not alertas:
+            _send(chat_id, "✅ Sin patrones situacionales fuertes hoy.")
+            return
+        texto = "\n\n".join(alertas)
+        for i in range(0, len(texto), 4000):
+            _send(chat_id, texto[i:i+4000])
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error escaneando patrones: {e}")
+
+
 def _cmd_bulk_analysis(chat_id: str, sport_key: str, emoji: str, label: str):
-    """Shared logic for /mlb and /mundial — analyzes all games for a sport key."""
+    """Shared logic for /mlb y /mundial — analyzes all games for a sport key."""
     if not _get_odds_fn or not _analyze_fn:
         _send(chat_id, "⚠️ Módulo de análisis no disponible (bot en modo básico).")
         return
@@ -1625,6 +1725,8 @@ def _dispatch(update: dict):
         "/clv":      lambda: _cmd_clv(chat_id),
         "/estado":   lambda: _cmd_estado(chat_id),
         "/hoy":      lambda: _cmd_hoy(chat_id),
+        "/pitchers": lambda: _cmd_pitchers(chat_id),
+        "/patrones": lambda: _cmd_patrones(chat_id),
         "/analizar": lambda: _cmd_analizar(chat_id, args),
         "/mlb":      lambda: _cmd_mlb(chat_id),
         "/mundial":  lambda: _cmd_mundial(chat_id),
@@ -1710,18 +1812,20 @@ def _polling_loop():
 
 # ── Public entry point ──────────────────────────────────────────
 
-def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None, get_hoy_fn=None):
+def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None,
+                     get_hoy_fn=None, get_patrones_fn=None):
     """
     Inicia el bot de Telegram en un hilo daemon.
     Llamar una sola vez al arranque del bot, antes del while True:.
 
     Args:
-        analyze_fn:    referencia a analyze_game_full(game, sport_key, prev_map)
-        get_odds_fn:   referencia a get_odds(sport_key) → list[dict]
-        build_text_fn: referencia a build_analizar_text(result) → list[str]
-        get_hoy_fn:    referencia a get_today_hoy_summary() → list[str]
+        analyze_fn:      referencia a analyze_game_full(game, sport_key, prev_map)
+        get_odds_fn:     referencia a get_odds(sport_key) → list[dict]
+        build_text_fn:   referencia a build_analizar_text(result) → list[str]
+        get_hoy_fn:      referencia a get_today_hoy_summary() → list[str]
+        get_patrones_fn: referencia a detectar_patrones_getaway() → list[str]
     """
-    global _analyze_fn, _get_odds_fn, _build_text_fn, _get_hoy_fn
+    global _analyze_fn, _get_odds_fn, _build_text_fn, _get_hoy_fn, _get_patrones_fn
 
     if not TELEGRAM_TOKEN:
         print("  ⚠️  Telegram: TELEGRAM_TOKEN no configurado — bot desactivado")
@@ -1777,10 +1881,11 @@ def iniciar_telegram(analyze_fn=None, get_odds_fn=None, build_text_fn=None, get_
     except Exception as _dwe:
         print(f"  ⚠️  Telegram: deleteWebhook falló: {_dwe}")
 
-    _analyze_fn    = analyze_fn
-    _get_odds_fn   = get_odds_fn
-    _build_text_fn = build_text_fn
-    _get_hoy_fn    = get_hoy_fn
+    _analyze_fn      = analyze_fn
+    _get_odds_fn     = get_odds_fn
+    _build_text_fn   = build_text_fn
+    _get_hoy_fn      = get_hoy_fn
+    _get_patrones_fn = get_patrones_fn
 
     # Auto-broadcast a Telegram deshabilitado intencionalmente.
     # Las alertas automáticas van solo a ntfy. Telegram responde únicamente
