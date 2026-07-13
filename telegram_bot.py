@@ -32,9 +32,11 @@ TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CHATID_FILE      = "telegram_chat_id.txt"
+TZ_CT            = ZoneInfo("America/Chicago")
 TRACKER_FILE     = "paper_trades.json"
 CLV_FILE         = "clv_tracker.json"
 BETS_TODAY_FILE  = "bets_today.json"
+BETS_LOG_FILE    = "bets_log.csv"
 LOCK_FILE        = "/tmp/betbot_telegram.lock"   # previene error 409 por instancias duplicadas
 
 # ── Diagnóstico al cargar el módulo ────────────────────────────
@@ -308,7 +310,7 @@ def _cmd_best_picks(chat_id: str, sport_key: str, emoji: str, label: str):
         razon_line = f"\n   <i>'{pk['razon']}'</i>" if pk["razon"] else ""
         lines.append(
             f"\n{rank_emoji[i]} <b>{pk['label']}</b> — {pk['match']}\n"
-            f"   Odds: {pk['odds']:+.0f} ({pk['book']})\n"
+            f"   Odds: {pk['odds']:.2f} ({pk['book']})\n"
             f"   Prob: {pk['prob']}% | EV +{pk['ev']:.1f}%"
             f"{votos_line}{razon_line}"
         )
@@ -343,7 +345,7 @@ def _cmd_bankroll(chat_id: str):
                       if (wins_l or loses_l) else 0.0)
 
     # Today's gains from bets_log.csv
-    today_str  = datetime.datetime.now().strftime("%Y-%m-%d")
+    today_str  = datetime.datetime.now(TZ_CT).strftime("%Y-%m-%d")
     hoy        = 0.0
     semana     = 0.0
     last_bet   = "—"
@@ -489,7 +491,7 @@ def _cmd_estado(chat_id: str):
     horas   = int(uptime.total_seconds() // 3600)
     minutos = int((uptime.total_seconds() % 3600) // 60)
     trades  = _load_json(TRACKER_FILE, {"picks": []})
-    hoy     = datetime.date.today().isoformat()
+    hoy     = _ct_today()
     picks_hoy = sum(1 for p in trades.get("picks", []) if p.get("fecha") == hoy)
     tk_ok   = "✅" if TELEGRAM_TOKEN else "❌"
     anlz_ok = "✅" if _analyze_fn else "❌"
@@ -890,7 +892,7 @@ def handle_photo(chat_id: str, msg: dict):
             continue
 
         if not result:
-            _send(chat_id, f"⚠️ Sin datos suficientes para {pair[0]} vs {pair[1]}.")
+            _send(chat_id, f"⚠️ Sin datos suficientes para {label_home} vs {label_away}.")
             continue
 
         if _build_text_fn:
@@ -1284,7 +1286,7 @@ def _cmd_parlay(chat_id: str):
         lines.append(
             f"{RANK[i]} <b>{leg['label']}</b>\n"
             f"   {round(leg['prob']*100,1)}% | EV +{leg['ev']:.1f}% | "
-            f"{leg['odds']:+.0f} @ {leg['book']}"
+            f"{leg['odds']:.2f} @ {leg['book']}"
             f"{razon_block}\n"
         )
 
@@ -1456,7 +1458,7 @@ def _cmd_parlay_futbol(chat_id: str):
         lines.append(
             f"{RANK[i]} <b>{leg['label']}</b>\n"
             f"   {round(leg['prob']*100,1)}% | EV +{leg['ev']:.1f}% | "
-            f"{leg['odds']:+.0f} @ {leg['book']}"
+            f"{leg['odds']:.2f} @ {leg['book']}"
             f"{razon_block}\n"
         )
     lines.append(
@@ -1475,13 +1477,11 @@ def _cmd_parlay_futbol(chat_id: str):
 # ── Bet tracking helpers ─────────────────────────────────────────────────────
 
 def _ct_now_str() -> str:
-    """Current time as 'YYYY-MM-DD HH:MM CT' (UTC-5, close enough for CDT)."""
-    ct = datetime.datetime.utcnow() - datetime.timedelta(hours=5)
-    return ct.strftime("%Y-%m-%d %H:%M CT")
+    """Current time as 'YYYY-MM-DD HH:MM CT' using proper America/Chicago tz."""
+    return datetime.datetime.now(TZ_CT).strftime("%Y-%m-%d %H:%M CT")
 
 def _ct_today() -> str:
-    ct = datetime.datetime.utcnow() - datetime.timedelta(hours=5)
-    return ct.strftime("%Y-%m-%d")
+    return datetime.datetime.now(TZ_CT).strftime("%Y-%m-%d")
 
 def _load_bets() -> dict:
     return _load_json(BETS_TODAY_FILE, {"date": _ct_today(), "bets": []})
