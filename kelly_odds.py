@@ -4,6 +4,7 @@ Modules: Morning Report | Lineup Monitor | Math Models | Sharp Radar | Arb Scann
 """
 import requests, time, csv, os, json, math
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 import pytz
 try:
     from paquete_avanzado import registrar_pick, clv_tracker, run_modulos_avanzados
@@ -48,7 +49,7 @@ def _load_live_bankroll() -> float:
                 rows = list(_csv.DictReader(_f))
             if rows:
                 for row in reversed(rows):
-                    bal = float(row.get("balance") or row.get("bankroll") or 0)
+                    bal = float(row.get("running_bankroll") or row.get("balance") or row.get("bankroll") or 0)
                     if bal > 0:
                         last_balance = bal
                         break
@@ -82,6 +83,7 @@ LOG_CSV  = True
 
 CDT            = pytz.timezone("America/Chicago")
 ET             = pytz.timezone("America/New_York")
+TZ_LOCAL       = ZoneInfo("America/Chicago")   # user-facing "today" — fixes UTC drift on Railway
 
 _DIV  = "━━━━━━━━━━━━"
 _DIV2 = "━━━━━━━━━━━━━━━━━━━━"
@@ -209,7 +211,7 @@ PREV_ODDS_FILE = "previous_odds.json"
 BETS_LOG_FILE  = "bets_log.csv"
 ELO_FILE       = "elo_ratings.json"
 LINEUPS_FILE   = "morning_lineups.json"
-MLB_YEAR       = datetime.now().year
+MLB_YEAR       = datetime.now(TZ_LOCAL).year
 
 SEASON_MONTHS = {
     "soccer_fifa_world_cup": [1,2,3,4,5,6,7,8,9,10,11,12],
@@ -410,6 +412,8 @@ last_night_summary: date = date(2000, 1, 1)  # 11 PM nightly summary tracker
 last_mlb_card:     date = date(2000, 1, 1)  # 2 PM ET MLB daily card
 last_soccer_card:  date = date(2000, 1, 1)  # 10 AM ET soccer daily card
 last_backtest_report: date = date(2000, 1, 1)  # Sunday 10 AM ET backtest
+last_patrones_scan:   date = date(2000, 1, 1)  # 9 AM CT daily getaway-day scan
+_patrones_activos:    list = []                 # slate-wide pattern alerts for today
 _kelly_monthly_mult: float = 1.0  # Improvement 4: monthly ROI-based Kelly multiplier
 _perf_adj: dict = {}   # ajustes por tipo de mercado basados en resultados reales
 _line_history:    dict = {}       # 1B: game_id → [{time, total, ml_home, ml_away}]
@@ -2020,7 +2024,7 @@ def fetch_mlb_team_recent(team: str) -> dict | None:
     Last 5 completed MLB games for a team via Odds API scores.
     Returns {results: [(label, score_str),...], wins, losses} or None.
     """
-    ck = f"{team}_{datetime.now().strftime('%Y-%m-%d')}"
+    ck = f"{team}_{datetime.now(TZ_LOCAL).strftime('%Y-%m-%d')}"
     if ck in _mlb_recent_cache:
         return _mlb_recent_cache[ck]
     try:
@@ -2072,7 +2076,7 @@ def fetch_team_streak_mlb(team: str) -> "dict | None":
       is_cold (wins_10 <= 3)      — triggers −5% ML, −0.3 total runs
       label                       — formatted display string for alerts
     """
-    ck = f"streak_{team}_{datetime.now().strftime('%Y-%m-%d')}"
+    ck = f"streak_{team}_{datetime.now(TZ_LOCAL).strftime('%Y-%m-%d')}"
     if ck in _mlb_streak_cache:
         return _mlb_streak_cache[ck]
     try:
@@ -2524,7 +2528,7 @@ def fetch_probable_pitchers_today():
                             return {}
                         roster = _mlb_rest(f"/teams/{tid}/roster",
                                            {"rosterType": "active", "season": MLB_YEAR})
-                        cutoff = (datetime.utcnow() - timedelta(days=4)).strftime("%Y-%m-%d")
+                        cutoff = (datetime.now(TZ_LOCAL) - timedelta(days=4)).strftime("%Y-%m-%d")
                         for p in (roster.get("roster") or []):
                             pos = (p.get("position") or {}).get("abbreviation", "")
                             if pos != "SP":
@@ -5609,6 +5613,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         # Fetch enhanced context + adjust p_home by pitcher recent form (BEFORE EV loop)
         _enh_ctx: dict = {}
         if is_mlb:
+            game_date = commence[:10]   # fix: define before _fetch_enhanced_game_context call
             try:
                 _enh_ctx = _fetch_enhanced_game_context(
                     _team_id(home), _team_id(away), h_pid, a_pid, game_date,
@@ -8806,7 +8811,7 @@ def _poll_ntfy_confirmations() -> None:
     if not NOTIFY:
         return
     try:
-        url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=120"
+        url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=2100"
         r   = requests.get(url, timeout=8)
         if r.status_code != 200:
             return
@@ -9128,7 +9133,7 @@ def get_odds(sport_key):
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": API_KEY, "regions": "us,us2,eu,uk,au",
+            params={"apiKey": API_KEY, "regions": "us,us2",
                     "markets": "h2h,totals,alternate_team_totals", "oddsFormat": "decimal"},
             timeout=10,
         )
@@ -9993,7 +9998,7 @@ def fetch_pitcher_recent_form(pitcher_name: str) -> dict | None:
         if not people:
             return None
         pid    = people[0]["id"]
-        season = datetime.now().year
+        season = datetime.now(TZ_LOCAL).year
         data   = _mlb_rest(f"/people/{pid}/stats", {
             "stats": "gameLog", "group": "pitching",
             "season": season, "limit": 10,
@@ -10052,7 +10057,7 @@ def fetch_pitcher_pace(pitcher_name: str) -> "dict | None":
         if not people:
             return None
         pid    = people[0]["id"]
-        season = datetime.now().year
+        season = datetime.now(TZ_LOCAL).year
         data   = _mlb_rest(f"/people/{pid}/stats", {
             "stats": "gameLog", "group": "pitching",
             "season": season, "limit": 10,
@@ -10255,7 +10260,7 @@ def fetch_soccer_team_recent(team: str, sport_key: str) -> dict | None:
     Returns {gf_pg, ga_pg, results: ['W','D','L',...], emoji, n} or None.
     Never returns a bare ELO-only entry — returns None if no match data found.
     """
-    ck = f"{team}_{sport_key}_{datetime.now().strftime('%Y-%m-%d')}"
+    ck = f"{team}_{sport_key}_{datetime.now(TZ_LOCAL).strftime('%Y-%m-%d')}"
     if ck in _soccer_recent_cache:
         return _soccer_recent_cache[ck]
 
@@ -10360,7 +10365,7 @@ def fetch_match_referee(home: str, away: str, sport_key: str) -> dict | None:
     Fetch today's match referee from ESPN soccer scoreboard + summary API.
     Returns {name, goals_pg, tendency} or None.
     """
-    ck = f"{home}_{away}_{datetime.now().strftime('%Y-%m-%d')}"
+    ck = f"{home}_{away}_{datetime.now(TZ_LOCAL).strftime('%Y-%m-%d')}"
     if ck in _referee_cache:
         return _referee_cache[ck]
     try:
@@ -10376,7 +10381,7 @@ def fetch_match_referee(home: str, away: str, sport_key: str) -> dict | None:
             "soccer_conmebol_copa_america":      "conmebol.america",
         }
         league = _ESPN_LEAGUE.get(sport_key, "fifa.world")
-        today  = datetime.now().strftime("%Y%m%d")
+        today  = datetime.now(TZ_LOCAL).strftime("%Y%m%d")
         r = requests.get(
             f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard",
             params={"dates": today}, timeout=8,
@@ -11106,12 +11111,9 @@ def _fetch_enhanced_game_context(
             result[f"{label}_last3_era_avg"] = None
             return
         try:
-            url = f"{BASE}/people/{pitcher_id}/stats"
-            params = {"stats": "gameLog", "season": year, "group": "pitching"}
             print(f"[DEBUG API] Fetching stats for pitcher {pitcher_id} ({label})")
-            r = requests.get(url, params=params, timeout=10)
-            print(f"[DEBUG API] Status code: {r.status_code}")
-            raw = r.json()
+            raw = _mlb_rest(f"/people/{pitcher_id}/stats",
+                            {"stats": "gameLog", "season": year, "group": "pitching"})
             if not raw.get("stats") or not raw["stats"][0].get("splits"):
                 print(f"[DEBUG API] No splits found for {label} pitcher {pitcher_id}")
                 result[f"{label}_last3_starts"] = []
@@ -11477,6 +11479,118 @@ def _build_elena_situational_addendum(game_data: dict) -> str:
     )
 
 
+def detectar_patrones_getaway() -> list:
+    """
+    Detecta patrones de fatiga/situacionales del slate de hoy:
+      1. Getaway day masivo (todos los juegos empiezan antes de las 5 PM CT)
+      2. Bullpen games (opener con <35 IP en temporada = spot start)
+      3. Bullpens quemados (dobleheader o extra innings el día anterior)
+
+    Actualiza el global _patrones_activos y retorna la lista de alertas.
+    """
+    global _patrones_activos
+    hoy  = datetime.now(CDT).strftime("%Y-%m-%d")
+    ayer = (datetime.now(CDT) - timedelta(days=1)).strftime("%Y-%m-%d")
+    alertas: list = []
+
+    # ── Slate de hoy ─────────────────────────────────────────────────────────
+    datos_hoy  = _mlb_rest("/schedule", {"sportId": 1, "date": hoy,
+                                         "hydrate": "probablePitcher,team"})
+    juegos_hoy = datos_hoy.get("dates", [{}])[0].get("games", [])
+    if not juegos_hoy:
+        _patrones_activos = []
+        return []
+
+    # ── PATRÓN 1: Getaway day masivo ─────────────────────────────────────────
+    horas = []
+    for j in juegos_hoy:
+        try:
+            h = datetime.fromisoformat(
+                j["gameDate"].replace("Z", "+00:00")
+            ).astimezone(CDT)
+            horas.append(h.hour)
+        except Exception:
+            pass
+    if horas and max(horas) < 17:
+        alertas.append(
+            "🚨 GETAWAY DAY MASIVO: todos los juegos son de día (antes de las 5 PM CT). "
+            "Patrón: lean UNDER general, lineups B posibles, abridores con correa corta. "
+            "Verificar lineups confirmados antes de apostar."
+        )
+
+    # ── PATRÓN 2: Bullpen games (openers) ────────────────────────────────────
+    for j in juegos_hoy:
+        for lado in ["away", "home"]:
+            p = j["teams"][lado].get("probablePitcher")
+            if not p:
+                continue
+            try:
+                pr = _mlb_rest(f"/people/{p['id']}",
+                               {"hydrate": "stats(group=[pitching],type=[season])"})
+                splits = (pr.get("people", [{}])[0]
+                            .get("stats", [{}])[0]
+                            .get("splits", []))
+                if not splits:
+                    continue
+                s      = splits[0]["stat"]
+                ip_raw = s.get("inningsPitched", "0")
+                ip     = float(
+                    ip_raw.replace(".1", ".33").replace(".2", ".67")
+                )
+                if ip < 35:
+                    equipo = j["teams"][lado]["team"]["name"]
+                    otro   = "home" if lado == "away" else "away"
+                    rival  = j["teams"][otro]["team"]["name"]
+                    alertas.append(
+                        f"🚨 POSIBLE BULLPEN GAME: {equipo} abre con "
+                        f"{p['fullName']} (solo {ip:.0f} IP en temporada). "
+                        f"Ángulo: ML de {rival} y over si el bullpen se estira."
+                    )
+            except Exception:
+                continue
+
+    # ── PATRÓN 3: Bullpens quemados (dobleheader o extras ayer) ──────────────
+    datos_ayer  = _mlb_rest("/schedule", {"sportId": 1, "date": ayer,
+                                          "hydrate": "linescore"})
+    juegos_ayer = datos_ayer.get("dates", [{}])[0].get("games", [])
+    equipos_cansados: dict = {}
+    for j in juegos_ayer:
+        try:
+            innings = len(j.get("linescore", {}).get("innings", []))
+        except Exception:
+            innings = 9
+        for lado in ["away", "home"]:
+            try:
+                tid    = j["teams"][lado]["team"]["id"]
+                nombre = j["teams"][lado]["team"]["name"]
+                if tid not in equipos_cansados:
+                    equipos_cansados[tid] = {"nombre": nombre, "juegos": 0, "innings": 0}
+                equipos_cansados[tid]["juegos"]  += 1
+                equipos_cansados[tid]["innings"] += innings
+            except Exception:
+                pass
+
+    ids_hoy: set = set()
+    for j in juegos_hoy:
+        for lado in ["away", "home"]:
+            try:
+                ids_hoy.add(j["teams"][lado]["team"]["id"])
+            except Exception:
+                pass
+
+    for tid, info in equipos_cansados.items():
+        if (info["juegos"] >= 2 or info["innings"] >= 11) and tid in ids_hoy:
+            razon = (f"{info['juegos']} juegos" if info["juegos"] >= 2
+                     else f"{info['innings']} innings")
+            alertas.append(
+                f"🚨 BULLPEN QUEMADO: {info['nombre']} cargó {razon} ayer. "
+                f"Ángulo: over live si el abridor de hoy sale antes del 6to inning."
+            )
+
+    _patrones_activos = alertas
+    return alertas
+
+
 def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     """
     Panel of 3 expert personas — each calls analyze_with_claude with its own
@@ -11662,6 +11776,18 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
                 _extra_full += _elena_sit
                 _n_flags = len(game_data.get("sit_flags_txt", "").splitlines())
                 print(f"   🚩 Elena: {_n_flags} bandera(s) situacional(es) inyectada(s)")
+            # Inject slate-wide getaway-day / bullpen pattern alerts when active
+            if _patrones_activos:
+                _slate_txt  = "\n".join(f"• {a}" for a in _patrones_activos)
+                _extra_full += (
+                    "\n\n━━━ ALERTAS DE PATRONES DEL SLATE (HOY) ━━━\n"
+                    "El sistema detectó los siguientes patrones activos en el slate de hoy. "
+                    "Úsalos como contexto de mercado general al evaluar este partido:\n\n"
+                    f"{_slate_txt}\n\n"
+                    "Si alguno de estos patrones aplica directamente al equipo favorito "
+                    "de este pick, menciónalo explícitamente en tu análisis."
+                )
+                print(f"   🗓️  Elena: {len(_patrones_activos)} patrón(es) de slate inyectado(s)")
         res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
                                   _model=_panel_model)
         if res is None:
@@ -14626,7 +14752,7 @@ def _fetch_player_props(event_id: str) -> dict:
     """Fetch pitcher strikeout + batter props from Odds API for a specific game event."""
     if not API_KEY or not event_id:
         return {}
-    _today = datetime.now().strftime("%Y-%m-%d")
+    _today = datetime.now(TZ_LOCAL).strftime("%Y-%m-%d")
     ck = f"props_{event_id}_{_today}"
     if ck in _props_cache:
         return _props_cache[ck]
@@ -14665,7 +14791,7 @@ def _fetch_f5_odds(event_id: str) -> dict:
     """
     if not API_KEY or not event_id:
         return {}
-    _today = datetime.now().strftime("%Y-%m-%d")
+    _today = datetime.now(TZ_LOCAL).strftime("%Y-%m-%d")
     ck = f"f5_{event_id}_{_today}"
     if ck in _f5_odds_cache:
         return _f5_odds_cache[ck]
@@ -15481,7 +15607,8 @@ if __name__ == "__main__":
         from telegram_bot import iniciar_telegram as _iniciar_tg
         _iniciar_tg(analyze_fn=analyze_game_full, get_odds_fn=get_odds,
                     build_text_fn=build_analizar_text,
-                    get_hoy_fn=get_today_hoy_summary)
+                    get_hoy_fn=get_today_hoy_summary,
+                    get_patrones_fn=detectar_patrones_getaway)
     except Exception as _tge:
         print(f"  ⚠️  Telegram bot startup skipped: {_tge}")
 
@@ -15493,8 +15620,8 @@ if __name__ == "__main__":
 
             check_midnight_reset()
 
-            # Health check at 7:50 AM ET (once per day) — Feature 1
-            if now_et.hour == 7 and now_et.minute >= 50 and last_health_check < now_et.date():
+            # Health check at 7 AM ET (once per day) — Feature 1
+            if now_et.hour == 7 and last_health_check < now_et.date():
                 try:
                     run_health_check()
                 except Exception as e:
@@ -15506,6 +15633,25 @@ if __name__ == "__main__":
                     morning_report()
                 except Exception as e:
                     print(f"  ⚠️  Morning report error: {e}")
+
+            # Getaway-day / bullpen pattern scan at 9 AM CT (= 10 AM ET) — once per day
+            if now_et.hour == 10 and last_patrones_scan < now_et.date():
+                try:
+                    _alerts = detectar_patrones_getaway()
+                    last_patrones_scan = now_et.date()
+                    if _alerts:
+                        _body = "\n\n".join(_alerts)
+                        ntfy_post("🚨 PATRONES SITUACIONALES", _body, "high")
+                        if _tg_broadcast_fn:
+                            _tg_broadcast_fn(
+                                ["955204527"],
+                                "🚨 PATRONES SITUACIONALES\n\n" + _body,
+                            )
+                        print(f"  🚨 Patrones getaway: {len(_alerts)} alerta(s) enviada(s)")
+                    else:
+                        print("  ✅ Patrones getaway: sin alertas activas hoy")
+                except Exception as e:
+                    print(f"  ⚠️  Patrones getaway scan error: {e}")
 
             # Weekly summary every Sunday at 9 AM ET — Module 10
             if now_et.weekday() == 6 and now_et.hour == 9 and last_weekly_report < now_et.date():
@@ -15523,15 +15669,15 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"  ⚠️  Backtest error: {e}")
 
-            # MLB Daily Card at 2:00 PM ET (once per day)
-            if now_et.hour == 14 and now_et.minute < 10 and last_mlb_card < now_et.date():
+            # MLB Daily Card at 2 PM ET (once per day)
+            if now_et.hour == 14 and last_mlb_card < now_et.date():
                 try:
                     send_daily_card("baseball_mlb")
                 except Exception as e:
                     print(f"  ⚠️  MLB Daily Card error: {e}")
 
-            # Soccer Daily Card at 10:00 AM ET (once per day)
-            if now_et.hour == 10 and now_et.minute < 10 and last_soccer_card < now_et.date():
+            # Soccer Daily Card at 10 AM ET (once per day)
+            if now_et.hour == 10 and last_soccer_card < now_et.date():
                 try:
                     send_daily_card("soccer_fifa_world_cup")
                 except Exception as e:
