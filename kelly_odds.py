@@ -49,7 +49,7 @@ def _load_live_bankroll() -> float:
                 rows = list(_csv.DictReader(_f))
             if rows:
                 for row in reversed(rows):
-                    bal = float(row.get("balance") or row.get("bankroll") or 0)
+                    bal = float(row.get("running_bankroll") or row.get("balance") or row.get("bankroll") or 0)
                     if bal > 0:
                         last_balance = bal
                         break
@@ -8811,7 +8811,7 @@ def _poll_ntfy_confirmations() -> None:
     if not NOTIFY:
         return
     try:
-        url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=120"
+        url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=2100"
         r   = requests.get(url, timeout=8)
         if r.status_code != 200:
             return
@@ -9133,7 +9133,7 @@ def get_odds(sport_key):
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": API_KEY, "regions": "us,us2,eu,uk,au",
+            params={"apiKey": API_KEY, "regions": "us,us2",
                     "markets": "h2h,totals,alternate_team_totals", "oddsFormat": "decimal"},
             timeout=10,
         )
@@ -15620,8 +15620,8 @@ if __name__ == "__main__":
 
             check_midnight_reset()
 
-            # Health check at 7:50 AM ET (once per day) — Feature 1
-            if now_et.hour == 7 and now_et.minute >= 50 and last_health_check < now_et.date():
+            # Health check at 7 AM ET (once per day) — Feature 1
+            if now_et.hour == 7 and last_health_check < now_et.date():
                 try:
                     run_health_check()
                 except Exception as e:
@@ -15635,7 +15635,7 @@ if __name__ == "__main__":
                     print(f"  ⚠️  Morning report error: {e}")
 
             # Getaway-day / bullpen pattern scan at 9 AM CT (= 10 AM ET) — once per day
-            if now_et.hour == 10 and now_et.minute < 10 and last_patrones_scan < now_et.date():
+            if now_et.hour == 10 and last_patrones_scan < now_et.date():
                 try:
                     _alerts = detectar_patrones_getaway()
                     last_patrones_scan = now_et.date()
@@ -15669,15 +15669,15 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"  ⚠️  Backtest error: {e}")
 
-            # MLB Daily Card at 2:00 PM ET (once per day)
-            if now_et.hour == 14 and now_et.minute < 10 and last_mlb_card < now_et.date():
+            # MLB Daily Card at 2 PM ET (once per day)
+            if now_et.hour == 14 and last_mlb_card < now_et.date():
                 try:
                     send_daily_card("baseball_mlb")
                 except Exception as e:
                     print(f"  ⚠️  MLB Daily Card error: {e}")
 
-            # Soccer Daily Card at 10:00 AM ET (once per day)
-            if now_et.hour == 10 and now_et.minute < 10 and last_soccer_card < now_et.date():
+            # Soccer Daily Card at 10 AM ET (once per day)
+            if now_et.hour == 10 and last_soccer_card < now_et.date():
                 try:
                     send_daily_card("soccer_fifa_world_cup")
                 except Exception as e:
