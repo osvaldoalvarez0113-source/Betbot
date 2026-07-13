@@ -4,6 +4,7 @@ Modules: Morning Report | Lineup Monitor | Math Models | Sharp Radar | Arb Scann
 """
 import requests, time, csv, os, json, math
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 import pytz
 try:
     from paquete_avanzado import registrar_pick, clv_tracker, run_modulos_avanzados
@@ -82,6 +83,7 @@ LOG_CSV  = True
 
 CDT            = pytz.timezone("America/Chicago")
 ET             = pytz.timezone("America/New_York")
+TZ_LOCAL       = ZoneInfo("America/Chicago")   # user-facing "today" — fixes UTC drift on Railway
 
 _DIV  = "━━━━━━━━━━━━"
 _DIV2 = "━━━━━━━━━━━━━━━━━━━━"
@@ -209,7 +211,7 @@ PREV_ODDS_FILE = "previous_odds.json"
 BETS_LOG_FILE  = "bets_log.csv"
 ELO_FILE       = "elo_ratings.json"
 LINEUPS_FILE   = "morning_lineups.json"
-MLB_YEAR       = datetime.now().year
+MLB_YEAR       = datetime.now(TZ_LOCAL).year
 
 SEASON_MONTHS = {
     "soccer_fifa_world_cup": [1,2,3,4,5,6,7,8,9,10,11,12],
@@ -2022,7 +2024,7 @@ def fetch_mlb_team_recent(team: str) -> dict | None:
     Last 5 completed MLB games for a team via Odds API scores.
     Returns {results: [(label, score_str),...], wins, losses} or None.
     """
-    ck = f"{team}_{datetime.now().strftime('%Y-%m-%d')}"
+    ck = f"{team}_{datetime.now(TZ_LOCAL).strftime('%Y-%m-%d')}"
     if ck in _mlb_recent_cache:
         return _mlb_recent_cache[ck]
     try:
@@ -2074,7 +2076,7 @@ def fetch_team_streak_mlb(team: str) -> "dict | None":
       is_cold (wins_10 <= 3)      — triggers −5% ML, −0.3 total runs
       label                       — formatted display string for alerts
     """
-    ck = f"streak_{team}_{datetime.now().strftime('%Y-%m-%d')}"
+    ck = f"streak_{team}_{datetime.now(TZ_LOCAL).strftime('%Y-%m-%d')}"
     if ck in _mlb_streak_cache:
         return _mlb_streak_cache[ck]
     try:
@@ -2526,7 +2528,7 @@ def fetch_probable_pitchers_today():
                             return {}
                         roster = _mlb_rest(f"/teams/{tid}/roster",
                                            {"rosterType": "active", "season": MLB_YEAR})
-                        cutoff = (datetime.utcnow() - timedelta(days=4)).strftime("%Y-%m-%d")
+                        cutoff = (datetime.now(TZ_LOCAL) - timedelta(days=4)).strftime("%Y-%m-%d")
                         for p in (roster.get("roster") or []):
                             pos = (p.get("position") or {}).get("abbreviation", "")
                             if pos != "SP":
@@ -9996,7 +9998,7 @@ def fetch_pitcher_recent_form(pitcher_name: str) -> dict | None:
         if not people:
             return None
         pid    = people[0]["id"]
-        season = datetime.now().year
+        season = datetime.now(TZ_LOCAL).year
         data   = _mlb_rest(f"/people/{pid}/stats", {
             "stats": "gameLog", "group": "pitching",
             "season": season, "limit": 10,
@@ -10055,7 +10057,7 @@ def fetch_pitcher_pace(pitcher_name: str) -> "dict | None":
         if not people:
             return None
         pid    = people[0]["id"]
-        season = datetime.now().year
+        season = datetime.now(TZ_LOCAL).year
         data   = _mlb_rest(f"/people/{pid}/stats", {
             "stats": "gameLog", "group": "pitching",
             "season": season, "limit": 10,
@@ -10258,7 +10260,7 @@ def fetch_soccer_team_recent(team: str, sport_key: str) -> dict | None:
     Returns {gf_pg, ga_pg, results: ['W','D','L',...], emoji, n} or None.
     Never returns a bare ELO-only entry — returns None if no match data found.
     """
-    ck = f"{team}_{sport_key}_{datetime.now().strftime('%Y-%m-%d')}"
+    ck = f"{team}_{sport_key}_{datetime.now(TZ_LOCAL).strftime('%Y-%m-%d')}"
     if ck in _soccer_recent_cache:
         return _soccer_recent_cache[ck]
 
@@ -10363,7 +10365,7 @@ def fetch_match_referee(home: str, away: str, sport_key: str) -> dict | None:
     Fetch today's match referee from ESPN soccer scoreboard + summary API.
     Returns {name, goals_pg, tendency} or None.
     """
-    ck = f"{home}_{away}_{datetime.now().strftime('%Y-%m-%d')}"
+    ck = f"{home}_{away}_{datetime.now(TZ_LOCAL).strftime('%Y-%m-%d')}"
     if ck in _referee_cache:
         return _referee_cache[ck]
     try:
@@ -10379,7 +10381,7 @@ def fetch_match_referee(home: str, away: str, sport_key: str) -> dict | None:
             "soccer_conmebol_copa_america":      "conmebol.america",
         }
         league = _ESPN_LEAGUE.get(sport_key, "fifa.world")
-        today  = datetime.now().strftime("%Y%m%d")
+        today  = datetime.now(TZ_LOCAL).strftime("%Y%m%d")
         r = requests.get(
             f"https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/scoreboard",
             params={"dates": today}, timeout=8,
@@ -14750,7 +14752,7 @@ def _fetch_player_props(event_id: str) -> dict:
     """Fetch pitcher strikeout + batter props from Odds API for a specific game event."""
     if not API_KEY or not event_id:
         return {}
-    _today = datetime.now().strftime("%Y-%m-%d")
+    _today = datetime.now(TZ_LOCAL).strftime("%Y-%m-%d")
     ck = f"props_{event_id}_{_today}"
     if ck in _props_cache:
         return _props_cache[ck]
@@ -14789,7 +14791,7 @@ def _fetch_f5_odds(event_id: str) -> dict:
     """
     if not API_KEY or not event_id:
         return {}
-    _today = datetime.now().strftime("%Y-%m-%d")
+    _today = datetime.now(TZ_LOCAL).strftime("%Y-%m-%d")
     ck = f"f5_{event_id}_{_today}"
     if ck in _f5_odds_cache:
         return _f5_odds_cache[ck]
