@@ -6,6 +6,7 @@ import requests, time, csv, os, json, math
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 import pytz
+from contexto_juego import obtener_contexto, ajustar_total, ajustar_ml
 try:
     from paquete_avanzado import registrar_pick, clv_tracker, run_modulos_avanzados
     HAS_PAQUETE_AVANZADO = True
@@ -5614,6 +5615,24 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
         _enh_ctx: dict = {}
         if is_mlb:
             game_date = commence[:10]   # fix: define before _fetch_enhanced_game_context call
+
+            # ── contexto_juego: lookup MLB gamePk ─────────────────────────────
+            _ctx_game_pk = None
+            try:
+                _h_tid_ctx = _team_id(home)
+                if _h_tid_ctx:
+                    _sched_ctx = requests.get(
+                        "https://statsapi.mlb.com/api/v1/schedule",
+                        params={"sportId": 1, "date": game_date, "teamId": _h_tid_ctx},
+                        timeout=8,
+                    ).json()
+                    for _d_ctx in _sched_ctx.get("dates", []):
+                        for _g_ctx in _d_ctx.get("games", []):
+                            _ctx_game_pk = _g_ctx.get("gamePk")
+                            break
+            except Exception as _ctx_pk_e:
+                print(f"[contexto] game_pk lookup: {_ctx_pk_e}")
+
             try:
                 _enh_ctx = _fetch_enhanced_game_context(
                     _team_id(home), _team_id(away), h_pid, a_pid, game_date,
@@ -5659,6 +5678,38 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 p_away = 1.0 - p_home
             except Exception as _mmb_e:
                 print(f"  ⚠️  pitcher_mismatch_ml_boost error: {_mmb_e}")
+
+        # ── contexto_juego: ajuste ML por splits L/R, descanso y bullpen ─────
+        _ctx_juego = None
+        if is_mlb and _ctx_game_pk:
+            try:
+                _ctx_juego = obtener_contexto(_ctx_game_pk)
+                if _ctx_juego:
+                    p_home, p_away = ajustar_ml(p_home, p_away, _ctx_juego)
+                    # Build resumen string for the expert panel
+                    _ctx_parts = [
+                        f"Park: {_ctx_juego.get('venue','')} (factor {_ctx_juego.get('park_factor',1.0):.2f})",
+                    ]
+                    _c = _ctx_juego.get("clima")
+                    if _c and not _c.get("techo_cerrado"):
+                        _ctx_parts.append(
+                            f"Clima: {_c.get('temp_f',0):.0f}°F "
+                            f"viento {_c.get('viento_mph',0):.0f}mph "
+                            f"lluvia {_c.get('lluvia_prob',0)}%"
+                        )
+                    for _cl, _ct in (("home", "Local"), ("away", "Visita")):
+                        _rf = _ctx_juego.get(f"regulares_fuera_{_cl}")
+                        if _rf:
+                            _ctx_parts.append(f"{_ct}: ~{_rf} regulares descansando")
+                        _bp = _ctx_juego.get(f"bullpen_{_cl}", {})
+                        if _bp.get("dos_dias_seguidos"):
+                            _ctx_parts.append(
+                                f"Bullpen {_ct} quemado: "
+                                f"{', '.join(_bp['dos_dias_seguidos'][:3])}"
+                            )
+                    context["ctx_juego_resumen"] = " | ".join(_ctx_parts)
+            except Exception as _ctx_e:
+                print(f"[contexto] ajustar_ml error: {_ctx_e}")
 
         # ML
         for team, true_p, lbl in [
@@ -5746,6 +5797,14 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 )
 
             adj_total   = max(0.5, adj_total)
+
+            # ── contexto_juego: ajuste park factor + clima al total ─────────
+            if _ctx_juego:
+                try:
+                    adj_total = ajustar_total(adj_total, _ctx_juego)
+                except Exception:
+                    pass
+
             _over_edge  = adj_total - book_line  # positive = model favors OVER
 
             # Rule 3: contradiction — dominant pitcher but model still says OVER
@@ -11776,6 +11835,15 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
                 _extra_full += _elena_sit
                 _n_flags = len(game_data.get("sit_flags_txt", "").splitlines())
                 print(f"   🚩 Elena: {_n_flags} bandera(s) situacional(es) inyectada(s)")
+            # Inject contexto_juego resumen (park, clima, regulares, bullpen)
+            _ctx_jg_txt = game_data.get("ctx_juego_resumen", "")
+            if _ctx_jg_txt:
+                _extra_full += (
+                    f"\n\nCONTEXTO DEL JUEGO (datos objetivos para evaluación):\n"
+                    f"{_ctx_jg_txt}\n"
+                    "Usa estos datos si aplican directamente al pick que estás evaluando "
+                    "(e.g. bullpen del favorito quemado, regulares descansando)."
+                )
             # Inject slate-wide getaway-day / bullpen pattern alerts when active
             if _patrones_activos:
                 _slate_txt  = "\n".join(f"• {a}" for a in _patrones_activos)
