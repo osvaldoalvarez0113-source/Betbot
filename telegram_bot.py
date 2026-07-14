@@ -33,6 +33,12 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CHATID_FILE      = "telegram_chat_id.txt"
 TZ_CT            = ZoneInfo("America/Chicago")
+try:
+    from contexto_juego import resumen_contexto_telegram as _resumen_contexto_fn
+    _HAS_CONTEXTO = True
+except ImportError:
+    _resumen_contexto_fn = None
+    _HAS_CONTEXTO = False
 TRACKER_FILE     = "paper_trades.json"
 CLV_FILE         = "clv_tracker.json"
 BETS_TODAY_FILE  = "bets_today.json"
@@ -1063,6 +1069,65 @@ def _cmd_patrones(chat_id: str):
         _send(chat_id, f"⚠️ Error escaneando patrones: {e}")
 
 
+def _cmd_contexto(chat_id: str):
+    """
+    /contexto — Contexto de juego para todos los partidos MLB de hoy:
+    park factor, clima, abridores L/R, OPS splits, regulares descansando
+    y bullpen quemado. Gratis: MLB Stats API + Open-Meteo.
+    """
+    if not _HAS_CONTEXTO:
+        _send(chat_id, "⚠️ Módulo de contexto no disponible.")
+        return
+    _send(chat_id, "⏳ Obteniendo contexto de juegos de hoy...")
+    try:
+        hoy = datetime.datetime.now(TZ_CT).strftime("%Y-%m-%d")
+        params = urllib.parse.urlencode({"sportId": 1, "date": hoy})
+        with urllib.request.urlopen(
+            f"https://statsapi.mlb.com/api/v1/schedule?{params}", timeout=10
+        ) as _r:
+            sched = json.loads(_r.read())
+
+        fechas = sched.get("dates", [])
+        if not fechas:
+            _send(chat_id, "No hay juegos programados hoy.")
+            return
+
+        juegos = [g for d in fechas for g in d.get("games", [])]
+        if not juegos:
+            _send(chat_id, "No hay juegos programados hoy.")
+            return
+
+        textos = []
+        for g in juegos:
+            gp = g.get("gamePk")
+            if not gp:
+                continue
+            try:
+                txt = _resumen_contexto_fn(gp)
+                textos.append(txt)
+            except Exception as eg:
+                away_t = g.get("teams", {}).get("away", {}).get("team", {}).get("name", "?")
+                home_t = g.get("teams", {}).get("home", {}).get("team", {}).get("name", "?")
+                textos.append(f"⚠️ {away_t} @ {home_t}: error al obtener contexto ({eg})")
+
+        if not textos:
+            _send(chat_id, "No se pudo obtener contexto de ningún juego.")
+            return
+
+        # Enviar en bloques de 8 para no pasarse del límite de Telegram
+        bloque = []
+        for txt in textos:
+            bloque.append(txt)
+            if len(bloque) >= 8:
+                _send(chat_id, "\n\n─────────────\n\n".join(bloque))
+                bloque = []
+        if bloque:
+            _send(chat_id, "\n\n─────────────\n\n".join(bloque))
+
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error obteniendo contexto: {e}")
+
+
 def _cmd_bulk_analysis(chat_id: str, sport_key: str, emoji: str, label: str):
     """Shared logic for /mlb y /mundial — analyzes all games for a sport key."""
     if not _get_odds_fn or not _analyze_fn:
@@ -1727,6 +1792,7 @@ def _dispatch(update: dict):
         "/hoy":      lambda: _cmd_hoy(chat_id),
         "/pitchers": lambda: _cmd_pitchers(chat_id),
         "/patrones": lambda: _cmd_patrones(chat_id),
+        "/contexto": lambda: _cmd_contexto(chat_id),
         "/analizar": lambda: _cmd_analizar(chat_id, args),
         "/mlb":      lambda: _cmd_mlb(chat_id),
         "/mundial":  lambda: _cmd_mundial(chat_id),
