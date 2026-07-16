@@ -1,0 +1,45 @@
+Necesito arreglar un bug en kelly_odds.py: cuando pido /analizar o /picks 
+en Telegram, el bot responde "no hay partidos para hoy" aunque SÍ hay juegos 
+programados (hoy 16 de julio hay Mets @ Phillies 7:10 PM ET, un juego que 
+fue MOVIDO del 17 al 16). Haz SOLO estos cambios quirúrgicos, no reescribas 
+nada más:
+
+1. DIAGNÓSTICO EN LOGS: En la función que obtiene los juegos del día 
+(The Odds API y/o MLB Stats API), agrega logging detallado ANTES de 
+devolver la lista:
+   - Log del status code HTTP de la respuesta
+   - Log de la fecha exacta que se está consultando (y en qué timezone 
+     se calculó)
+   - Log del número de juegos crudos que devolvió la API antes de 
+     aplicar cualquier filtro
+   - Log del número de juegos después de cada filtro aplicado (para ver 
+     en qué filtro se pierden)
+   - Si la respuesta incluye headers de quota de The Odds API 
+     (x-requests-remaining, x-requests-used), loguéalos siempre
+
+2. DISTINGUIR ERROR DE LISTA VACÍA: Si la API devuelve un error HTTP 
+(401, 402, 429, 500, etc.) o falla la conexión, el bot NO debe decir 
+"no hay partidos". Debe responder en Telegram: "⚠️ Error consultando la 
+API de odds: [status/motivo]. Revisa quota o API key." Solo debe decir 
+"no hay partidos para hoy" cuando la API respondió 200 OK con lista 
+genuinamente vacía.
+
+3. FECHA EN HORA DEL ESTE (ET): Asegura que "hoy" se calcule en 
+America/New_York (timezone de MLB), NO en UTC ni en la hora del servidor 
+de Railway. Un juego de 7:10 PM ET es 23:10 UTC y no debe caer en el 
+día siguiente. Usa zoneinfo o pytz, no offsets manuales.
+
+4. VENTANA DE BÚSQUEDA AMPLIA: Al consultar The Odds API, no filtres 
+por fecha exacta de forma estricta. Pide los eventos próximos (la API 
+devuelve upcoming por defecto) y luego filtra localmente los que 
+empiezan entre las 00:00 y 23:59 de HOY en ET. Esto cubre juegos 
+movidos de fecha, doubleheaders y horarios raros.
+
+5. MENSAJE MEJORADO: Cuando genuinamente no haya juegos, el mensaje de 
+Telegram debe incluir la fecha consultada para poder verificar: 
+"📅 No hay partidos para hoy (16/07 ET). Próximos juegos: [fecha del 
+siguiente evento que devolvió la API si existe]".
+
+NO toques la lógica de análisis, modelos, Kelly, ni notificaciones. 
+Solo la obtención/filtrado de juegos y sus mensajes de error. Muéstrame 
+un diff de los cambios antes de aplicarlos.
