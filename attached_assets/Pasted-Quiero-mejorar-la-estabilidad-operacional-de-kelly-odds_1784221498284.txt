@@ -1,0 +1,60 @@
+Quiero mejorar la estabilidad operacional de kelly_odds.py con dos 
+cambios. Hazlos de forma quirúrgica sin tocar la lógica de análisis, 
+modelos, Kelly ni picks.
+
+=== CAMBIO 1: COMANDO /salud ===
+
+Agrega un comando de Telegram /salud que haga un chequeo rápido de cada 
+componente y responda con un reporte así:
+
+🏥 SALUD DE BETBOT — [fecha/hora ET]
+
+📡 The Odds API: ✅ OK | quota: X restantes de Y
+   (haz un request liviano, ej: GET /v4/sports, y lee los headers 
+   x-requests-remaining y x-requests-used. Si da error HTTP, muestra 
+   ❌ con el código)
+⚾ MLB Stats API: ✅/❌ (ping a un endpoint liviano como /api/v1/teams)
+🌤️ Open-Meteo: ✅/❌ (request de prueba a un punto fijo)
+🔔 ntfy: ✅/❌ (intenta POST de prueba al topic my-bets con timeout 
+   de 5 seg; si falla, muestra el error resumido en una línea)
+🤖 Panel de expertos (Anthropic): ✅/❌/💤 
+   (💤 si está deshabilitado por configuración, ❌ si la API da error)
+💾 Datos locales: verifica que existan y sean legibles los archivos de 
+   ELO, logs de picks y bankroll; muestra fecha de última modificación 
+   de cada uno
+📊 Último scan: hora del último scan completado y si terminó limpio o 
+   con errores (guarda esto en una variable global o archivo al final 
+   de cada scan)
+
+Cada check debe tener su propio try/except con timeout corto (5 seg) 
+para que un componente caído no cuelgue el comando completo.
+
+=== CAMBIO 2: DIETA DE QUOTA (The Odds API) ===
+
+El bot quemó 20,000 requests en medio mes. Optimiza el consumo SIN 
+cambiar la lógica de análisis:
+
+a) VENTANA DE SCANS: El scan automático de cada 30 min solo debe correr 
+entre 9:00 AM y 11:59 PM ET. Fuera de esa ventana, log "😴 Fuera de 
+ventana de juegos, scan omitido" y no llamar a la API. Los comandos 
+manuales (/analizar, /hoy, /picks) NO tienen esta restricción.
+
+b) CACHÉ DE ODDS: Implementa un caché en memoria (dict global) para las 
+respuestas de The Odds API con TTL de 20 minutos. Si /hoy, /picks o el 
+scan piden odds y el caché tiene datos frescos (<20 min), usa el caché 
+y loguea "📦 Odds desde caché (edad: X min)". /analizar puede forzar 
+request fresco.
+
+c) PARÁMETROS EFICIENTES: En los requests a The Odds API, verifica que 
+solo se pidan:
+   - regions=us (no todas las regiones)
+   - markets=h2h,totals,spreads (solo los mercados que el bot usa)
+   - Solo los sports activos (baseball_mlb, y soccer solo si hay 
+     mundial activo)
+Si actualmente pide más que eso, recórtalo.
+
+d) CONTADOR DE CONSUMO: Después de cada request real (no caché), loguea 
+los headers x-requests-remaining/used. Si quedan menos de 2,000, manda 
+UNA alerta diaria a Telegram: "⚠️ Quota de Odds API baja: X restantes".
+
+Muéstrame el diff completo antes de aplicar.
