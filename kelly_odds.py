@@ -1046,7 +1046,7 @@ def _mlb_rest(path, params=None):
         return {}
 
 def fetch_mlb_games_today():
-    today = datetime.now(CDT).strftime("%Y-%m-%d")
+    today = datetime.now(ET).strftime("%Y-%m-%d")
     if HAS_STATSAPI:
         try:
             return statsapi.schedule(date=today, sportId=1) or []
@@ -9188,7 +9188,12 @@ def get_odds(sport_key):
     if _odds_api_pause_until and datetime.now(pytz.utc) < _odds_api_pause_until:
         _remaining = int((_odds_api_pause_until - datetime.now(pytz.utc)).total_seconds() / 60)
         print(f"  ⏸️  Odds API pausada por quota — {_remaining} min restantes")
-        return []
+        raise RuntimeError(f"Odds API en pausa — {_remaining} min restantes")
+
+    _et_now   = datetime.now(ET)
+    _et_today = _et_now.strftime("%Y-%m-%d")
+    print(f"  📅 [{sport_key}] get_odds — fecha ET: {_et_today} ({_et_now.strftime('%H:%M ET')})")
+
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
@@ -9196,6 +9201,10 @@ def get_odds(sport_key):
                     "markets": "h2h,totals,alternate_team_totals", "oddsFormat": "decimal"},
             timeout=10,
         )
+        _rem  = r.headers.get("x-requests-remaining", "?")
+        _used = r.headers.get("x-requests-used",      "?")
+        print(f"  📊 [{sport_key}] HTTP {r.status_code} | quota: {_rem} restantes / {_used} usadas")
+
         if r.status_code == 429:
             _odds_api_429_count += 1
             print(f"  ⚠️  Odds API 429 (intento {_odds_api_429_count}/3): {sport_key}")
@@ -9208,23 +9217,51 @@ def get_odds(sport_key):
                     "urgent"
                 )
                 print("  🛑 Odds API circuit breaker activado — 30 min pause")
-            return []
+            raise RuntimeError(f"Odds API 429 — quota agotada ({sport_key})")
+
+        if r.status_code != 200:
+            raise RuntimeError(f"Odds API HTTP {r.status_code} ({sport_key})")
+
         _odds_api_429_count = 0
         _odds_api_pause_until = None
-        remaining = r.headers.get("x-requests-remaining", "")
-        if remaining and int(remaining) < 500:
-            print(f"  ⚠️  Odds API quota baja: {remaining} llamadas restantes este mes")
-            if int(remaining) < 100:
+
+        if _rem != "?" and _rem and int(_rem) < 500:
+            print(f"  ⚠️  Odds API quota baja: {_rem} llamadas restantes este mes")
+            if int(_rem) < 100:
                 ntfy_post(
                     "🚨 Quota API Crítica",
-                    f"Solo {remaining} llamadas restantes en Odds API este mes.\n"
+                    f"Solo {_rem} llamadas restantes en Odds API este mes.\n"
                     "Considera reducir INTERVAL o actualizar el plan.",
                     "urgent"
                 )
-        return r.json() if r.status_code == 200 else []
+
+        raw_games = r.json()
+        print(f"  🔢 [{sport_key}] Juegos crudos de API: {len(raw_games)}")
+
+        # MLB: filtrar localmente por ventana ET del día (cubre juegos movidos de fecha)
+        if "mlb" in sport_key:
+            _et_start = _et_now.replace(hour=0,  minute=0,  second=0,  microsecond=0)
+            _et_end   = _et_now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            filtered = []
+            for _g in raw_games:
+                _ct = _g.get("commence_time", "")
+                try:
+                    _gdt = datetime.fromisoformat(_ct.replace("Z", "+00:00")).astimezone(ET)
+                    if _et_start <= _gdt <= _et_end:
+                        filtered.append(_g)
+                except Exception:
+                    filtered.append(_g)
+            print(f"  🔢 [{sport_key}] Juegos tras filtro ET hoy ({_et_today}): "
+                  f"{len(filtered)} de {len(raw_games)}")
+            return filtered
+
+        return raw_games
+
+    except RuntimeError:
+        raise
     except Exception as _e:
         print(f"  ⚠️  get_odds [{sport_key}]: {_e}")
-        return []
+        raise RuntimeError(f"Error de conexión Odds API ({sport_key}): {_e}")
 
 def load_previous_odds():
     if os.path.exists(PREV_ODDS_FILE):
@@ -15348,9 +15385,13 @@ def run_scan():
 
         try:
             games = get_odds(sport_key)
-            if not games:
-                print(f"  ⚠️  {sport_key} — no data")
-                continue
+        except RuntimeError as _ge:
+            print(f"  ⚠️  {sport_key} — API error: {_ge}")
+            continue
+        if not games:
+            print(f"  ⚠️  {sport_key} — sin juegos hoy (ET)")
+            continue
+        try:
 
             # Override Odds-API times with authoritative MLB Stats API times
             if "mlb" in sport_key.lower():
