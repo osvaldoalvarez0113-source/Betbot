@@ -95,11 +95,17 @@ STADIUM_COORDS = {
 
 
 def _get(url, params=None):
-    """GET con manejo de errores. Devuelve dict o None."""
+    """GET con manejo de errores. Devuelve dict/list o None."""
     try:
         r = requests.get(url, params=params, timeout=TIMEOUT)
-        r.raise_for_status()
-        return r.json()
+        if r.status_code != 200:
+            print(f"[contexto_juego] HTTP {r.status_code} en {url}: {r.text[:200]}")
+            return None
+        data = r.json()
+        if not isinstance(data, (dict, list)):
+            print(f"[contexto_juego] Tipo inesperado ({type(data).__name__}) de {url}: {str(data)[:200]}")
+            return None
+        return data
     except Exception as e:
         print(f"[contexto_juego] Error GET {url}: {e}")
         return None
@@ -334,19 +340,24 @@ def get_bullpen_quemado(team_id):
         })
         try:
             for g in sched["dates"][0]["games"]:
-                box = _get(f"{BASE_MLB}/game/{g['gamePk']}/boxscore")
-                for l in ("home", "away"):
-                    eq = box["teams"][l]
-                    if eq["team"]["id"] != team_id:
+                try:
+                    box = _get(f"{BASE_MLB}/game/{g['gamePk']}/boxscore")
+                    if not isinstance(box, dict) or "teams" not in box:
                         continue
-                    for pid_str, pdata in eq["players"].items():
-                        st = pdata.get("stats", {}).get("pitching", {})
-                        if st and st.get("inningsPitched") not in (None, "0.0"):
-                            pid = pdata["person"]["id"]
-                            # excluir abridor (gamesStarted)
-                            if st.get("gamesStarted", 0) == 0:
-                                uso.setdefault(pid, set()).add(delta)
-                                nombres[pid] = pdata["person"]["fullName"]
+                    for l in ("home", "away"):
+                        eq = box["teams"][l]
+                        if eq["team"]["id"] != team_id:
+                            continue
+                        for pid_str, pdata in eq["players"].items():
+                            st = pdata.get("stats", {}).get("pitching", {})
+                            if st and st.get("inningsPitched") not in (None, "0.0"):
+                                pid = pdata["person"]["id"]
+                                # excluir abridor (gamesStarted)
+                                if st.get("gamesStarted", 0) == 0:
+                                    uso.setdefault(pid, set()).add(delta)
+                                    nombres[pid] = pdata["person"]["fullName"]
+                except Exception:
+                    continue
         except Exception:
             continue
     ayer = [nombres[p] for p, ds in uso.items() if 1 in ds]

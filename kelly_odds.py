@@ -5621,11 +5621,14 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
             try:
                 _h_tid_ctx = _team_id(home)
                 if _h_tid_ctx:
-                    _sched_ctx = requests.get(
+                    _sched_ctx_r = requests.get(
                         "https://statsapi.mlb.com/api/v1/schedule",
                         params={"sportId": 1, "date": game_date, "teamId": _h_tid_ctx},
                         timeout=8,
-                    ).json()
+                    )
+                    _sched_ctx = _sched_ctx_r.json() if _sched_ctx_r.status_code == 200 else {}
+                    if not isinstance(_sched_ctx, dict):
+                        _sched_ctx = {}
                     for _d_ctx in _sched_ctx.get("dates", []):
                         for _g_ctx in _d_ctx.get("games", []):
                             _ctx_game_pk = _g_ctx.get("gamePk")
@@ -15638,7 +15641,8 @@ def run_scan():
             )
             run_modulos_avanzados(_avz_sport)
         except Exception as _mae:
-            print(f"  ⚠️  Módulos avanzados error: {_mae}")
+            import traceback as _tb
+            print(f"  ⚠️  Módulos avanzados error: {_mae}\n{_tb.format_exc()}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
