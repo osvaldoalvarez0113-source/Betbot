@@ -240,11 +240,12 @@ def _cmd_best_picks(chat_id: str, sport_key: str, emoji: str, label: str):
     try:
         games = _get_odds_fn(sport_key) or []
     except Exception as e:
-        _send(chat_id, f"⚠️ Error al obtener partidos: {e}")
+        _send(chat_id, f"⚠️ Error consultando la API de odds: {e}.\nRevisa quota o API key.")
         return
 
     if not games:
-        _send(chat_id, f"Sin partidos de {label} programados para hoy.")
+        _et_hoy = datetime.datetime.now(ZoneInfo("America/New_York")).strftime("%d/%m")
+        _send(chat_id, f"📅 No hay partidos para hoy ({_et_hoy} ET).")
         return
 
     RANKS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
@@ -1139,15 +1140,16 @@ def _cmd_bulk_analysis(chat_id: str, sport_key: str, emoji: str, label: str):
     try:
         games = _get_odds_fn(sport_key) or []
     except Exception as e:
-        _send(chat_id, f"⚠️ Error al obtener partidos: {e}")
+        _send(chat_id, f"⚠️ Error consultando la API de odds: {e}.\nRevisa quota o API key.")
         return
 
     if not games:
+        _et_hoy = datetime.datetime.now(ZoneInfo("America/New_York")).strftime("%d/%m")
         no_msg = {
-            "baseball_mlb":          "⚾ Sin partidos MLB programados para hoy.",
-            "soccer_fifa_world_cup":  "🏆 Sin partidos del Mundial programados para hoy.",
+            "baseball_mlb":         f"⚾ No hay partidos MLB para hoy ({_et_hoy} ET).",
+            "soccer_fifa_world_cup": f"🏆 Sin partidos del Mundial para hoy ({_et_hoy} ET).",
         }
-        _send(chat_id, no_msg.get(sport_key, f"Sin partidos de {label} para hoy."))
+        _send(chat_id, no_msg.get(sport_key, f"📅 No hay partidos para hoy ({_et_hoy} ET)."))
         return
 
     # Sort by commence time, cap at 15
