@@ -78,7 +78,7 @@ PROB_CAP_CEIL        = 0.80   # valor usado después del cap
 PROB_CAP_PARLAY      = 0.68   # max probability for any parlay leg
 PREMIUM_MULT      = 1.5     # Module P: stake multiplier for PREMIUM alerts
 PREMIUM_MAX_STAKE = 100.0   # Module P: max PREMIUM bet size ($)
-INTERVAL  = 1800      # 30-minute main scan — conserva quota mensual
+INTERVAL  = 2700      # 45-minute main scan — conserva quota mensual (~33% ahorro)
 NOTIFY   = "my-bets"
 MODELO_ELITE       = "claude-fable-5"
 UMBRAL_ELITE       = 0.08    # 8% edge mínimo para escalar a elite (ev_pct >= 8.0)
@@ -6002,8 +6002,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
         # ── F5 ML (primera mitad — moneyline primeras 5 entradas) ────────────
         # F5 odds se obtienen por endpoint de evento (no en get_odds principal)
         # F5 se evalúa siempre: puede ser el mejor mercado del partido
-        _has_early_ev = any(c.get("ev_pct", 0) > 3.0 for c in candidates)
-        _f5_data = _fetch_f5_odds(game_id)
+        _has_early_ev = any(c.get("ev_pct", 0) >= 3.0 for c in candidates)
+        _f5_data = _fetch_f5_odds(game_id) if _has_early_ev else {}
         f5_h2h = _extract_f5_h2h_best(_f5_data)
         if f5_h2h:
             _era_diff_f5 = a_era_eff - h_era_eff   # positivo = pitcher local mejor
