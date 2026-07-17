@@ -1,0 +1,26 @@
+Modifica kelly_odds.py para agregar un sistema de escalamiento de modelo en el panel de expertos. Cambios quirúrgicos, no reescribas nada más.
+
+1. CONFIGURACIÓN — Agrega al inicio del archivo:
+   MODELO_PANEL = "claude-haiku-4-5-20251001"  (el actual, no cambiar)
+   MODELO_ELITE = "claude-fable-5"
+   UMBRAL_ELITE = 0.08  (edge de 8%)
+   MAX_ELITE_DIARIO = 3
+   MAX_TOKENS_ELITE = 1500
+
+2. ESCALAMIENTO AUTOMÁTICO — En la función donde el panel de expertos (Marco, Víctor, Elena) llama a la API de Anthropic durante el ESCANEO AUTOMÁTICO: si el edge calculado es >= UMBRAL_ELITE Y el contador de llamadas elite del día es menor a MAX_ELITE_DIARIO, usa MODELO_ELITE con max_tokens=MAX_TOKENS_ELITE. En cualquier otro caso usa MODELO_PANEL como siempre. El contador diario se resetea a medianoche CT y debe persistir en el sistema de backup de GitHub (igual que el ELO) para sobrevivir redeploys de Railway.
+
+3. IMPORTANTE — El comando /analizar NO escala a elite nunca. Siempre usa MODELO_PANEL, sin importar el edge.
+
+4. NUEVO COMANDO /elite — Crea el comando de Telegram /elite [equipo o juego] que fuerza un análisis con MODELO_ELITE para ese juego específico, ignorando umbral y contador diario. Es la vía manual para cuando el usuario decida pagar el análisis profundo.
+
+5. PROMPT ELITE — Cuando se use MODELO_ELITE, agrega al prompt del panel: "Este es un pick de alto edge. Analiza con profundidad extra: estado del bullpen, fatiga por viaje/serie, getaway day, movimiento de línea (¿sharp o público?), y clima/parque. Sé especialmente escéptico: busca razones por las que el edge podría ser falso."
+
+6. NOTIFICACIONES — Cuando el análisis haya sido con MODELO_ELITE, agrega la etiqueta "🧠 ANÁLISIS ELITE" al inicio del mensaje de ntfy/Telegram.
+
+7. TRACKING CLV POR MODELO — En el registro de CLV histórico, agrega un campo "modelo" a cada pick registrado ("haiku" o "fable"). Modifica el comando /clv para mostrar, además de lo actual, un desglose comparativo: CLV promedio de picks analizados con haiku vs. picks analizados con fable, con el conteo de picks de cada uno. Este dato debe persistir en el backup de GitHub.
+
+8. LOGS — Registra en el log qué modelo se usó en cada análisis y el contador elite del día.
+
+9. MANEJO DE ERRORES — Si la llamada a MODELO_ELITE falla por cualquier razón (créditos, timeout, rate limit), haz fallback automático a MODELO_PANEL, márcalo en el log, y NO incrementes el contador elite diario. Nunca dejes un análisis sin completar por fallo del modelo elite.
+
+No toques el edge filter de alertas, el flujo de escaneo, los timestamps, ni ninguna otra función existente.
