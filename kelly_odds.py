@@ -9327,7 +9327,7 @@ def get_odds(sport_key, force_fresh=False):
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": API_KEY, "regions": "us,eu",
+            params={"apiKey": API_KEY, "regions": "us",
                     "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
@@ -9348,6 +9348,20 @@ def get_odds(sport_key, force_fresh=False):
                 )
                 print("  🛑 Odds API circuit breaker activado — 30 min pause")
             raise RuntimeError(f"Odds API 429 — quota agotada ({sport_key})")
+
+        if r.status_code == 401 and _rem == "0":
+            _odds_api_429_count += 1
+            print(f"  ⚠️  Odds API 401 con quota=0 — cuota mensual agotada ({sport_key})")
+            if _odds_api_429_count >= 3:
+                _odds_api_pause_until = datetime.now(pytz.utc) + timedelta(minutes=30)
+                ntfy_post(
+                    "🚨 Odds API: Cuota Mensual Agotada",
+                    "401 con x-requests-remaining=0 — pausando llamadas 30 minutos.\n"
+                    "El bot sigue corriendo sin nuevas odds hasta reactivarse.",
+                    "urgent"
+                )
+                print("  🛑 Odds API circuit breaker activado (401+quota=0) — 30 min pause")
+            raise RuntimeError(f"Odds API 401 quota=0 — cuota agotada ({sport_key})")
 
         if r.status_code != 200:
             raise RuntimeError(f"Odds API HTTP {r.status_code} ({sport_key})")
