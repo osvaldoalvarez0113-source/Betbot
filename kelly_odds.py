@@ -80,6 +80,11 @@ PREMIUM_MULT      = 1.5     # Module P: stake multiplier for PREMIUM alerts
 PREMIUM_MAX_STAKE = 100.0   # Module P: max PREMIUM bet size ($)
 INTERVAL  = 1800      # 30-minute main scan — conserva quota mensual
 NOTIFY   = "my-bets"
+MODELO_ELITE       = "claude-fable-5"
+UMBRAL_ELITE       = 0.08    # 8% edge mínimo para escalar a elite (ev_pct >= 8.0)
+MAX_ELITE_DIARIO   = 3       # máx análisis elite automáticos por día (scan auto)
+MAX_TOKENS_ELITE   = 1500    # max_tokens para llamadas elite
+ELITE_COUNTER_FILE = "elite_counter.json"
 LOG_CSV  = True
 
 CDT            = pytz.timezone("America/Chicago")
@@ -422,6 +427,8 @@ _last_news_seen:  set  = set()    # 1C: news IDs already alerted this session
 _last_news_date:  date = date(2000, 1, 1)  # 1C: reset seen set daily
 _steam_game_ids:  set   = set()  # game_ids with confirmed steam (current scan)
 _ntfy_last_confirm_id: str = ""  # last ntfy message ID processed for confirmations
+_elite_count_today:    int  = 0   # análisis elite automáticos usados hoy
+_elite_count_date:     str  = ""  # fecha CDT del contador (reset a medianoche)
 _daily_exposure:      float = 0.0            # total stake queued today ($)
 _daily_exposure_date: "date" = date(2000, 1, 1)  # reset tracking when date changes
 _tg_broadcast_fn = None  # set by telegram_bot.iniciar_telegram; broadcasts to Telegram
@@ -4600,7 +4607,8 @@ def analyze_totals(games, sport_key):
         if edge_val >= 1.2:
             if is_mlb:
                 _tc_data.update(_enrich_panel_data(_tc_data, g))
-            _tc_claude = panel_expertos(_tc_data, _tc_sport)
+            _tc_claude = panel_expertos(_tc_data, _tc_sport,
+                                          _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
             if _tc_claude:
                 _tcc  = _tc_claude.get("confianza", "N/D")
                 _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
@@ -4757,7 +4765,8 @@ def analyze_team_totals(games, sport_key):
             _tc_claude = None
             if edge_val >= 1.0:
                 _tc_data.update(_enrich_panel_data(_tc_data, g))
-                _tc_claude = panel_expertos(_tc_data, "MLB")
+                _tc_claude = panel_expertos(_tc_data, "MLB",
+                                              _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
                 if _tc_claude and (
                         not _tc_claude.get("apostar", True)
                         or _tc_claude.get("confianza") == "BAJA"):
@@ -5274,7 +5283,8 @@ PROB_MIN_ML      = 0.50  # EV es el filtro real — elimina sesgo contra ML
 PROB_MIN_PREMIUM = 0.70  # Premium alerts — 70% minimum
 _RANK_EMOJIS = ["1️⃣", "2️⃣", "3️⃣"]
 
-def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False):
+def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
+                      _no_elite_panel: bool = False, _force_elite_panel: bool = False):
     """
     Full per-game analysis across ML, Totals, and Spread/Handicap.
     Returns result dict or None (if no bet reaches EV_MIN_PCT).
@@ -6895,7 +6905,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                     _aev_data.update(_enrich_panel_data(_aev_data, game))
                 except Exception:
                     pass
-            _aev_panel = panel_expertos(_aev_data, _aev_sport)
+            _aev_panel = panel_expertos(_aev_data, _aev_sport,
+                                         _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
             if _aev_panel:
                 _cc = _aev_panel.get("confianza", "N/D")
                 _ap = "✅" if _aev_panel.get("apostar", True) else "❌"
@@ -6960,7 +6971,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                     _hev_data.update(_enrich_panel_data(_hev_data, game))
                 except Exception:
                     pass
-            _hev_panel = panel_expertos(_hev_data, _hev_sport)
+            _hev_panel = panel_expertos(_hev_data, _hev_sport,
+                                         _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
             if _hev_panel:
                 _cc = _hev_panel.get("confianza", "N/D")
                 _ap = "✅" if _hev_panel.get("apostar", True) else "❌"
@@ -7047,7 +7059,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
     else:
         if is_mlb:
             _claude_data_g.update(_enrich_panel_data(_claude_data_g, game))
-        _claude_result_g = panel_expertos(_claude_data_g, _claude_sport_g)
+        _claude_result_g = panel_expertos(_claude_data_g, _claude_sport_g,
+                                          _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
 
         if force_panel and len(top3) > 1:
             _extra_candidates_results = []
@@ -7063,7 +7076,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False)
                 }
                 _extra_data.update({k: v for k, v in context.items()
                                     if isinstance(v, (str, int, float, bool, type(None)))})
-                _extra_panel = panel_expertos(_extra_data, _claude_sport_g)
+                _extra_panel = panel_expertos(_extra_data, _claude_sport_g,
+                                             _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
                 _extra_candidates_results.append({
                     "label": _extra_c["label"],
                     "ev_pct": _extra_c["ev_pct"],
@@ -8373,6 +8387,7 @@ def save_pending_bet(bet):
         'alert_odds': bet.get('odds', ''),
         'alert_time': datetime.now(CDT).strftime('%Y-%m-%d %H:%M CDT'),
         'game_time':  bet.get('time', ''),
+        'modelo':     bet.get('_modelo_usado', 'haiku'),
     })
     try:
         with open(PENDING_BETS_FILE, 'w') as f:
@@ -8553,6 +8568,110 @@ def _github_push_daily_exposure() -> None:
         print(f"  ☁️  Exposición diaria sincronizada a GitHub: ${_daily_exposure:.2f}")
     except Exception as e:
         print(f"  ⚠️  GitHub daily_exposure push error: {e}")
+
+
+def _github_pull_elite_counter() -> "dict | None":
+    if not GITHUB_TOKEN:
+        return None
+    try:
+        import urllib.request as _ur, base64 as _b64
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{ELITE_COUNTER_FILE}"
+        req = _ur.Request(url, headers={
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+        })
+        with _ur.urlopen(req, timeout=8) as r:
+            info = json.loads(r.read())
+        return json.loads(_b64.b64decode(info["content"]).decode())
+    except Exception:
+        return None
+
+
+def _github_push_elite_counter() -> None:
+    global _elite_count_today, _elite_count_date
+    if not GITHUB_TOKEN:
+        return
+    try:
+        import urllib.request as _ur, base64 as _b64
+        payload = json.dumps({"date": _elite_count_date, "count": _elite_count_today}).encode()
+        api  = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{ELITE_COUNTER_FILE}"
+        hdrs = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept":        "application/vnd.github.v3+json",
+            "Content-Type":  "application/json",
+        }
+        sha = None
+        try:
+            r0 = _ur.Request(api, headers=hdrs)
+            with _ur.urlopen(r0, timeout=8) as r:
+                sha = json.loads(r.read()).get("sha")
+        except Exception:
+            pass
+        body = {
+            "message": f"bot: elite counter {_elite_count_date} count={_elite_count_today}",
+            "content": _b64.b64encode(payload).decode(),
+        }
+        if sha:
+            body["sha"] = sha
+        req = _ur.Request(api, data=json.dumps(body).encode(), headers=hdrs, method="PUT")
+        with _ur.urlopen(req, timeout=10):
+            pass
+        print(f"  ☁️  Elite counter sincronizado: {_elite_count_today}/{MAX_ELITE_DIARIO} hoy")
+    except Exception as e:
+        print(f"  ⚠️  GitHub elite counter push error: {e}")
+
+
+def _save_elite_counter() -> None:
+    global _elite_count_today, _elite_count_date
+    try:
+        with open(ELITE_COUNTER_FILE, "w") as f:
+            json.dump({"date": _elite_count_date, "count": _elite_count_today}, f)
+    except Exception:
+        pass
+    try:
+        _github_push_elite_counter()
+    except Exception:
+        pass
+
+
+def _load_elite_counter() -> None:
+    global _elite_count_today, _elite_count_date
+    today = datetime.now(CDT).strftime("%Y-%m-%d")
+
+    def _parse(data: dict):
+        if isinstance(data, dict) and data.get("date") == today:
+            return int(data.get("count", 0))
+        return None
+
+    try:
+        if os.path.exists(ELITE_COUNTER_FILE):
+            with open(ELITE_COUNTER_FILE) as f:
+                result = _parse(json.load(f))
+            if result is not None:
+                _elite_count_today = result
+                _elite_count_date  = today
+                print(f"  💾 Elite counter restaurado (local): {_elite_count_today}/{MAX_ELITE_DIARIO}")
+                return
+    except Exception:
+        pass
+
+    gh_data = _github_pull_elite_counter()
+    if gh_data:
+        result = _parse(gh_data)
+        if result is not None:
+            _elite_count_today = result
+            _elite_count_date  = today
+            print(f"  ☁️  Elite counter restaurado (GitHub): {_elite_count_today}/{MAX_ELITE_DIARIO}")
+            try:
+                with open(ELITE_COUNTER_FILE, "w") as f:
+                    json.dump(gh_data, f)
+            except Exception:
+                pass
+            return
+
+    _elite_count_today = 0
+    _elite_count_date  = today
+    print(f"  💾 Elite counter: 0/{MAX_ELITE_DIARIO} (día nuevo)")
 
 
 def _load_daily_exposure() -> tuple:
@@ -9062,12 +9181,13 @@ def check_closing_lines(current_games_by_sport):
             'closing_odds':  closing_odds if closing_odds else '',
             'clv':           round(clv, 2) if clv is not None else '',
             'clv_pct':       clv_pct if clv_pct is not None else '',
+            'modelo':        bet.get('modelo', 'haiku'),
         })
 
     if clv_rows:
         clv_fields = ['alert_time', 'clv_time', 'match', 'sport', 'market_type',
                       'bet_side', 'book_line', 'alert_odds', 'closing_line',
-                      'closing_odds', 'clv', 'clv_pct']
+                      'closing_odds', 'clv', 'clv_pct', 'modelo']
         exists = os.path.exists(CLV_LOG_FILE)
         with open(CLV_LOG_FILE, 'a', newline='') as f:
             w = csv.DictWriter(f, fieldnames=clv_fields, extrasaction='ignore')
@@ -9185,9 +9305,18 @@ def log_bankroll_entry(sport, match, market_type, stake, result, profit_loss):
 
 _odds_api_429_count:   int               = 0
 _odds_api_pause_until: "datetime | None" = None
+_odds_cache:           dict              = {}    # {sport_key: {"ts": datetime_utc, "data": list}}
+_ODDS_CACHE_TTL                          = 1200  # 20 minutos en segundos
+_quota_low_alert_date: str               = ""    # dedup alerta diaria quota < 2000
 
-def get_odds(sport_key):
-    global _odds_api_429_count, _odds_api_pause_until
+def get_odds(sport_key, force_fresh=False):
+    global _odds_api_429_count, _odds_api_pause_until, _odds_cache, _quota_low_alert_date
+    if not force_fresh and sport_key in _odds_cache:
+        _age = (datetime.now(pytz.utc) - _odds_cache[sport_key]["ts"]).total_seconds()
+        if _age < _ODDS_CACHE_TTL:
+            print(f"  📦 [{sport_key}] Odds desde caché (edad: {int(_age/60)} min)")
+            return _odds_cache[sport_key]["data"]
+
     if _odds_api_pause_until and datetime.now(pytz.utc) < _odds_api_pause_until:
         _remaining = int((_odds_api_pause_until - datetime.now(pytz.utc)).total_seconds() / 60)
         print(f"  ⏸️  Odds API pausada por quota — {_remaining} min restantes")
@@ -9200,8 +9329,8 @@ def get_odds(sport_key):
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": API_KEY, "regions": "us,us2",
-                    "markets": "h2h,totals,alternate_team_totals", "oddsFormat": "decimal"},
+            params={"apiKey": API_KEY, "regions": "us",
+                    "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
         _rem  = r.headers.get("x-requests-remaining", "?")
@@ -9228,15 +9357,29 @@ def get_odds(sport_key):
         _odds_api_429_count = 0
         _odds_api_pause_until = None
 
-        if _rem != "?" and _rem and int(_rem) < 500:
-            print(f"  ⚠️  Odds API quota baja: {_rem} llamadas restantes este mes")
-            if int(_rem) < 100:
-                ntfy_post(
-                    "🚨 Quota API Crítica",
-                    f"Solo {_rem} llamadas restantes en Odds API este mes.\n"
-                    "Considera reducir INTERVAL o actualizar el plan.",
-                    "urgent"
-                )
+        if _rem != "?" and _rem:
+            _rem_i = int(_rem)
+            if _rem_i < 500:
+                print(f"  ⚠️  Odds API quota baja: {_rem} llamadas restantes este mes")
+                if _rem_i < 100:
+                    ntfy_post(
+                        "🚨 Quota API Crítica",
+                        f"Solo {_rem} llamadas restantes en Odds API este mes.\n"
+                        "Considera reducir INTERVAL o actualizar el plan.",
+                        "urgent"
+                    )
+            elif _rem_i < 2000:
+                try:
+                    _today_et = datetime.now(ET).strftime("%Y-%m-%d")
+                    if _quota_low_alert_date != _today_et:
+                        _quota_low_alert_date = _today_et
+                        ntfy_post(
+                            "⚠️ Quota Odds API Baja",
+                            f"Quedan {_rem} requests este mes. Considera reducir el plan.",
+                            "high"
+                        )
+                except Exception:
+                    pass
 
         raw_games = r.json()
         print(f"  🔢 [{sport_key}] Juegos crudos de API: {len(raw_games)}")
@@ -9256,9 +9399,12 @@ def get_odds(sport_key):
                     filtered.append(_g)
             print(f"  🔢 [{sport_key}] Juegos tras filtro ET hoy ({_et_today}): "
                   f"{len(filtered)} de {len(raw_games)}")
-            return filtered
+            _result = filtered
+        else:
+            _result = raw_games
 
-        return raw_games
+        _odds_cache[sport_key] = {"ts": datetime.now(pytz.utc), "data": _result}
+        return _result
 
     except RuntimeError:
         raise
@@ -10736,7 +10882,8 @@ Violar esta regla es motivo de veto automático del pick.
 
 def analyze_with_claude(game_data: dict, sport: str,
                         _extra_system: str = "",
-                        _model: str = "") -> "dict | None":
+                        _model: str = "",
+                        _max_tokens: int = 1024) -> "dict | None":
     """
     Pre-validate game_data, then send to Claude as the final verification layer.
     sport: "MLB" or "SOCCER"
@@ -10815,7 +10962,7 @@ def analyze_with_claude(game_data: dict, sport: str,
         client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=30.0)
         msg    = client.messages.create(
             model=(_model or CLAUDE_MODEL),
-            max_tokens=1024,
+            max_tokens=_max_tokens,
             system=(_CLAUDE_SYSTEM + ("\n\n" + _extra_system if _extra_system else "")),
             messages=[{"role": "user", "content": prompt}],
         )
@@ -11690,7 +11837,8 @@ def detectar_patrones_getaway() -> list:
     return alertas
 
 
-def panel_expertos(game_data: dict, sport: str) -> "dict | None":
+def panel_expertos(game_data: dict, sport: str,
+                   _no_elite: bool = False, _force_elite: bool = False) -> "dict | None":
     """
     Panel of 3 expert personas — each calls analyze_with_claude with its own
     system-prompt persona appended to _CLAUDE_SYSTEM.
@@ -11865,9 +12013,36 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
     factores_neg  = []
     inconsistencias = []
 
+    # ── Selección de modelo: elite vs haiku panel ─────────────────────────────
+    global _elite_count_today, _elite_count_date
+    _ev_pct_g      = float(game_data.get("ev_pct", 0) or 0)
+    _use_elite     = False
+    _elite_mtokens = 1024
+    if _force_elite:
+        _modelo_panel_iter = MODELO_ELITE
+        _use_elite         = True
+        _elite_mtokens     = MAX_TOKENS_ELITE
+    elif (not _no_elite
+          and _ev_pct_g >= UMBRAL_ELITE * 100
+          and _elite_count_today < MAX_ELITE_DIARIO):
+        _modelo_panel_iter = MODELO_ELITE
+        _use_elite         = True
+        _elite_mtokens     = MAX_TOKENS_ELITE
+    else:
+        _modelo_panel_iter = CLAUDE_PANEL_MODEL
+
+    _ELITE_ADDENDUM = (
+        "\n\nEste es un pick de alto edge. Analiza con profundidad extra: estado del "
+        "bullpen, fatiga por viaje/serie, getaway day, movimiento de línea (¿sharp o "
+        "público?), y clima/parque. Sé especialmente escéptico: busca razones por las "
+        "que el edge podría ser falso."
+    ) if _use_elite else ""
+
     for i, (nombre, extra) in enumerate(_EXPERTOS):
-        _panel_model = CLAUDE_PANEL_MODEL  # configurable desde Railway env vars
+        _panel_model = _modelo_panel_iter
         _extra_full  = extra + (_PATRONES_MLB_2026 if _is_mlb else "") + PANEL_DIVERSITY_ADDENDUM
+        if _use_elite:
+            _extra_full += _ELITE_ADDENDUM
         # Elena (index 2): inject situational fatigue flags when present
         if i == 2 and _is_mlb:
             _elena_sit = _build_elena_situational_addendum(game_data)
@@ -11897,7 +12072,7 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
                 )
                 print(f"   🗓️  Elena: {len(_patrones_activos)} patrón(es) de slate inyectado(s)")
         res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
-                                  _model=_panel_model)
+                                  _model=_panel_model, _max_tokens=_elite_mtokens)
         if res is None:
             print(f"   🎓 {nombre}: no disponible")
             resultados.append(None)
@@ -11959,6 +12134,15 @@ def panel_expertos(game_data: dict, sport: str) -> "dict | None":
 
     merged = dict(base)
     merged["apostar"] = consenso
+    merged["_elite_analisis"] = _use_elite
+    merged["_modelo_usado"]   = "fable" if _use_elite else "haiku"
+    if _use_elite and not _force_elite:
+        _elite_count_today += 1
+        _elite_count_date   = datetime.now(CDT).strftime("%Y-%m-%d")
+        print(f"  🧠 Elite auto usado ({_elite_count_today}/{MAX_ELITE_DIARIO} hoy) — EV {_ev_pct_g:.1f}%")
+        _save_elite_counter()
+    elif _force_elite:
+        print(f"  🧠 Elite forzado por /elite — contador sin incrementar")
     merged["confianza"] = (
         "ALTA" if (votos_favor == 3 and not veto_absoluto)
         else ("MEDIA" if consenso else "BAJA")
@@ -14060,7 +14244,7 @@ def send_night_summary():
 
 
 def check_midnight_reset():
-    global alerted_bets, last_reset, _sent_alerts, alerted_game_analysis
+    global alerted_bets, last_reset, _sent_alerts, alerted_game_analysis, _elite_count_today, _elite_count_date
     today = datetime.now(CDT).date()
     if today != last_reset:
         print(f"\n🌙 Midnight reset — sending daily summary...")
@@ -14069,6 +14253,8 @@ def check_midnight_reset():
         alerted_game_analysis = set()   # reset daily to avoid unbounded growth
         _sent_alerts          = {}
         last_reset            = today
+        _elite_count_today    = 0
+        _elite_count_date     = ""
         compute_bankroll_mult()   # Module P: update stake multiplier
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -15688,6 +15874,7 @@ if __name__ == "__main__":
     _load_stats_disk_cache()  # load persistent stats cache (survives Railway restarts)
     _daily_exposure, _daily_exposure_date = _load_daily_exposure()
     print(f"  💼 Exposición diaria restaurada: ${_daily_exposure:.2f} (fecha: {_daily_exposure_date})")
+    _load_elite_counter()
     compute_bankroll_mult()   # Module P: initialize stake multiplier at startup
     _load_performance_adjustments()   # Mejora 1: ajustar umbrales por resultados reales
     try:
@@ -15804,11 +15991,28 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"  ⚠️  Night summary error: {e}")
 
-            print(f"🔍 Scan #{scan}")
-            try:
-                run_scan()
-            except Exception as e:
-                print(f"  ⚠️  Scan error (will retry): {e}")
+            _scan_hr = now_et.hour
+            if not (9 <= _scan_hr <= 23):
+                print(f"  😴 Fuera de ventana de juegos (ET {_scan_hr:02d}h), scan omitido")
+            else:
+                print(f"🔍 Scan #{scan}")
+                _scan_ok  = True
+                _scan_err = ""
+                try:
+                    run_scan()
+                except Exception as e:
+                    _scan_ok  = False
+                    _scan_err = str(e)[:120]
+                    print(f"  ⚠️  Scan error (will retry): {e}")
+                try:
+                    with open("/tmp/betbot_scan_status.json", "w") as _stsf:
+                        json.dump({
+                            "ts":    datetime.now(ET).strftime("%Y-%m-%d %H:%M ET"),
+                            "ok":    _scan_ok,
+                            "error": _scan_err,
+                        }, _stsf)
+                except Exception:
+                    pass
 
             # Module 1: auto-resultados — check confirmed bets after every scan
             try:
