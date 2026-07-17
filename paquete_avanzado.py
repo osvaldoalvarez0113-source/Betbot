@@ -453,7 +453,13 @@ def contrarian_scan(sport: str = "baseball_mlb") -> list:
         print(f"  ⚠️ Contrarian scan error: {e}")
         return []
 
+    if not isinstance(juegos, list):
+        print(f"  ⚠️ contrarian_scan: respuesta inválida de API ({type(juegos).__name__}) — omitido")
+        return []
+
     for juego in juegos:
+        if not isinstance(juego, dict):
+            continue
         equipo_h = juego["home_team"]
         equipo_a = juego["away_team"]
 
