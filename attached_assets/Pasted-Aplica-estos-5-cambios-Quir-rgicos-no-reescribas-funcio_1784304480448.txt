@@ -1,0 +1,32 @@
+Aplica estos 5 cambios. Quirúrgicos, no reescribas funciones completas.
+
+FIX A — Revertir regiones (AHORRO 50% QUOTA):
+En kelly_odds.py, función get_odds(), cambia "regions": "us,eu" de vuelta a "regions": "us". Pinnacle no está disponible en el plan actual, así que us,eu gasta el doble de quota a cambio de nada.
+
+FIX B — Crash en contrarian_scan:
+En paquete_avanzado.py, función contrarian_scan() (~línea 457): la función recibe a veces un string de error de la API en vez de una lista de juegos y crashea con TypeError. Antes del loop que hace equipo_h = juego["home_team"], agrega:
+  if not isinstance(juegos, list):
+      print(f"  ⚠️ contrarian_scan: respuesta inválida ({type(juegos).__name__}) — omitido")
+      return
+Y dentro del loop, como primera línea:
+  if not isinstance(juego, dict):
+      continue
+(Ajusta el nombre de la variable "juegos" al nombre real que usa la función.)
+
+FIX C — Circuit breaker para 401 por quota:
+En kelly_odds.py, get_odds(): cuando status_code == 401 Y el header x-requests-remaining es "0", activa la misma pausa de 30 minutos que ya existe para el 429 (setear _odds_api_pause_until) en vez de solo lanzar el error. Un 401 con quota 0 es quota agotada, no key inválida.
+
+FIX D — Scans cada 45 min (AHORRO ~33% QUOTA):
+En kelly_odds.py, cambia INTERVAL = 1800 a INTERVAL = 2700.
+
+FIX E — F5 y props solo con candidato real (AHORRO QUOTA):
+En kelly_odds.py, analyze_game_full(): la llamada _f5_data = _fetch_f5_odds(game_id) se hace SIEMPRE aunque no haya ningún candidato. Cámbiala para que solo se ejecute si ya existe al menos un candidato con ev_pct >= 3.0:
+  _has_early_ev = any(c.get("ev_pct", 0) >= 3.0 for c in candidates)
+  _f5_data = _fetch_f5_odds(game_id) if _has_early_ev else {}
+(La variable _has_early_ev ya existe más abajo para los K props — muévela ANTES de la llamada a _fetch_f5_odds y reúsala.)
+
+Al final:
+1. Corre python -m py_compile kelly_odds.py y python -m py_compile paquete_avanzado.py
+2. Corre bash run_tests.sh y muéstrame el resultado
+3. Si algún test falla, NO lo arregles — repórtamelo
+4. Haz push a GitHub
