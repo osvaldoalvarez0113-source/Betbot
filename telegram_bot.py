@@ -171,7 +171,9 @@ def _cmd_ayuda(chat_id: str):
         "/clv — Closing Line Value\n\n"
         "📊 <b>Reportes:</b>\n"
         "/reporte — reporte completo W/L/ROI\n"
-        "/estado — salud del bot\n\n"
+        "/estado — salud del bot\n"
+        "/salud — diagnóstico completo de APIs y archivos\n"
+        "/elite <code>Local vs Visitante</code> — análisis elite (claude-fable-5)\n\n"
         "ℹ️ /ayuda — esta lista"
     ))
 
@@ -449,6 +451,7 @@ def _cmd_clv(chat_id: str):
                             "market":  row.get("market_type", ""),
                             "side":    row.get("bet_side", ""),
                             "clv_pct": float(raw),
+                            "modelo":  row.get("modelo", "haiku"),
                         })
                     except Exception:
                         sin_dato += 1
@@ -470,6 +473,18 @@ def _cmd_clv(chat_id: str):
 
         verdict = "💎 Modelo con edge real" if prom > 0 else "⚠️ Apostando en mal momento — revisar timing"
 
+        # Desglose por modelo
+        _haiku = [p for p in with_clv if p["modelo"] != "fable"]
+        _fable = [p for p in with_clv if p["modelo"] == "fable"]
+        _hprom = sum(p["clv_pct"] for p in _haiku) / len(_haiku) if _haiku else 0.0
+        _fprom = sum(p["clv_pct"] for p in _fable) / len(_fable) if _fable else 0.0
+        _model_block = (
+            f"{'─'*32}\n"
+            f"📊 Por modelo:\n"
+            f"  haiku: {len(_haiku)} picks | CLV prom {_hprom:+.2f}%\n"
+            f"  fable: {len(_fable)} picks | CLV prom {_fprom:+.2f}%"
+        )
+
         txt = (
             f"📈 <b>REPORTE CLOSING LINE VALUE (CLV)</b>\n"
             f"{'─'*32}\n"
@@ -485,7 +500,8 @@ def _cmd_clv(chat_id: str):
             f"Peor pick:   {worst['match'][:28]}\n"
             f"             {worst['side']} → CLV {worst['clv_pct']:+.2f}%\n"
             f"{'─'*32}\n"
-            f"→ {verdict}"
+            f"→ {verdict}\n"
+            f"{_model_block}"
         )
     except Exception as e:
         txt = f"⚠️ Error leyendo CLV: {e}"
@@ -513,6 +529,170 @@ def _cmd_estado(chat_id: str):
         f"  Odds API:  {odds_ok}\n\n"
         f"Fecha: {hoy}"
     ))
+
+
+def _cmd_salud(chat_id: str):
+    import os as _os, json as _json
+    _send(chat_id, "🏥 Verificando componentes... (5-10 seg)")
+    _et_now = datetime.datetime.now(ZoneInfo("America/New_York"))
+    lines   = [f"🏥 <b>SALUD DE BETBOT</b> — {_et_now.strftime('%d/%m %H:%M ET')}\n"]
+
+    try:
+        _ok = _os.environ.get("ODDS_API_KEY", "")
+        if not _ok:
+            lines.append("📡 The Odds API: ⚠️ ODDS_API_KEY no configurada")
+        else:
+            _url = f"https://api.the-odds-api.com/v4/sports?apiKey={urllib.parse.quote(_ok)}"
+            with urllib.request.urlopen(urllib.request.Request(_url), timeout=5) as _r:
+                _rem  = _r.headers.get("x-requests-remaining", "?")
+                _used = _r.headers.get("x-requests-used",      "?")
+            lines.append(f"📡 The Odds API: ✅ OK | {_rem} restantes / {_used} usadas")
+    except Exception as _e:
+        lines.append(f"📡 The Odds API: ❌ {str(_e)[:80]}")
+
+    try:
+        with urllib.request.urlopen(
+                "https://statsapi.mlb.com/api/v1/sports/1", timeout=5) as _r:
+            lines.append(f"⚾ MLB Stats API: ✅ OK (HTTP {_r.status})")
+    except Exception as _e:
+        lines.append(f"⚾ MLB Stats API: ❌ {str(_e)[:80]}")
+
+    try:
+        _om = ("https://api.open-meteo.com/v1/forecast"
+               "?latitude=40.7&longitude=-74.0&hourly=temperature_2m&forecast_days=1")
+        with urllib.request.urlopen(_om, timeout=5) as _r:
+            lines.append(f"🌤️ Open-Meteo: ✅ OK (HTTP {_r.status})")
+    except Exception as _e:
+        lines.append(f"🌤️ Open-Meteo: ❌ {str(_e)[:80]}")
+
+    try:
+        _ntfy_t = _os.environ.get("NTFY_TOPIC", "my-bets")
+        _req = urllib.request.Request(
+            f"https://ntfy.sh/{_ntfy_t}",
+            data=b"BetBot /salud ping",
+            headers={"Title": "BetBot health", "Priority": "min", "Tags": "stethoscope"},
+            method="POST",
+        )
+        with urllib.request.urlopen(_req, timeout=5) as _r:
+            lines.append(f"🔔 ntfy ({_ntfy_t}): ✅ OK (HTTP {_r.status})")
+    except Exception as _e:
+        lines.append(f"🔔 ntfy: ❌ {str(_e)[:80]}")
+
+    try:
+        _ak = _os.environ.get("ANTHROPIC_API_KEY", "")
+        if not _ak:
+            lines.append("🤖 Panel expertos (Anthropic): 💤 Sin API key configurada")
+        elif not _analyze_fn:
+            lines.append("🤖 Panel expertos (Anthropic): ⚠️ Módulo no cargado")
+        else:
+            lines.append("🤖 Panel expertos (Anthropic): ✅ Key OK y módulo activo")
+    except Exception as _e:
+        lines.append(f"🤖 Panel expertos: ❌ {str(_e)[:80]}")
+
+    _flist = [("elo_ratings.json", "ELO ratings"),
+              ("bets_log.csv",     "Log de picks"),
+              ("bankroll_log.csv", "Bankroll log")]
+    _flines = []
+    for _fn, _lbl in _flist:
+        try:
+            if _os.path.isfile(_fn):
+                _mt = datetime.datetime.fromtimestamp(_os.path.getmtime(_fn))
+                _flines.append(f"  • {_lbl}: ✅ mod {_mt.strftime('%d/%m %H:%M')}")
+            else:
+                _flines.append(f"  • {_lbl}: ⚠️ No existe")
+        except Exception as _fe:
+            _flines.append(f"  • {_lbl}: ❌ {str(_fe)[:40]}")
+    lines.append("💾 Datos locales:\n" + "\n".join(_flines))
+
+    try:
+        _sf = "/tmp/betbot_scan_status.json"
+        if _os.path.isfile(_sf):
+            with open(_sf) as _f:
+                _ss = _json.load(_f)
+            _icon  = "✅" if _ss.get("ok") else "❌"
+            _extra = f" | {_ss['error'][:60]}" if not _ss.get("ok") and _ss.get("error") else ""
+            lines.append(f"📊 Último scan: {_icon} {_ss.get('ts', '?')}{_extra}")
+        else:
+            lines.append("📊 Último scan: ⚠️ Sin datos (bot recién iniciado)")
+    except Exception as _e:
+        lines.append(f"📊 Último scan: ❌ {str(_e)[:80]}")
+
+    _send(chat_id, "\n".join(lines))
+
+
+def _cmd_elite(chat_id: str, args: str):
+    if not args or " vs " not in args.lower():
+        _send(chat_id,
+              "⚠️ Formato: /elite <code>Equipo Local vs Equipo Visitante</code>\n"
+              "Ejemplo: /elite Cubs vs Cardinals\n\n"
+              "🧠 Fuerza análisis con modelo elite (sin límite de edge ni contador diario).")
+        return
+
+    if not _get_odds_fn or not _analyze_fn:
+        _send(chat_id, "⚠️ Módulo de análisis no disponible.")
+        return
+
+    partes   = args.split(" vs ", 1)
+    home_raw = partes[0].strip()
+    away_raw = partes[1].strip()
+    home_q   = _translate_team_name(home_raw).lower()
+    away_q   = _translate_team_name(away_raw).lower()
+
+    _send(chat_id, f"🧠 Análisis elite: buscando <b>{home_raw} vs {away_raw}</b>…")
+
+    game_found  = None
+    sport_found = "baseball_mlb"
+    for sport in ["baseball_mlb", "soccer_fifa_world_cup",
+                  "soccer_epl", "soccer_uefa_champs_league",
+                  "soccer_usa_mls", "soccer_spain_la_liga"]:
+        try:
+            games = _get_odds_fn(sport, force_fresh=True)
+            if not games:
+                continue
+            for g in games:
+                gh = g.get("home_team", "")
+                ga = g.get("away_team", "")
+                if ((_team_words_match(home_q, gh) and _team_words_match(away_q, ga)) or
+                        (_team_words_match(away_q, gh) and _team_words_match(home_q, ga))):
+                    game_found  = g
+                    sport_found = sport
+                    break
+            if game_found:
+                break
+        except Exception as _gse:
+            print(f"  [elite] excepción buscando en {sport}: {_gse}")
+            continue
+
+    if not game_found:
+        _send(chat_id,
+              f"❌ No encontré el partido <b>{partes[0].strip()} vs {partes[1].strip()}</b>.")
+        return
+
+    try:
+        result = _analyze_fn(game_found, sport_found, {}, force_panel=True,
+                             _force_elite_panel=True)
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error en el análisis elite: {e}")
+        return
+
+    if not result:
+        _send(chat_id, "⚠️ No se pudo obtener análisis elite para este partido.")
+        return
+
+    if _build_text_fn:
+        try:
+            parts = _build_text_fn(result)
+            for part in parts:
+                if part and part.strip():
+                    _send(chat_id, part)
+        except Exception as _bte:
+            _send(chat_id, f"⚠️ Error al formatear análisis elite: {_bte}")
+    else:
+        cands = result.get("candidates", [])
+        best  = cands[0] if cands else {}
+        pick  = result.get("best_label", best.get("label", "?"))
+        ev    = result.get("best_ev",   best.get("ev_pct", 0))
+        _send(chat_id, f"🧠 ANÁLISIS ELITE\n{home_raw} vs {away_raw}\nPick: {pick} | EV: +{ev:.1f}%")
 
 
 def _team_words_match(query: str, team: str) -> bool:
@@ -630,7 +810,8 @@ def _cmd_analizar(chat_id: str, args: str):
         return
 
     try:
-        result = _analyze_fn(game_found, sport_found, {}, force_panel=True)
+        result = _analyze_fn(game_found, sport_found, {}, force_panel=True,
+                             _no_elite_panel=True)
     except Exception as e:
         _send(chat_id, f"⚠️ Error en el análisis: {e}")
         return
@@ -1791,6 +1972,8 @@ def _dispatch(update: dict):
         "/reporte":  lambda: _cmd_reporte(chat_id),
         "/clv":      lambda: _cmd_clv(chat_id),
         "/estado":   lambda: _cmd_estado(chat_id),
+        "/salud":    lambda: _cmd_salud(chat_id),
+        "/elite":    lambda: _cmd_elite(chat_id, args),
         "/hoy":      lambda: _cmd_hoy(chat_id),
         "/pitchers": lambda: _cmd_pitchers(chat_id),
         "/patrones": lambda: _cmd_patrones(chat_id),
