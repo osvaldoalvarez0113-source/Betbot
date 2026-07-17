@@ -1,0 +1,73 @@
+Crea una suite de tests para Betbot en un archivo nuevo tests/test_kelly_odds.py usando pytest. NO modifiques kelly_odds.py — solo crea los tests. Reglas estrictas:
+
+1. Los tests NO deben hacer llamadas de red. Si una función importada dispara requests al importarse, usa monkeypatch o mock.
+2. Antes de importar kelly_odds, setea variables de entorno vacías: ODDS_API_KEY="", ANTHROPIC_API_KEY="", GITHUB_TOKEN="", OPENWEATHER_API_KEY="".
+3. Instala pytest con: pip install pytest
+4. Crea también un archivo conftest.py en tests/ que agregue el directorio raíz al sys.path.
+
+TESTS REQUERIDOS (cada uno con casos normales Y casos límite):
+
+A) kelly_stake(prob, fair_odd):
+- prob=0.60, odds=2.00 → stake > 0, edge positivo
+- prob=0.40, odds=2.00 → stake=0 (sin valor, edge negativo)
+- odds=1.0 y odds=0.5 → stake=0, no crashea (b <= 0)
+- prob=0.95 → verifica que el cap PROB_CAP se aplicó (stake calculado con 0.80, no 0.95)
+- Verifica que el stake NUNCA excede BANKROLL * MAX_SINGLE_BET_PCT
+- Verifica que si Kelly sugiere menos de MIN_BET, stake=0 (no se infla al mínimo)
+
+B) remove_vig(odds_list):
+- [1.91, 1.91] → probabilidades suman 1.0 (tolerancia 0.001) y cada una ≈ 0.50
+- [1.50, 2.80] → suman 1.0, la primera > la segunda
+- Lista de 3 (soccer con empate) → suman 1.0
+
+C) poisson_ou_prob(expected_total, book_line, bet_over):
+- p_over + p_under ≈ 1.0 para línea .5 (ej. total=8.5, línea=8.5)
+- expected=10.0, línea=8.5, over=True → prob > 0.5
+- expected=7.0, línea=8.5, over=True → prob < 0.5
+- Línea entera (9.0): verifica manejo de push, resultado entre 0.01 y 0.99
+- expected_total=0 → no crashea, retorna >= 0.01
+
+D) poisson_match_probs(avg_h, avg_a):
+- Suma win+draw+loss ≈ 1.0
+- avg_h=2.5, avg_a=0.8 → p_win > p_loss
+- avg iguales → p_win ≈ p_loss (tolerancia 0.02)
+
+E) _check_arb2:
+- odds_a=2.10, odds_b=2.10 → arb detectado, profit_pct ≈ 4.76%, y verifica que stake_a + stake_b <= 110 (el cap de $100 + margen)
+- odds_a=1.91, odds_b=1.91 → None (margin >= 1)
+- Arb con profit > 8% → None (filtro de error de línea)
+
+F) _check_arb3:
+- Tres odds que suman margin < 1 → arb con 3 stakes, todas > 0, suma <= 110
+- Odds normales de soccer (2.5/3.3/2.9) → None
+
+G) _cap_prob:
+- 0.90 single → retorna PROB_CAP_CEIL (0.80)
+- 0.70 single → retorna 0.70 sin cambios
+- 0.75 parlay leg → retorna PROB_CAP_PARLAY (0.68)
+
+H) pythagorean_win_prob:
+- rs=5.0, ra=4.0 → > 0.5
+- rs=None → 0.5 exacto
+- rs=0, ra=0 → 0.5 exacto
+
+I) elo_win_prob:
+- Equipos con mismo ELO → ≈ 0.50
+- ELO 2000 vs 1400 → > 0.85
+
+J) _is_us_book:
+- "Bovada" → True, "FanDuel" → True
+- "Pinnacle" → False, "PointsBet AU" → False, "bet365" → False
+
+K) _game_already_started:
+- Timestamp de hace 10 min → True
+- Timestamp de dentro de 2 horas → False
+- String vacío o basura → False (no crashea)
+
+L) Cola de confirmación (usar tmp_path de pytest y monkeypatch sobre CONFIRM_FILE):
+- queue_for_confirmation con 1 pick válido → archivo creado, stake=0.0, suggested_stake=valor original, _status="pending"
+- Pick que excede el límite diario (stake > BANKROLL*0.15) → NO se encola
+- Monkeypatchea ntfy_post para que no haga requests
+
+Al final crea un archivo run_tests.sh con: python -m pytest tests/ -v
+Corre los tests y muéstrame el resultado. Si algún test FALLA, NO "arregles" el test para que pase — repórtame qué función de kelly_odds.py tiene el comportamiento inesperado, porque eso es un bug real que quiero conocer.
