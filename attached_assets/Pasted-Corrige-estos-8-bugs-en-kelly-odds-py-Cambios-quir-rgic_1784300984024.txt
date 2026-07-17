@@ -1,0 +1,61 @@
+Corrige estos 8 bugs en kelly_odds.py. Cambios quirúrgicos, NO reescribas funciones completas.
+
+FIX 1 — NameError en panel de totals (CRÍTICO):
+En analyze_totals() y analyze_team_totals(), las llamadas a panel_expertos usan variables inexistentes _no_elite_panel y _force_elite_panel. Reemplaza en AMBAS funciones:
+  panel_expertos(_tc_data, _tc_sport, _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
+por:
+  panel_expertos(_tc_data, _tc_sport)
+(y en analyze_team_totals: panel_expertos(_tc_data, "MLB"))
+
+FIX 2 — Conectar cola de confirmación (CRÍTICO):
+En run_scan(), dentro del bloque por deporte, justo DESPUÉS de las llamadas a notify_bets(bets, _scan_alerted) y notify_totals(total_bets, _scan_alerted), agrega:
+  try:
+      _q_picks = [b for b in (bets + total_bets) if b.get("stake", 0) >= MIN_STAKE]
+      if _q_picks:
+          queue_for_confirmation(_q_picks, sport_key)
+  except Exception as _qe:
+      print(f"  ⚠️  queue_for_confirmation error: {_qe}")
+
+FIX 3 — Activar ELO (CRÍTICO):
+En check_results(), después de resolver cada score (donde se calcula home_won), agrega actualización de ELO una sola vez por juego usando un set de dedup:
+  - Al inicio de check_results crea: _elo_updated = set()
+  - Después de encontrar el score y antes del bloque de result, agrega:
+      _gk = f"{score['home']}|{score['away']}|{score['home_score']}-{score['away_score']}"
+      if _gk not in _elo_updated:
+          _elo_updated.add(_gk)
+          try:
+              if score["home_score"] != score["away_score"]:
+                  _w = score["home"] if score["home_score"] > score["away_score"] else score["away"]
+                  _l = score["away"] if _w == score["home"] else score["home"]
+                  update_elo(_w, _l)
+              else:
+                  update_elo(score["home"], score["away"], draw=True)
+          except Exception as _ee:
+              print(f"  ⚠️  update_elo error: {_ee}")
+
+FIX 4 — Stake de arbitraje limitado (CRÍTICO):
+En _check_arb2 y _check_arb3, las stakes usan BANKROLL completo. Agrega al inicio de ambas funciones:
+  arb_budget = min(BANKROLL * 0.10, 100.0)
+y reemplaza TODAS las ocurrencias de "BANKROLL / (odds" por "arb_budget / (odds" y "BANKROLL * (1.0 - margin)" por "arb_budget * (1.0 - margin)" dentro de esas dos funciones únicamente.
+
+FIX 5 — Habilitar Pinnacle en producción:
+En get_odds(), cambia "regions": "us" por "regions": "us,eu". Esto activa toda la calibración Pinnacle que hoy está muerta. NOTA: consume más quota por llamada — el caché de 20 min ya lo mitiga.
+
+FIX 6 — Liberar exposición al cancelar:
+En _cancel_next_bet(), después de _save_confirm_queue(queue), agrega:
+  global _daily_exposure
+  _daily_exposure = max(0.0, _daily_exposure - float(matched.get("suggested_stake", 0) or 0))
+  _save_daily_exposure()
+
+FIX 7 — Eliminar floor anti-Kelly:
+En kelly_stake(), reemplaza el bloque completo "if 0 < raw < MIN_BET:" (con su if k > 0 interno) por:
+  if 0 < raw < MIN_BET:
+      raw = 0   # Kelly sugiere menos del mínimo → no apostar (inflar stakes es -EV)
+
+FIX 8 — Poll de ntfy correcto:
+En _poll_ntfy_confirmations(), cambia:
+  url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=2100"
+por:
+  url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=35m"
+
+Verifica con python -m py_compile kelly_odds.py que compile sin errores. No toques nada más.

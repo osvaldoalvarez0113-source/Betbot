@@ -581,14 +581,9 @@ def kelly_stake(prob, fair_odd, is_parlay_leg: bool = False):
         raw        = max_stake
         stake_warn = f"⚠️ Stake reducido al {int(MAX_SINGLE_BET_PCT*100)}% máximo por reglas de bankroll"
         print(f"  ⚠️  STAKE CAP applied: ${raw:.2f} (multipliers pushed above {MAX_SINGLE_BET_PCT*100:.0f}%)")
-    # Below minimum with positive edge → floor at MIN_BET instead of zeroing silently
+    # Below minimum → no apostar (inflar stakes es -EV)
     if 0 < raw < MIN_BET:
-        if k > 0:
-            print(f"  ℹ️  STAKE FLOOR: Kelly sugería ${raw:.2f} → mínimo ${MIN_BET:.2f}")
-            raw        = MIN_BET
-            stake_warn = stake_warn or f"ℹ️ Stake mínimo aplicado (Kelly: ${raw:.2f})"
-        else:
-            raw = 0
+        raw = 0
     stake = round(raw, 2)
     return {
         "stake":      stake,
@@ -1802,14 +1797,15 @@ def _check_arb2(home, away, team_a, odds_a, book_a, team_b, odds_b, book_b):
     2-way arb check (MLB, NHL, etc. — no draw).
     Returns arb dict or None.
     """
+    arb_budget = min(BANKROLL * 0.10, 100.0)
     margin = (1.0 / odds_a) + (1.0 / odds_b)
     if margin >= 1.0:
         return None
     profit_pct = (1.0 - margin) / margin * 100
     if profit_pct < ARB_MIN_PROFIT or profit_pct > 8.0:
         return None
-    stake_a = BANKROLL / (odds_a * margin)
-    stake_b = BANKROLL / (odds_b * margin)
+    stake_a = arb_budget / (odds_a * margin)
+    stake_b = arb_budget / (odds_b * margin)
     return {
         "match":      f"{home} vs {away}",
         "legs":       2,
@@ -1817,7 +1813,7 @@ def _check_arb2(home, away, team_a, odds_a, book_a, team_b, odds_b, book_b):
         "stake_a":    round(stake_a, 2),
         "team_b":     team_b, "odds_b": odds_b, "book_b": book_b,
         "stake_b":    round(stake_b, 2),
-        "profit":     round(BANKROLL * (1.0 - margin) / margin, 2),
+        "profit":     round(arb_budget * (1.0 - margin) / margin, 2),
         "profit_pct": round(profit_pct, 2),
     }
 
@@ -1830,15 +1826,16 @@ def _check_arb3(home, away,
     ALL THREE legs must be placed; a draw kills any 2-way soccer arb.
     Returns arb dict or None.
     """
+    arb_budget = min(BANKROLL * 0.10, 100.0)
     margin = (1.0 / odds_h) + (1.0 / odds_d) + (1.0 / odds_a)
     if margin >= 1.0:
         return None
     profit_pct = (1.0 - margin) / margin * 100
     if profit_pct < ARB_MIN_PROFIT or profit_pct > 8.0:
         return None
-    stake_h = BANKROLL / (odds_h * margin)
-    stake_d = BANKROLL / (odds_d * margin)
-    stake_a = BANKROLL / (odds_a * margin)
+    stake_h = arb_budget / (odds_h * margin)
+    stake_d = arb_budget / (odds_d * margin)
+    stake_a = arb_budget / (odds_a * margin)
     return {
         "match":      f"{home} vs {away}",
         "legs":       3,
@@ -1848,7 +1845,7 @@ def _check_arb3(home, away,
         "stake_b":    round(stake_d, 2),
         "team_c":     team_a, "odds_c": odds_a, "book_c": book_a,
         "stake_c":    round(stake_a, 2),
-        "profit":     round(BANKROLL * (1.0 - margin) / margin, 2),
+        "profit":     round(arb_budget * (1.0 - margin) / margin, 2),
         "profit_pct": round(profit_pct, 2),
     }
 
@@ -4607,8 +4604,7 @@ def analyze_totals(games, sport_key):
         if edge_val >= 1.2:
             if is_mlb:
                 _tc_data.update(_enrich_panel_data(_tc_data, g))
-            _tc_claude = panel_expertos(_tc_data, _tc_sport,
-                                          _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
+            _tc_claude = panel_expertos(_tc_data, _tc_sport)
             if _tc_claude:
                 _tcc  = _tc_claude.get("confianza", "N/D")
                 _tcap = "✅" if _tc_claude.get("apostar", True) else "❌"
@@ -4765,8 +4761,7 @@ def analyze_team_totals(games, sport_key):
             _tc_claude = None
             if edge_val >= 1.0:
                 _tc_data.update(_enrich_panel_data(_tc_data, g))
-                _tc_claude = panel_expertos(_tc_data, "MLB",
-                                              _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
+                _tc_claude = panel_expertos(_tc_data, "MLB")
                 if _tc_claude and (
                         not _tc_claude.get("apostar", True)
                         or _tc_claude.get("confianza") == "BAJA"):
@@ -8931,6 +8926,9 @@ def _cancel_next_bet(match_hint: str = "") -> bool:
 
     queue = [e for e in queue if e is not matched]
     _save_confirm_queue(queue)
+    global _daily_exposure
+    _daily_exposure = max(0.0, _daily_exposure - float(matched.get("suggested_stake", 0) or 0))
+    _save_daily_exposure()
 
     match_disp = matched.get("match", "?")
     team_disp  = matched.get("team", "?")
@@ -8992,7 +8990,7 @@ def _poll_ntfy_confirmations() -> None:
     if not NOTIFY:
         return
     try:
-        url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=2100"
+        url = f"https://ntfy.sh/{NOTIFY}/json?poll=1&since=35m"
         r   = requests.get(url, timeout=8)
         if r.status_code != 200:
             return
@@ -9329,7 +9327,7 @@ def get_odds(sport_key, force_fresh=False):
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": API_KEY, "regions": "us",
+            params={"apiKey": API_KEY, "regions": "us,eu",
                     "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
@@ -9719,6 +9717,7 @@ def check_results():
         checked  = _load_results_checked()
         scores   = _fetch_mlb_scores_today() + _fetch_soccer_scores()
         resolved: dict = {}   # bkey → {result, profit_loss}
+        _elo_updated: set = set()
 
         for bet in pending:
             match  = bet.get("match", "")
@@ -9743,6 +9742,19 @@ def check_results():
             result      = None
             profit_loss = 0.0
             home_won    = score["home_score"] > score["away_score"]
+
+            _gk = f"{score['home']}|{score['away']}|{score['home_score']}-{score['away_score']}"
+            if _gk not in _elo_updated:
+                _elo_updated.add(_gk)
+                try:
+                    if score["home_score"] != score["away_score"]:
+                        _w = score["home"] if score["home_score"] > score["away_score"] else score["away"]
+                        _l = score["away"] if _w == score["home"] else score["home"]
+                        update_elo(_w, _l)
+                    else:
+                        update_elo(score["home"], score["away"], draw=True)
+                except Exception as _ee:
+                    print(f"  ⚠️  update_elo error: {_ee}")
 
             if mtype in ("h2h", "moneyline", ""):
                 is_home = (score["home"].lower() in team.lower()
@@ -15763,6 +15775,12 @@ def run_scan():
                 notify_bets(bets, _scan_alerted)
             if total_bets:
                 notify_totals(total_bets, _scan_alerted)
+            try:
+                _q_picks = [b for b in (bets + total_bets) if b.get("stake", 0) >= MIN_STAKE]
+                if _q_picks:
+                    queue_for_confirmation(_q_picks, sport_key)
+            except Exception as _qe:
+                print(f"  ⚠️  queue_for_confirmation error: {_qe}")
 
         except Exception as e:
             print(f"  ⚠️  {sport_key} error (skipping): {e}")
