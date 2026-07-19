@@ -1,0 +1,72 @@
+{
+  "abridor": {
+    "Gerrit Cole": {
+      "era": 3.63,
+      "k_bb": 10.5,
+      "innings": 17.1,
+      "flag": "NORMAL",
+      "rango": "2026-06-28 \u2192 2026-07-19 (~3 salidas)",
+      "_ts": 1784439201.2998307
+    }
+  },
+  "splits": {
+    "NYY": {
+      "home_w": 28,
+      "home_l": 19,
+      "away_w": 26,
+      "away_l": 24,
+      "day_w": 20,
+      "day_l": 15,
+      "night_w": 34,
+      "night_l": 28,
+      "flag": "OK",
+      "_ts": 1784439285.1444097
+    },
+    "LAD": {
+      "home_w": 29,
+      "home_l": 19,
+      "away_w": 33,
+      "away_l": 17,
+      "day_w": 14,
+      "day_l": 10,
+      "night_w": 48,
+      "night_l": 26,
+      "flag": "OK",
+      "_ts": 1784439297.1647253
+    }
+  },
+  "forma_ofensiva": {
+    "New York_Maj-AL": {
+      "ops": 0.734,
+      "wrc_plus": null,
+      "flag": "NORMAL",
+      "rango": "2026-07-05 \u2192 2026-07-19",
+      "_ts": 1784439496.1082263
+    },
+    "Los Angeles_Maj-NL": {
+      "ops": 0.582,
+      "wrc_plus": null,
+      "flag": "FRIO",
+      "rango": "2026-07-05 \u2192 2026-07-19",
+      "_ts": 1784439502.0194967
+    }
+  },
+  "bullpen": {
+    "New York_Maj-AL": {
+      "era": 2.27,
+      "fip": null,
+      "siera": null,
+      "flag": "ELITE",
+      "rango": "2026-07-05 \u2192 2026-07-19",
+      "_ts": 1784439496.190293
+    },
+    "Los Angeles_Maj-NL": {
+      "era": 3.34,
+      "fip": null,
+      "siera": null,
+      "flag": "NORMAL",
+      "rango": "2026-07-05 \u2192 2026-07-19",
+      "_ts": 1784439502.0774016
+    }
+  }
+}

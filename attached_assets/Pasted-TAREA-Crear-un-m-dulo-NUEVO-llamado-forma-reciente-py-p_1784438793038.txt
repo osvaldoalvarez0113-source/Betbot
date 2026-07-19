@@ -1,0 +1,34 @@
+TAREA: Crear un módulo NUEVO llamado forma_reciente.py para Betbot. En esta fase NO modificar NINGÚN archivo existente (ni kelly_odds.py ni contexto_juego.py). Solo crear el módulo nuevo, agregar la dependencia y probarlo. La integración vendrá en una fase posterior.
+
+OBJETIVO: Módulo de forma reciente usando la librería pybaseball, con caché y respaldo, listo para integrarse después.
+
+1. INSTALACIÓN:
+- Agregar pybaseball a requirements.txt
+- Al inicio del módulo: from pybaseball import cache; cache.enable()
+
+2. FUNCIONES A CREAR en forma_reciente.py:
+
+a) forma_ofensiva_14d(equipo) → OPS del equipo en los últimos 14 días (usar datos por rango de fechas; si wRC+ de FanGraphs está disponible para el rango, preferirlo, pero NO forzarlo: OPS es el estándar aceptado). Flags: "CALIENTE" si OPS >= .780 (o wRC+ >= 115), "FRIO" si OPS <= .650 (o wRC+ <= 85), "NORMAL" en el resto.
+
+b) bullpen_14d(equipo) → ERA o FIP del bullpen en los últimos 14 días (relevistas solamente; usar SIERA solo si está disponible sin cálculo adicional). Flags: "ELITE" si <= 3.20, "QUEMADO" si >= 4.60.
+
+c) forma_abridor(nombre_pitcher) → últimas 3 salidas del abridor: ERA, ratio K/BB e innings totales de esas 3 salidas. NO usar xFIP (no disponible por rango de fechas). Flags: "EN RACHA" si ERA de las 3 salidas <= 3.00, "EN CAIDA" si >= 5.50.
+
+d) splits_equipo(equipo) → récord casa/visita de la temporada y récord día/noche (usar schedule_and_record de pybaseball).
+
+3. CACHÉ OBLIGATORIO (crítico para Railway):
+- Guardar todos los resultados en forma_cache.json con timestamp
+- Si el caché tiene menos de 12 horas, usarlo y NO llamar a pybaseball
+- El refresco del caché ocurre UNA vez al día a las 9:00 AM hora Central (America/Chicago), NUNCA en cada scan
+- Incluir forma_cache.json en el sistema existente de respaldo/restauración a GitHub (el mismo mecanismo que ya respalda el ELO) para sobrevivir redeploys. Este es el ÚNICO punto donde se toca código existente: agregar el archivo a la lista de respaldo.
+
+4. MANEJO DE ERRORES (crítico — sin fallas silenciosas):
+- Si pybaseball falla o tarda más de 30 segundos en una función, devolver valores neutrales (OPS = .715, ERA bullpen = 4.00, flags = "SIN DATO") y registrar el error con print visible en los logs
+- El bot NUNCA debe crashear ni colgarse por este módulo
+
+5. VERIFICACIÓN:
+- Crear test_forma() que corra las 4 funciones con Yankees y Dodgers e imprima resultados completos
+- Confirmar que un segundo llamado consecutivo imprime "USANDO CACHE"
+- Reportar cuánto tardó la primera carga (para evaluar el impacto en Railway)
+
+NO tocar: fórmulas de Kelly, ELO, panel de expertos, filtros de edge, contexto_juego.py, notificaciones.
