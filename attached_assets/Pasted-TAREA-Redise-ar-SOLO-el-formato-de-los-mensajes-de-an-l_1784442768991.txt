@@ -1,0 +1,23 @@
+TAREA: Rediseñar SOLO el formato de los mensajes de análisis de Betbot (Telegram y ntfy). PROHIBIDO tocar lógica de cálculo, modelos, Kelly, filtros de edge, panel de expertos (su lógica), o cualquier función que no sea de construcción de texto. Solo se modifican las funciones que arman el texto del mensaje (build_analizar_text, notify_game_analysis y equivalentes).
+
+NUEVO ORDEN DEL MENSAJE (veredicto primero):
+1. Encabezado: ⚾ equipos — hora CT (1 línea)
+2. 🚦 VEREDICTO: el pick con EV, cuota y monto Kelly si hay apuesta; o "⛔ SIN APUESTA (motivo corto)" si no. Máximo 2 líneas.
+3. ⏰ Ventana de cuándo apostar (1 línea, solo si hay pick o EV positivo)
+4. 💡 Más probable de ganar (1 línea)
+5. Separador, luego secciones de detalle en este orden: 🎯 PITCHEO (abridores con ERA/FIP/forma L3 + bullpen ERA), 📈 FORMA 14d (la línea del módulo forma_reciente), 📊 CLAVES (Pinnacle, clima/viento, lesionados), 💰 MERCADOS (igual que ahora), 🎓 PANEL (si está activo).
+
+REGLAS DE TEXTO (anti-repetición):
+- ELIMINAR el resumen narrativo largo (📖) por completo: la información ya está en las secciones.
+- Cada experto del panel: MÁXIMO 250 caracteres, truncado en frase completa. Formato: emoji + nombre + veredicto + UNA razón. La recomendación final del panel: máximo 200 caracteres.
+- Un número solo puede aparecer UNA vez en el mensaje: en su línea de datos. La narrativa que quede no repite cifras.
+- Datos de equipo (anota/recibe, AVG/OPS/K%): comprimir a una línea por equipo.
+
+LÍMITE DE TELEGRAM (fix del bug de cortes):
+- Antes de enviar, medir el mensaje. Si supera 3900 caracteres, dividir en 2 mensajes en un punto de sección (nunca a media palabra): mensaje 1 = veredicto + pitcheo + forma + claves + mercados; mensaje 2 = panel.
+- Aplicar lo mismo a ntfy respetando su límite propio.
+
+VERIFICACIÓN:
+- Generar un mensaje de prueba con un juego real de hoy e imprimirlo completo en consola.
+- Confirmar: (a) el veredicto aparece en las primeras 4 líneas, (b) ningún texto termina cortado a media palabra, (c) ningún número aparece más de una vez, (d) el mensaje respeta el límite o se divide limpio.
+- Confirmar con lista explícita qué archivos se modificaron: deben ser únicamente los de construcción/envío de mensajes.
