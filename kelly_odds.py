@@ -7279,6 +7279,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             except Exception:
                 pass
             ctx_lines  = (
+                f"🎯 PITCHEO\n"
                 f"🔵 Pitcher local: {pn_h}{h_hand_txt}\n"
                 f"   ERA: {er_h:.2f} — {_era_label(er_h)}{_k9_h_inline}\n"
             )
@@ -7328,7 +7329,8 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             # ── Elite Source 1: Statcast block — away pitcher ────────────────
             ctx_lines += _statcast_alert_block(pn_a, sc_a, er_a)
 
-            # ── Elite Source 2: Pinnacle market reference block ──────────────
+            # ── 📊 CLAVES ─────────────────────────────────────────────────────
+            ctx_lines += "📊 CLAVES\n"
             pin_odds = ctx.get("pinnacle_odds")
             if pin_odds:
                 pin_h_dec = pin_odds["home"]
@@ -7345,26 +7347,12 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     f"   {away_es}: {pin_a_dec:+.0f} ({pin_imp_a}% implícita)\n"
                 )
 
-            # Runs scored / allowed
+            # Runs scored / allowed (1 línea por equipo)
             ctx_lines += (
-                f"⚾ {home_es} — Carreras anotadas: {ctx['rs_home']} por juego\n"
-                f"🛡️ {home_es} — Carreras recibidas: {ctx['ra_home']} por juego\n"
-                f"⚾ {away_es} — Carreras anotadas: {ctx['rs_away']} por juego\n"
-                f"🛡️ {away_es} — Carreras recibidas: {ctx['ra_away']} por juego\n"
+                f"⚾ {home_es}: anota {ctx['rs_home']} | recibe {ctx['ra_home']}/jgo\n"
+                f"⚾ {away_es}: anota {ctx['rs_away']} | recibe {ctx['ra_away']}/jgo\n"
             )
-            # ── Batting metrics (MLB A7) ──────────────────────────────────
-            def _k_label(k):
-                if k is None:   return "N/D"
-                if k > 28:      return f"{k:.0f}% (mucho)"
-                if k < 18:      return f"{k:.0f}% (poco)"
-                return          f"{k:.0f}% (normal)"
-
-            def _bb_label(bb):
-                if bb is None:  return "N/D"
-                if bb > 10:     return f"{bb:.0f}% (bueno)"
-                if bb < 7:      return f"{bb:.0f}% (bajo)"
-                return          f"{bb:.0f}% (normal)"
-
+            # ── Batting metrics (1 línea por equipo) ─────────────────────
             for tname, tname_es, bat in (
                 (home, home_es, ctx.get("bat_home")),
                 (away, away_es, ctx.get("bat_away")),
@@ -7372,25 +7360,11 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                 if not bat:
                     continue
                 ops = bat.get("ops")
-                ctx_lines += (
-                    f"🏏 Ofensiva {tname_es}:\n"
-                    f"   Promedio de bateo: {bat['avg']:.3f}\n"
-                )
-                if ops is not None:
-                    ctx_lines += (
-                        f"   OPS: {ops:.3f} ({_ops_label(ops)})\n"
-                    )
-                if bat.get("k_pct") is not None:
-                    ctx_lines += (
-                        f"   Se poncha: {_k_label(bat['k_pct'])}\n"
-                    )
-                if bat.get("bb_pct") is not None:
-                    ctx_lines += (
-                        f"   Toma bases por bolas: {_bb_label(bat['bb_pct'])}\n"
-                    )
-                insight = _batting_insight(tname, ops, bat.get("k_pct"))
-                if insight:
-                    ctx_lines += f"{insight}\n"
+                kp  = bat.get("k_pct")
+                parts = [f"AVG {bat['avg']:.3f}"]
+                if ops is not None: parts.append(f"OPS {ops:.3f} ({_ops_label(ops)})")
+                if kp  is not None: parts.append(f"K% {kp:.0f}%")
+                ctx_lines += f"🏏 {tname_es}: {' | '.join(parts)}\n"
             # ──────────────────────────────────────────────────────────────
 
             # ── Confirmed lineup display (MLB A8) ─────────────────────────
@@ -7472,12 +7446,9 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                 _fa_a = (_fr_n.forma_abridor(pn_a)
                          if pn_a not in ("TBD", "", None) else None)
                 ctx_lines += (
-                    f"📈 FORMA: {home_es}  {_ops_frag(_fo_h)}"
-                    f" | bullpen ({_ffl(_fb_h)})"
-                    f" | abridor ({_ffl(_fa_h)})\n"
-                    f"📈 FORMA: {away_es}  {_ops_frag(_fo_a)}"
-                    f" | bullpen ({_ffl(_fb_a)})"
-                    f" | abridor ({_ffl(_fa_a)})\n"
+                    f"📈 FORMA 14d\n"
+                    f"   {home_es}: {_ops_frag(_fo_h)} | bullpen ({_ffl(_fb_h)}) | abridor ({_ffl(_fa_h)})\n"
+                    f"   {away_es}: {_ops_frag(_fo_a)} | bullpen ({_ffl(_fb_a)}) | abridor ({_ffl(_fa_a)})\n"
                 )
             except Exception as _fr_err:
                 print(f"[forma notify_game_analysis] {_fr_err}")
@@ -7753,7 +7724,41 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         best_clean = (best["label"]
                       .replace("🔵 ", "").replace("🔴 ", "").replace("🤝 ", "")
                       .replace("📈 ", "").replace("📉 ", "").replace("🏃 ", ""))
-        action_line = f"⭐ ACCIÓN: {best_clean} en {best['book']} — {gt}"
+        # Veredicto compacto — encabeza el mensaje
+        _ci_ntfy    = a.get("claude_intel") or {}
+        _final_n    = _ci_ntfy.get("apostar")
+        if _final_n is None and a["candidates"] and a["candidates"][0].get("ev_pct",0) >= 5.0:
+            _final_n = True
+        if _final_n is True:
+            action_line = (f"🚦 APUESTA: {best_clean}\n"
+                           f"   EV +{best['ev_pct']:.1f}% | {best['odds']:.2f} {best['book']} | Stake ${best['stake']:.0f}")
+        elif _final_n is False:
+            action_line = f"🚦 SIN APUESTA — panel vetó el pick"
+        else:
+            action_line = f"🚦 SIN APUESTA — EV +{best['ev_pct']:.1f}% sin prob. mínima"
+
+        # Línea "más probable"
+        _mp_n   = a.get("most_prob_pick") or {}
+        _mpl_n  = ""
+        if _mp_n.get("team"):
+            _mpl_n = f"💡 Más probable: {_es(_mp_n['team'])} ({_mp_n.get('prob','?')}%)\n"
+        else:
+            _an2 = a.get("all_markets", {})
+            _h2 = next((m.get("prob",0) for lb,m in _an2.items() if "🔵" in lb and "ML" in lb.upper()), None)
+            _a2 = next((m.get("prob",0) for lb,m in _an2.items() if "🔴" in lb and "ML" in lb.upper()), None)
+            if _h2 is not None and _a2 is not None:
+                _mpl_n = (f"💡 Más probable: {_es(home)} ({round(_h2*100)}%)\n"
+                          if _h2 >= _a2 else
+                          f"💡 Más probable: {_es(away)} ({round(_a2*100)}%)\n")
+
+        # Línea de ventana de apuesta
+        _tw_n = ""
+        try:
+            _tw_v = _bet_timing_advice(best.get("market_type", best.get("label","")), a.get("time",""))
+            if _tw_v:
+                _tw_n = _tw_v.splitlines()[0].strip() + "\n"
+        except Exception:
+            pass
 
         # Picks block
         picks_lines  = ""
@@ -7816,18 +7821,15 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
         )
 
         body = (
-            f"{emoji} {match_es}\n"
+            f"{emoji} {match_es} — ⏰ {gt}\n"
             f"{action_line}\n"
-            f"⏰ {gt}\n"
-            f"{_DIV}\n"
-            f"📋 CONTEXTO\n"
+            f"{_tw_n}"
+            f"{_mpl_n}"
             f"{_DIV}\n"
             f"{ctx_lines}"
-            f"{_mkts_section}"
             f"{_DIV}\n"
-            f"⭐ TOP PICKS (EV > {EV_MIN_PCT:.0f}%)\n"
-            f"{_DIV}\n"
-            f"{picks_lines}"
+            f"💰 MERCADOS\n"
+            f"{all_mkts_lines}"
             f"{high_ev_flag}"
             f"{_claude_blk}"
             f"{verdict}\n"
@@ -7966,91 +7968,77 @@ def build_analizar_text(result: dict) -> list:
     all_mkts = result.get("all_markets", {}) or {}
     cand_lbs = {c["label"] for c in cands}
 
-    # ── VEREDICTO (construido primero, mostrado primero) ──────────────────────
+    # ── VARIABLES COMUNES ────────────────────────────────────────────────────
     final_apostar = ci.get("apostar")
-    # Si el panel no corrió pero hay candidatos con EV ≥ 5%, aprobar con confianza MEDIA
     if final_apostar is None and cands and cands[0].get("ev_pct", 0) >= 5.0:
         final_apostar = True
         if not ci.get("confianza"):
             ci["confianza"] = "MEDIA"
-    if cands:
-        best     = cands[0]
-        best_lbl = (best.get("label", "?")
-                    .replace("🔵 ", "").replace("🔴 ", "")
-                    .replace("📈 ", "").replace("📉 ", "")
-                    .replace("🏃 ", "").replace("🤝 ", ""))
-        ev_best   = best.get("ev_pct", 0)
-        prob_best = round(best.get("true_prob", 0) * 100)
-        stake_b   = best.get("stake", 0)
-        book_b    = best.get("book", "")
-        odds_b    = best.get("odds", 0)
-        if final_apostar is False:
-            verdict_block = (
-                f"{'━'*22}\n"
-                f"⛔ <b>SIN APUESTA — Panel vetó el pick</b>\n"
-                f"   Mejor EV: {best_lbl} +{ev_best:.1f}% — rechazado por expertos\n"
-                f"{'━'*22}"
-            )
-        else:
-            verdict_block = (
-                f"{'━'*22}\n"
-                f"✅ <b>APUESTA: {best_lbl}</b>\n"
-                f"   @ {odds_b:.2f} {book_b} | Stake ${stake_b:.0f}\n"
-                f"   Prob: {prob_best}% | EV +{ev_best:.1f}%\n"
-                f"{'━'*22}"
-            )
+    best_c = cands[0] if cands else {}
+    SEP    = f"{'─'*22}\n"
+
+    # ─── 1. ENCABEZADO ────────────────────────────────────────────────────────
+    p1 = f"{emoji} <b>{home_es} vs {away_es}</b>  ⏰ {gt}\n"
+
+    # ─── 2. VEREDICTO (máx 2 líneas) ─────────────────────────────────────────
+    if final_apostar is True and best_c:
+        _bl = (best_c.get("label", "?")
+               .replace("🔵 ","").replace("🔴 ","")
+               .replace("📈 ","").replace("📉 ","")
+               .replace("🏃 ","").replace("🤝 ",""))
+        p1 += (f"🚦 <b>APUESTA: {_bl}</b>\n"
+               f"   EV +{best_c.get('ev_pct',0):.1f}% | {best_c.get('odds',0):.2f} "
+               f"{best_c.get('book','')} | Stake ${best_c.get('stake',0):.0f}\n")
+    elif final_apostar is False:
+        p1 += f"🚦 <b>SIN APUESTA</b> — panel vetó el pick\n"
+    elif cands:
+        p1 += f"🚦 <b>SIN APUESTA</b> — EV +{cands[0].get('ev_pct',0):.1f}% sin prob. mínima\n"
     elif all_mkts:
-        pos_mkts = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
-        if pos_mkts:
-            bl, bm = max(pos_mkts, key=lambda x: x[1]["ev_pct"])
-            bl_c   = (bl.replace("🔵 ", "").replace("🔴 ", "")
-                        .replace("📈 ", "").replace("📉 ", ""))
-            prob_v = bm.get("prob", 0)
-            reason = ("prob. mínima no alcanzada (necesita 62%)" if prob_v < 0.62
-                      else "EV mínimo no alcanzado (necesita 5%)")
-            verdict_block = (
-                f"{'━'*22}\n"
-                f"⛔ <b>SIN APUESTA HOY</b>\n"
-                f"   Mejor disponible: {bl_c} EV +{bm['ev_pct']:.1f}%\n"
-                f"   Motivo: {reason}\n"
-                f"{'━'*22}"
-            )
+        _pos_v = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
+        if _pos_v:
+            _bl_v, _bm_v = max(_pos_v, key=lambda x: x[1]["ev_pct"])
+            _bl_vc = _bl_v.replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
+            p1 += f"🚦 <b>SIN APUESTA</b> — mejor: {_bl_vc} EV +{_bm_v['ev_pct']:.1f}%\n"
         else:
-            verdict_block = (
-                f"{'━'*22}\n"
-                f"⛔ <b>SIN APUESTA HOY</b>\n"
-                f"   Todos los mercados con EV negativo\n"
-                f"{'━'*22}"
-            )
+            p1 += "🚦 <b>SIN APUESTA</b> — sin ventaja detectada\n"
     else:
-        verdict_block = (
-            f"{'━'*22}\n"
-            f"⛔ <b>SIN APUESTA HOY</b>\n"
-            f"   Sin odds disponibles — verifica en Bovada\n"
-            f"{'━'*22}"
-        )
+        p1 += "🚦 <b>SIN APUESTA</b> — sin odds disponibles\n"
 
-    # ── PARTE 1: Header + Veredicto + Contexto compacto ──────────────────────
-    _narrativa_txt = result.get("narrativa", "")
-    p1 = (
-        f"{emoji} <b>{home_es} vs {away_es}</b>\n"
-        f"⏰ {gt}\n"
-        f"{verdict_block}\n"
-    )
-    if _narrativa_txt:
-        p1 += f"{'─'*22}\n📖 {_narrativa_txt}\n"
+    # ─── 3. VENTANA (1 línea, solo si hay pick) ───────────────────────────────
+    if cands:
+        try:
+            _tw = _bet_timing_advice(
+                cands[0].get("market_type", cands[0].get("label","")),
+                result.get("time","")
+            )
+            if _tw:
+                p1 += f"⏰ {_tw.splitlines()[0].lstrip('⏰').strip()}\n"
+        except Exception:
+            pass
 
-    # Default pitcher/ERA values — always defined so soccer picks don't crash
-    pn_h = ctx.get("pname_home", "TBD") if ctx else "TBD"
-    pn_a = ctx.get("pname_away", "TBD") if ctx else "TBD"
+    # ─── 4. MÁS PROBABLE (1 línea) ───────────────────────────────────────────
+    _mp = result.get("most_prob_pick") or {}
+    if _mp.get("team"):
+        p1 += f"💡 Más probable: {_es(_mp['team'])} ({_mp.get('prob','?')}%)\n"
+    elif all_mkts:
+        _hml = next((m.get("prob",0) for lb,m in all_mkts.items()
+                     if "🔵" in lb and "ML" in lb.upper()), None)
+        _aml = next((m.get("prob",0) for lb,m in all_mkts.items()
+                     if "🔴" in lb and "ML" in lb.upper()), None)
+        if _hml is not None and _aml is not None:
+            if _hml >= _aml:
+                p1 += f"💡 Más probable: {home_es} ({round(_hml*100)}%)\n"
+            else:
+                p1 += f"💡 Más probable: {away_es} ({round(_aml*100)}%)\n"
+
+    p1 += SEP
+
+    # ─── 5. 🎯 PITCHEO ────────────────────────────────────────────────────────
+    pn_h = ctx.get("pname_home","TBD") if ctx else "TBD"
+    pn_a = ctx.get("pname_away","TBD") if ctx else "TBD"
     er_h = float(ctx.get("era_home") or 4.50) if ctx else 4.50
     er_a = float(ctx.get("era_away") or 4.50) if ctx else 4.50
-
     if is_mlb:
-        pn_h  = ctx.get("pname_home", "TBD")
-        pn_a  = ctx.get("pname_away", "TBD")
-        er_h  = ctx.get("era_home",  4.50)
-        er_a  = ctx.get("era_away",  4.50)
         fip_h = ctx.get("fip_home")
         fip_a = ctx.get("fip_away")
         hnd_h = ctx.get("hand_home")
@@ -8060,27 +8048,26 @@ def build_analizar_text(result: dict) -> list:
         sc_h  = ctx.get("statcast_home")
         sc_a  = ctx.get("statcast_away")
 
-        p1 += f"{'─'*22}\n"
-
-        # Pitchers compactos
+        p1 += f"🎯 <b>PITCHEO</b>\n"
         p1 += _pitcher_line(pn_h, er_h, fip_h, hnd_h, pf_h, f"🔵 {home_es}") + "\n"
-        sc_h_blk = _statcast_alert_block(pn_h, sc_h, er_h)
-        if sc_h_blk:
-            p1 += sc_h_blk
+        _sch = _statcast_alert_block(pn_h, sc_h, er_h)
+        if _sch: p1 += _sch
         p1 += _pitcher_line(pn_a, er_a, fip_a, hnd_a, pf_a, f"🔴 {away_es}") + "\n"
-        sc_a_blk = _statcast_alert_block(pn_a, sc_a, er_a)
-        if sc_a_blk:
-            p1 += sc_a_blk
-
-        # Bullpen compacto
+        _sca = _statcast_alert_block(pn_a, sc_a, er_a)
+        if _sca: p1 += _sca
         try:
-            _bpera_h, _ = fetch_bullpen_era(home)
-            _bpera_a, _ = fetch_bullpen_era(away)
-            p1 += f"⚾ Bullpen ERA: {home_es} {_bpera_h:.2f} | {away_es} {_bpera_a:.2f}\n"
+            _bph, _ = fetch_bullpen_era(home)
+            _bpa, _ = fetch_bullpen_era(away)
+            p1 += f"⚾ Bullpen ERA: {home_es} {_bph:.2f} | {away_es} {_bpa:.2f}\n"
         except Exception:
             pass
+        for _cf in ctx.get("pitcher_conflicts", []):
+            p1 += (f"⚠️ {_cf['pitcher'].split()[-1]} ERA {_cf['era']:.2f} vs "
+                   f"ofensiva {_es(_cf['rival'])}: {' / '.join(_cf['flags'])}\n")
+        p1 += SEP
 
-        # ── Forma reciente 14d ────────────────────────────────────────────────
+    # ─── 6. 📈 FORMA 14d ─────────────────────────────────────────────────────
+    if is_mlb:
         try:
             import forma_reciente as _fr_tg
 
@@ -8088,8 +8075,7 @@ def build_analizar_text(result: dict) -> list:
                 return (d or {}).get("flag") or "SIN DATO"
 
             def _ops_frag_tg(fo):
-                if not fo or fo.get("flag") == "SIN DATO":
-                    return "OPS-14d SIN DATO"
+                if not fo or fo.get("flag") == "SIN DATO": return "OPS-14d SIN DATO"
                 ops = fo.get("ops")
                 return (f"OPS-14d {ops:.3f} ({fo.get('flag','?')})"
                         if ops is not None else "OPS-14d SIN DATO")
@@ -8098,239 +8084,162 @@ def build_analizar_text(result: dict) -> list:
             _fo_a_tg = _fr_tg.forma_ofensiva_14d(away)
             _fb_h_tg = _fr_tg.bullpen_14d(home)
             _fb_a_tg = _fr_tg.bullpen_14d(away)
-            _fa_h_tg = (_fr_tg.forma_abridor(pn_h)
-                        if pn_h not in ("TBD", "", None) else None)
-            _fa_a_tg = (_fr_tg.forma_abridor(pn_a)
-                        if pn_a not in ("TBD", "", None) else None)
-            p1 += (
-                f"📈 FORMA: {home_es}  {_ops_frag_tg(_fo_h_tg)}"
-                f" | bullpen ({_ffl_tg(_fb_h_tg)})"
-                f" | abridor ({_ffl_tg(_fa_h_tg)})\n"
-                f"📈 FORMA: {away_es}  {_ops_frag_tg(_fo_a_tg)}"
-                f" | bullpen ({_ffl_tg(_fb_a_tg)})"
-                f" | abridor ({_ffl_tg(_fa_a_tg)})\n"
-            )
+            _fa_h_tg = _fr_tg.forma_abridor(pn_h) if pn_h not in ("TBD","",None) else None
+            _fa_a_tg = _fr_tg.forma_abridor(pn_a) if pn_a not in ("TBD","",None) else None
+            p1 += (f"📈 <b>FORMA 14d</b>\n"
+                   f"   {home_es}: {_ops_frag_tg(_fo_h_tg)} | bullpen ({_ffl_tg(_fb_h_tg)}) | abridor ({_ffl_tg(_fa_h_tg)})\n"
+                   f"   {away_es}: {_ops_frag_tg(_fo_a_tg)} | bullpen ({_ffl_tg(_fb_a_tg)}) | abridor ({_ffl_tg(_fa_a_tg)})\n")
+            p1 += SEP
         except Exception as _fr_tg_err:
             print(f"[forma build_analizar_text] {_fr_tg_err}")
 
-        p1 += f"{'─'*22}\n"
-
-        # Stats clave
+    # ─── 7. 📊 CLAVES ─────────────────────────────────────────────────────────
+    _kv = []
+    if is_mlb:
         if ctx.get("rs_home"):
-            p1 += f"📊 {home_es}: anota {ctx['rs_home']} | recibe {ctx['ra_home']} /juego\n"
-            p1 += f"📊 {away_es}: anota {ctx['rs_away']} | recibe {ctx['ra_away']} /juego\n"
-
-        # Bateo compacto
-        for _t, _te, _bk in ((home, home_es, "bat_home"), (away, away_es, "bat_away")):
+            _kv.append(f"📊 {home_es}: anota {ctx['rs_home']} | recibe {ctx['ra_home']}/jgo")
+            _kv.append(f"📊 {away_es}: anota {ctx['rs_away']} | recibe {ctx['ra_away']}/jgo")
+        for _te, _bk in ((home_es, "bat_home"), (away_es, "bat_away")):
             bat = ctx.get(_bk)
             if bat:
-                ops = bat.get("ops")
-                kp  = bat.get("k_pct")
-                parts = [f"AVG {bat['avg']:.3f}"]
-                if ops:
-                    parts.append(f"OPS {ops:.3f} ({_ops_label(ops)})")
-                if kp:
-                    parts.append(f"K% {kp:.0f}%")
-                p1 += f"🏏 {_te}: {' | '.join(parts)}\n"
-
-        # Advertencia de conflicto pitcher vs ofensiva peligrosa
-        for _cf in ctx.get("pitcher_conflicts", []):
-            _flags_txt = "\n   → ".join(_cf["flags"])
-            p1 += (
-                f"⚠️ CONFLICTO — {_cf['pitcher'].split()[-1]} "
-                f"(ERA {_cf['era']:.2f}) vs ofensiva peligrosa de {_es(_cf['rival'])}:\n"
-                f"   → {_flags_txt}\n"
-                f"   → Pick más riesgoso — considera apostar menos o evaluar RL +1.5\n"
-            )
-
-        # Pinnacle
+                _pts = [f"AVG {bat['avg']:.3f}"]
+                if bat.get("ops"): _pts.append(f"OPS {bat['ops']:.3f} ({_ops_label(bat['ops'])})")
+                if bat.get("k_pct"): _pts.append(f"K% {bat['k_pct']:.0f}%")
+                _kv.append(f"🏏 {_te}: {' | '.join(_pts)}")
         pin = ctx.get("pinnacle_odds")
         if pin:
-            raw_h = 1.0 / max(pin["home"], 1.001)
-            raw_a = 1.0 / max(pin["away"], 1.001)
-            tot   = raw_h + raw_a
-            p1 += (f"📌 Pinnacle: {home_es} {round(raw_h/tot*100,1)}%"
-                   f" | {away_es} {round(raw_a/tot*100,1)}%\n")
-
-        # Tercera vez por el lineup
-        if ctx.get("ttt_note"):
-            p1 += f"{ctx['ttt_note']}\n"
-
-        # Clima
-        if ctx.get("temp_label"):
-            p1 += f"{ctx['temp_label']}\n"
-        if ctx.get("wind_info"):
-            p1 += f"💨 {ctx['wind_info']}\n"
-
-        # Árbitro compacto
+            rh = 1.0/max(pin["home"],1.001); ra = 1.0/max(pin["away"],1.001); tt = rh+ra
+            _kv.append(f"📌 Pinnacle: {home_es} {round(rh/tt*100,1)}% | {away_es} {round(ra/tt*100,1)}%")
+        if ctx.get("temp_label"): _kv.append(ctx["temp_label"].rstrip())
+        if ctx.get("wind_info"):  _kv.append(f"💨 {ctx['wind_info']}")
         ump = ctx.get("umpire")
         if ump and ump.get("name"):
-            tend = ump.get("tendency", "NEUTRAL")
-            ump_es = ("zona cerrada → Over" if tend == "OVER"
-                      else "zona amplia → Under" if tend == "UNDER"
-                      else "zona normal")
-            p1 += f"👨\u200d⚖️ Árbitro: {ump['name']} — {ump_es}\n"
-
-        # Lesionados compacto
-        for til, ils in ctx.get("il_data", {}).items():
-            if ils:
-                p1 += f"🤕 {_es(til)}: {', '.join(ils[:3])}\n"
-
-        # Movimiento de línea
+            _te2 = ump.get("tendency","NEUTRAL")
+            _ue  = "zona cerrada → Over" if _te2=="OVER" else ("zona amplia → Under" if _te2=="UNDER" else "zona normal")
+            _kv.append(f"👨\u200d⚖️ {ump['name']} — {_ue}")
+        for til, ils in ctx.get("il_data",{}).items():
+            if ils: _kv.append(f"🤕 {_es(til)}: {', '.join(ils[:3])}")
         if ctx.get("line_moved") and ctx.get("line_note"):
-            p1 += f"📉 {ctx['line_note']}\n"
-
-        # Récord de locación compacto
-
+            _kv.append(f"📉 {ctx['line_note']}")
+        if ctx.get("ttt_note"): _kv.append(ctx["ttt_note"].rstrip())
     else:
-        # Soccer compacto
-        p1 += f"{'─'*22}\n"
-        p1 += f"💪 {home_es}: {_elo_tier(ctx.get('elo_home', 1500))}\n"
-        p1 += f"💪 {away_es}: {_elo_tier(ctx.get('elo_away', 1500))}\n"
-        p1 += f"🤝 Prob. empate: {ctx.get('p_draw','?')}%\n"
-        for sf_key, tname_es in (("sform_h", home_es), ("sform_a", away_es)):
-            sf = ctx.get(sf_key)
+        _kv.append(f"💪 {home_es}: {_elo_tier(ctx.get('elo_home',1500))}")
+        _kv.append(f"💪 {away_es}: {_elo_tier(ctx.get('elo_away',1500))}")
+        _kv.append(f"🤝 Prob. empate: {ctx.get('p_draw','?')}%")
+        for _sfk, _tne in (("sform_h", home_es), ("sform_a", away_es)):
+            sf = ctx.get(_sfk)
             if sf:
                 rs = " ".join(_result_to_es(r) for r in sf["results"])
-                p1 += (f"📋 {tname_es}: {rs}"
-                       f" | {sf['gf_pg']}g/p anota | {sf['ga_pg']}g/p recibe\n")
+                _kv.append(f"📋 {_tne}: {rs} | {sf['gf_pg']}g/p")
         pin = ctx.get("pinnacle_odds")
         if pin:
-            raw_h = 1.0 / max(pin["home"], 1.001)
-            raw_a = 1.0 / max(pin["away"], 1.001)
-            tot   = raw_h + raw_a
-            p1 += (f"📌 Pinnacle: {home_es} {round(raw_h/tot*100,1)}%"
-                   f" | {away_es} {round(raw_a/tot*100,1)}%\n")
+            rh = 1.0/max(pin["home"],1.001); ra = 1.0/max(pin["away"],1.001); tt = rh+ra
+            _kv.append(f"📌 Pinnacle: {home_es} {round(rh/tt*100,1)}% | {away_es} {round(ra/tt*100,1)}%")
         ref = ctx.get("referee")
-        if ref and ref.get("name"):
-            p1 += f"🟨 Árbitro: {ref['name']} — {ref.get('tendency','?')}\n"
-        if ctx.get("line_moved") and ctx.get("line_note"):
-            p1 += f"📉 {ctx['line_note']}\n"
+        if ref and ref.get("name"): _kv.append(f"🟨 {ref['name']} — {ref.get('tendency','?')}")
+        if ctx.get("line_moved") and ctx.get("line_note"): _kv.append(f"📉 {ctx['line_note']}")
 
-    # ── MERCADOS tabla completa — todos los mercados evaluados ────────────────
-    p1 += f"{'─'*22}\n📊 <b>MERCADOS</b>\n{'─'*22}\n"
+    if _kv:
+        p1 += "📊 <b>CLAVES</b>\n" + "".join(f"   {l}\n" for l in _kv) + SEP
+
+    # ─── 8. 💰 MERCADOS ───────────────────────────────────────────────────────
+    p1 += "💰 <b>MERCADOS</b>\n"
     _has_k = False
     if all_mkts:
-        # Ordenar: picks recomendados primero (por EV desc), luego el resto
-        _mkt_picks   = [(lbl, m) for lbl, m in all_mkts.items() if lbl in cand_lbs]
-        _mkt_others  = [(lbl, m) for lbl, m in all_mkts.items() if lbl not in cand_lbs]
-        _mkt_picks.sort(key=lambda x: x[1].get("ev_pct", 0), reverse=True)
-        _mkt_others.sort(key=lambda x: x[1].get("ev_pct", 0), reverse=True)
-        for lbl, m in (_mkt_picks + _mkt_others):
-            is_pick = lbl in cand_lbs
-            ev_val  = m.get("ev_pct", 0)
-            icon    = "✅" if is_pick else ("❌" if ev_val < 0 else "➖")
-            bk = m.get("book", "")
-            odds_s = f"{m.get('odds', 0):.2f}" if m.get("odds") else "?"
-            prob_s = f"{round(m.get('prob', 0)*100)}%"
-            ev_s   = f"{ev_val:+.1f}%"
-            p1 += f"{icon} <b>{lbl}</b>  EV {ev_s}  Prob {prob_s}  @{odds_s} [{bk}]\n"
-            if "⚡" in lbl:
-                _has_k = True
+        _mkt_picks  = [(lb,m) for lb,m in all_mkts.items() if lb in cand_lbs]
+        _mkt_others = [(lb,m) for lb,m in all_mkts.items() if lb not in cand_lbs]
+        _mkt_picks.sort( key=lambda x: x[1].get("ev_pct",0), reverse=True)
+        _mkt_others.sort(key=lambda x: x[1].get("ev_pct",0), reverse=True)
+        for lb, m in (_mkt_picks + _mkt_others):
+            _ip   = lb in cand_lbs
+            ev_v  = m.get("ev_pct",0)
+            icon  = "✅" if _ip else ("❌" if ev_v < 0 else "➖")
+            p1 += (f"{icon} <b>{lb}</b>  EV {ev_v:+.1f}%  Prob {round(m.get('prob',0)*100)}%"
+                   f"  @{m.get('odds',0):.2f} [{m.get('book','')}]\n")
+            if "⚡" in lb: _has_k = True
         if not _has_k and is_mlb:
             p1 += "⚡ Props K: sin K/9 >8.5 confirmado — preferir ML\n"
     else:
-        p1 += "Sin odds disponibles en este momento\n"
+        p1 += "Sin odds disponibles\n"
 
-    # ── PARTE 2: Panel + Recomendación + Consejo ──────────────────────────────
+    # ─── 9. 🎓 PANEL ─────────────────────────────────────────────────────────
     experts   = ci.get("_expertos_detalle") or []
-    _ci_icons = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}
+    _ci_icons = {"ALTA":"🟢","MEDIA":"🟡","BAJA":"🔴"}
 
-    p2 = f"{'─'*22}\n🎓 <b>PANEL DE EXPERTOS</b>\n{'─'*22}\n"
-
+    p2 = SEP + "🎓 <b>PANEL</b>\n"
     if experts:
         for ex in experts:
-            ap = ("✅" if ex.get("apostar") is True
-                  else ("❌" if ex.get("apostar") is False else "⚪"))
-            ec = _ci_icons.get(ex.get("confianza", ""), "⚪")
-            er = (ex.get("razonamiento") or "sin razonamiento")[:500]
-            p2 += f"<b>{ex['nombre']}</b> {ap} {ec}\n<i>{er}</i>\n\n"
+            ap  = "✅" if ex.get("apostar") is True else ("❌" if ex.get("apostar") is False else "⚪")
+            ec  = _ci_icons.get(ex.get("confianza",""),"⚪")
+            raz = (ex.get("razonamiento") or "").strip()
+            if len(raz) > 250:
+                cut = raz[:250]
+                for sp in (".", "!", "?", ";"):
+                    idx = cut.rfind(sp)
+                    if idx > 100: cut = cut[:idx+1]; break
+                raz = cut
+            p2 += f"<b>{ex['nombre']}</b> {ap} {ec} — <i>{raz}</i>\n"
     else:
-        # Explicar POR QUÉ no corrió el panel
         if not cands and all_mkts:
-            pos = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
+            pos = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
             if pos:
-                bl, bm = max(pos, key=lambda x: x[1]["ev_pct"])
-                bl_c = (bl.replace("🔵 ", "").replace("🔴 ", "")
-                          .replace("📈 ", "").replace("📉 ", ""))
-                prob_v = round(bm.get("prob", 0) * 100)
-                p2 += (f"ℹ️ Panel no activado\n"
-                       f"   Mejor candidato: {bl_c}\n"
-                       f"   EV +{bm['ev_pct']:.1f}% | Prob {prob_v}%\n"
-                       f"   Necesita: EV >5% y prob >62% para activar panel\n\n")
+                bl,bm = max(pos, key=lambda x: x[1]["ev_pct"])
+                blc = bl.replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
+                p2 += f"ℹ️ Sin panel — mejor: {blc} EV +{bm['ev_pct']:.1f}%\n"
             else:
-                p2 += "ℹ️ Panel no activado — todos los mercados con EV negativo.\n\n"
+                p2 += "ℹ️ Sin panel — todos los mercados con EV negativo\n"
         else:
-            p2 += "ℹ️ Sin respuesta del panel de expertos.\n\n"
+            p2 += "ℹ️ Sin panel\n"
 
-    # Recomendación
+    # Recomendación (máx 200 chars)
     panel_razon = (ci.get("razonamiento") or "").strip()
-    best_c = cands[0] if cands else {}
+    if len(panel_razon) > 200:
+        cut = panel_razon[:200]
+        for sp in (".", "!", "?", ";"):
+            idx = cut.rfind(sp)
+            if idx > 80: cut = cut[:idx+1]; break
+        panel_razon = cut
 
-    # Mejora 3: advertencia movimiento Pinnacle
-    _pmw = result.get("pinnacle_mov_warn", "")
-    if _pmw:
-        p2 += f"{'─'*22}\n{_pmw}\n"
-
-    p2 += f"{'─'*22}\n"
+    p2 += SEP
     if final_apostar is True and best_c:
-        bl_c = (best_c.get("label", "?")
-                .replace("🔵 ", "").replace("🔴 ", "")
-                .replace("📈 ", "").replace("📉 ", ""))
+        _blr = (best_c.get("label","?")
+                .replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ",""))
         p2 += (f"📋 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
-               f"Pick: <b>{bl_c}</b>\n"
-               f"Stake: <b>${best_c.get('stake',0):.0f}</b>"
-               f" @ {best_c.get('odds',0):.2f} {best_c.get('book','')}\n"
-               f"EV: +{best_c.get('ev_pct',0):.1f}%"
-               f" | Prob: {round(best_c.get('true_prob',0)*100)}%\n")
-        if panel_razon:
-            p2 += f"<i>{panel_razon[:400]}</i>\n"
+               f"Pick: <b>{_blr}</b> @ {best_c.get('odds',0):.2f} {best_c.get('book','')} | Stake ${best_c.get('stake',0):.0f}\n")
+        if panel_razon: p2 += f"<i>{panel_razon}</i>\n"
     elif final_apostar is False:
-        p2 += f"📋 <b>RECOMENDACIÓN: ❌ PASAR</b>\n"
-        if panel_razon:
-            p2 += f"<i>{panel_razon[:400]}</i>\n"
+        p2 += "📋 <b>RECOMENDACIÓN: ❌ PASAR</b>\n"
+        if panel_razon: p2 += f"<i>{panel_razon}</i>\n"
     else:
-        p2 += f"📋 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
-        if panel_razon:
-            p2 += f"<i>{panel_razon[:400]}</i>\n"
+        p2 += "📋 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
+        if panel_razon: p2 += f"<i>{panel_razon}</i>\n"
 
-    # Mejora 4: horario óptimo
-    if cands:
-        _timing_tip = _bet_timing_advice(
-            cands[0].get("market_type", cands[0].get("label", "")),
-            result.get("time", "")
-        )
-        if _timing_tip:
-            p2 += f"{'─'*22}\n{_timing_tip}\n"
+    _pmw = result.get("pinnacle_mov_warn","")
+    if _pmw: p2 += f"{SEP}{_pmw}\n"
 
-    # Consejo — siempre mostrado
-    p2 += f"{'─'*22}\n"
+    # Consejo final
     if not cands and all_mkts:
-        pos = [(l, m) for l, m in all_mkts.items() if m.get("ev_pct", 0) > 0]
+        pos = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
         if pos:
-            bl, bm = max(pos, key=lambda x: x[1]["ev_pct"])
-            bl_c = (bl.replace("🔵 ", "").replace("🔴 ", "")
-                      .replace("📈 ", "").replace("📉 ", ""))
-            p2 += (f"💡 <b>Si apostas de todas formas:</b>\n"
-                   f"   {bl_c} @ {bm['odds']:.2f} {bm['book']}\n"
-                   f"   El modelo no lo recomienda — apuesta con criterio propio")
+            bl,bm = max(pos, key=lambda x: x[1]["ev_pct"])
+            blc = bl.replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
+            p2 += (f"{SEP}💡 Si apostas: {blc} @ {bm['odds']:.2f} {bm['book']}\n"
+                   f"   Modelo no recomienda — apuesta con criterio propio")
         else:
-            p2 += "💡 Mejor pasar este juego — sin ventaja detectada hoy"
+            p2 += f"{SEP}💡 Mejor pasar — sin ventaja detectada"
     elif cands and final_apostar is True:
-        p2 += f"💡 Apuesta antes de {gt} en Bovada"
-    else:
-        _mp_b = result.get("most_prob_pick") or {}
-        if _mp_b.get("team"):
-            _has_val_b = _mp_b.get("has_value", False)
-            _val_tag_b = "✅ también tiene valor" if _has_val_b else "⚠️ sin valor EV — precio caro"
-            _odds_b = f"@ {_mp_b['odds']:.2f}" if _mp_b.get("odds") else ""
-            p2 += (
-                f"💡 <b>Más probable de ganar hoy:</b>\n"
-                f"   {_es(_mp_b['team'])}  {_mp_b['prob']}%  {_odds_b}\n"
-                f"   {_val_tag_b}"
-            )
-        else:
-            p2 += f"💡 Espera el próximo partido con mejor edge"
+        p2 += f"{SEP}💡 Apuesta antes de {gt} en Bovada"
+
+    # ─── CONTROL DE LONGITUD (fix bug de cortes Telegram) ─────────────────────
+    if len(p1) > 3900 and "📊 <b>CLAVES</b>" in p1:
+        _kv_cut = _kv[:5]
+        if len(_kv) > 5:
+            _kv_cut.append(f"[+{len(_kv)-5} más]")
+        _sec_k_cut = "📊 <b>CLAVES</b>\n" + "".join(f"   {l}\n" for l in _kv_cut) + SEP
+        _idx_k = p1.find("📊 <b>CLAVES</b>")
+        _idx_m = p1.find("💰 <b>MERCADOS</b>")
+        if _idx_k != -1 and _idx_m != -1:
+            p1 = p1[:_idx_k] + _sec_k_cut + p1[_idx_m:]
 
     return [p1, p2]
 
