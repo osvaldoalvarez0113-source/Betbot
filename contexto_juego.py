@@ -28,6 +28,13 @@ Uso desde telegram_bot.py (comando /contexto):
 import requests
 from datetime import datetime, timedelta, timezone
 
+try:
+    import forma_reciente as _fr
+    _FR_OK = True
+except Exception:
+    _fr    = None
+    _FR_OK = False
+
 BASE_MLB = "https://statsapi.mlb.com/api/v1"
 TIMEOUT = 12
 
@@ -409,6 +416,23 @@ def obtener_contexto(game_pk):
         "regulares_fuera_home": detectar_descansos(game_pk, home_id, "home"),
         "regulares_fuera_away": detectar_descansos(game_pk, away_id, "away"),
     }
+
+    # ── Forma reciente 14d (pybaseball, opcional) ──────────────────────────
+    _home_name = game["teams"]["home"]["team"].get("name", "")
+    _away_name = game["teams"]["away"]["team"].get("name", "")
+    if _FR_OK:
+        try:
+            ctx["forma_ofensiva_home"] = _fr.forma_ofensiva_14d(_home_name)
+            ctx["forma_ofensiva_away"] = _fr.forma_ofensiva_14d(_away_name)
+            ctx["forma_bullpen_home"]  = _fr.bullpen_14d(_home_name)
+            ctx["forma_bullpen_away"]  = _fr.bullpen_14d(_away_name)
+            ctx["forma_abridor_home"]  = (_fr.forma_abridor(p_home_nombre)
+                                          if p_home_nombre else None)
+            ctx["forma_abridor_away"]  = (_fr.forma_abridor(p_away_nombre)
+                                          if p_away_nombre else None)
+        except Exception as _fe:
+            print(f"[forma_reciente] obtener_contexto error: {_fe}")
+
     return ctx
 
 
@@ -424,34 +448,87 @@ def ajustar_total(total_modelo, ctx):
 
 def ajustar_ml(prob_home, prob_away, ctx):
     """
-    Ajuste leve al ML por splits L/R, descansos y regulares fuera.
-    Máximo ±3% de movimiento — el modelo principal sigue mandando.
+    Ajuste leve al ML por splits L/R, descansos, regulares fuera y forma reciente 14d.
+    Máximo ±4% de movimiento total — el modelo principal sigue mandando.
+
+    Convención de delta: positivo = mejor para home, negativo = mejor para away.
     """
     if not ctx:
         return prob_home, prob_away
     delta = 0.0
 
-    # Splits: si un lineup tiene ventaja clara de OPS vs la mano rival
+    # ── Splits: OPS del lineup vs mano del abridor rival ────────────────────
     oh, oa = ctx.get("ops_home_vs_abridor"), ctx.get("ops_away_vs_abridor")
     if oh and oa:
         dif = oh - oa
         delta += max(min(dif * 0.10, 0.015), -0.015)
 
-    # Regulares descansando (cada uno resta ~0.8%)
+    # ── Regulares descansando (cada uno resta ~0.8%) ─────────────────────────
     rf_h = ctx.get("regulares_fuera_home") or 0
     rf_a = ctx.get("regulares_fuera_away") or 0
     delta -= 0.008 * rf_h
     delta += 0.008 * rf_a
 
-    # Viaje/descanso: visitante jugó anoche de noche y el local no
+    # ── Viaje/descanso: visitante jugó anoche de noche y local no ────────────
     dh, da = ctx.get("descanso_home", {}), ctx.get("descanso_away", {})
     if da.get("fue_nocturno") and not dh.get("jugo_ayer"):
         delta += 0.008
     if dh.get("fue_nocturno") and not da.get("jugo_ayer"):
         delta -= 0.008
 
-    delta = max(min(delta, 0.03), -0.03)
-    ph = min(max(prob_home + delta, 0.01), 0.99)
+    # ── Forma reciente 14d (forma_reciente.py) ───────────────────────────────
+
+    # Ofensiva: CALIENTE +1.5% / FRIO -1.5%
+    def _ofensiva_d(fo):
+        flag = ((fo or {}).get("flag") or "").upper()
+        if flag == "CALIENTE": return  0.015
+        if flag in ("FRIO", "FRÍO"): return -0.015
+        return 0.0
+
+    delta += _ofensiva_d(ctx.get("forma_ofensiva_home"))
+    delta -= _ofensiva_d(ctx.get("forma_ofensiva_away"))   # away hot → bad for home
+
+    # Abridor: EN RACHA +2% / EN CAIDA -2%
+    def _abridor_d(fa):
+        flag = ((fa or {}).get("flag") or "").upper()
+        if flag == "EN RACHA": return  0.020
+        if flag == "EN CAIDA": return -0.020
+        return 0.0
+
+    delta += _abridor_d(ctx.get("forma_abridor_home"))
+    delta -= _abridor_d(ctx.get("forma_abridor_away"))     # away ace hot → bad for home
+
+    # Bullpen: fusionar uso real (MLB Stats API) con ERA-14d (forma_reciente)
+    # Toma el MÁS SEVERO — NUNCA los suma
+    def _bullpen_uso_d(bp):
+        """Delta desde get_bullpen_quemado (relevistas que lanzaron 2 días seguidos)."""
+        if not bp:
+            return 0.0
+        n_seg = len(bp.get("dos_dias_seguidos", []))
+        n_ay  = len(bp.get("ayer", []))
+        if n_seg >= 2: return -0.020
+        if n_seg >= 1: return -0.010
+        if n_ay  >= 3: return -0.010
+        return 0.0
+
+    def _bullpen_forma_d(fb):
+        """Delta desde ERA últimos 14d (forma_reciente.bullpen_14d)."""
+        flag = ((fb or {}).get("flag") or "").upper()
+        if flag == "ELITE":   return  0.015
+        if flag == "QUEMADO": return -0.020
+        return 0.0
+
+    def _merge_bp(bp_uso, fb_forma):
+        d_uso   = _bullpen_uso_d(bp_uso)
+        d_forma = _bullpen_forma_d(fb_forma)
+        return d_uso if abs(d_uso) >= abs(d_forma) else d_forma
+
+    delta += _merge_bp(ctx.get("bullpen_home"), ctx.get("forma_bullpen_home"))
+    delta -= _merge_bp(ctx.get("bullpen_away"), ctx.get("forma_bullpen_away"))
+
+    # ── Cap total ±4% ────────────────────────────────────────────────────────
+    delta = max(min(delta, 0.04), -0.04)
+    ph    = min(max(prob_home + delta, 0.01), 0.99)
     return round(ph, 4), round(1 - ph, 4)
 
 

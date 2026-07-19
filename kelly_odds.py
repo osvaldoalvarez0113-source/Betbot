@@ -7449,6 +7449,38 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     if _bp_load_a_n.get("flag"):
                         ctx_lines += f" {_bp_load_a_n['flag']}"
                     ctx_lines += "\n"
+            # ── Forma reciente 14d ────────────────────────────────────────────
+            try:
+                import forma_reciente as _fr_n
+
+                def _ffl(d):
+                    return (d or {}).get("flag") or "SIN DATO"
+
+                def _ops_frag(fo):
+                    if not fo or fo.get("flag") == "SIN DATO":
+                        return "OPS-14d SIN DATO"
+                    ops = fo.get("ops")
+                    return (f"OPS-14d {ops:.3f} ({fo.get('flag','?')})"
+                            if ops is not None else "OPS-14d SIN DATO")
+
+                _fo_h = _fr_n.forma_ofensiva_14d(home)
+                _fo_a = _fr_n.forma_ofensiva_14d(away)
+                _fb_h = _fr_n.bullpen_14d(home)
+                _fb_a = _fr_n.bullpen_14d(away)
+                _fa_h = (_fr_n.forma_abridor(pn_h)
+                         if pn_h not in ("TBD", "", None) else None)
+                _fa_a = (_fr_n.forma_abridor(pn_a)
+                         if pn_a not in ("TBD", "", None) else None)
+                ctx_lines += (
+                    f"📈 FORMA: {home_es}  {_ops_frag(_fo_h)}"
+                    f" | bullpen ({_ffl(_fb_h)})"
+                    f" | abridor ({_ffl(_fa_h)})\n"
+                    f"📈 FORMA: {away_es}  {_ops_frag(_fo_a)}"
+                    f" | bullpen ({_ffl(_fb_a)})"
+                    f" | abridor ({_ffl(_fa_a)})\n"
+                )
+            except Exception as _fr_err:
+                print(f"[forma notify_game_analysis] {_fr_err}")
             # Umpire
             ump = ctx.get("umpire")
             if ump and ump.get("name"):
@@ -8047,6 +8079,39 @@ def build_analizar_text(result: dict) -> list:
             p1 += f"⚾ Bullpen ERA: {home_es} {_bpera_h:.2f} | {away_es} {_bpera_a:.2f}\n"
         except Exception:
             pass
+
+        # ── Forma reciente 14d ────────────────────────────────────────────────
+        try:
+            import forma_reciente as _fr_tg
+
+            def _ffl_tg(d):
+                return (d or {}).get("flag") or "SIN DATO"
+
+            def _ops_frag_tg(fo):
+                if not fo or fo.get("flag") == "SIN DATO":
+                    return "OPS-14d SIN DATO"
+                ops = fo.get("ops")
+                return (f"OPS-14d {ops:.3f} ({fo.get('flag','?')})"
+                        if ops is not None else "OPS-14d SIN DATO")
+
+            _fo_h_tg = _fr_tg.forma_ofensiva_14d(home)
+            _fo_a_tg = _fr_tg.forma_ofensiva_14d(away)
+            _fb_h_tg = _fr_tg.bullpen_14d(home)
+            _fb_a_tg = _fr_tg.bullpen_14d(away)
+            _fa_h_tg = (_fr_tg.forma_abridor(pn_h)
+                        if pn_h not in ("TBD", "", None) else None)
+            _fa_a_tg = (_fr_tg.forma_abridor(pn_a)
+                        if pn_a not in ("TBD", "", None) else None)
+            p1 += (
+                f"📈 FORMA: {home_es}  {_ops_frag_tg(_fo_h_tg)}"
+                f" | bullpen ({_ffl_tg(_fb_h_tg)})"
+                f" | abridor ({_ffl_tg(_fa_h_tg)})\n"
+                f"📈 FORMA: {away_es}  {_ops_frag_tg(_fo_a_tg)}"
+                f" | bullpen ({_ffl_tg(_fb_a_tg)})"
+                f" | abridor ({_ffl_tg(_fa_a_tg)})\n"
+            )
+        except Exception as _fr_tg_err:
+            print(f"[forma build_analizar_text] {_fr_tg_err}")
 
         p1 += f"{'─'*22}\n"
 
