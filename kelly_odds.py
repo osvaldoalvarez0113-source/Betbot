@@ -454,6 +454,7 @@ def is_in_season(sport_key):
 def game_starts_soon(commence_str, minutes=60):
     try:
         ts_clean = (commence_str or "").replace("Z", "").replace("+00:00", "")[:19]
+        if len(ts_clean) == 16: ts_clean += ":00"
         ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
         diff     = (ct_utc - datetime.utcnow()).total_seconds() / 60
         return diff < minutes
@@ -472,6 +473,7 @@ def _game_already_started(time_str: str, grace_min: int = 5) -> bool:
             return False
         # Normalize to naive UTC: strip Z or +00:00 suffix, take first 19 chars
         ts_clean = ts.replace("Z", "").replace("+00:00", "")[:19]
+        if len(ts_clean) == 16: ts_clean += ":00"
         ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
         now_utc  = datetime.utcnow()
         elapsed  = (now_utc - ct_utc).total_seconds() / 60
@@ -483,6 +485,7 @@ def _days_until(commence_str: str) -> float:
     """Days (float) from now until game. Returns 999 on parse error. Uses naive UTC."""
     try:
         ts_clean = (commence_str or "").replace("Z", "").replace("+00:00", "")[:19]
+        if len(ts_clean) == 16: ts_clean += ":00"
         ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
         return (ct_utc - datetime.utcnow()).total_seconds() / 86400
     except Exception:
@@ -5651,12 +5654,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
                 _ts_enh = _dt_enh.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
                 _game_name_enh = f"{home} vs {away}"
                 _err_type = type(_ece).__name__
-                print(
-                    f"[SKIP] {_game_name_enh} — _enh_ctx falló: "
-                    f"{_err_type}: {_ece}. Juego excluido del análisis. [{_ts_enh}]"
-                )
-                return {"skipped": True, "match": _game_name_enh,
-                        "skip_reason": f"{_err_type}: {_ece}"}
+                print(f"  ⚠️ _enh_ctx falló ({type(_ece).__name__}: {_ece}) — continuando sin contexto enriquecido")
+                _enh_ctx = {}
 
             print(f"[DEBUG ENH] home_last3_era={_enh_ctx.get('home_pitcher_last3_era_avg')} away_last3_era={_enh_ctx.get('away_pitcher_last3_era_avg')}")
 
@@ -9301,7 +9300,7 @@ def get_odds(sport_key, force_fresh=False):
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": API_KEY, "regions": "us",
+            params={"apiKey": API_KEY, "regions": "us,eu",
                     "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
@@ -9342,6 +9341,8 @@ def get_odds(sport_key, force_fresh=False):
 
         _odds_api_429_count = 0
         _odds_api_pause_until = None
+        _result = r.json()
+        print(f"  📌 [{sport_key}] Juegos con Pinnacle: {sum(1 for g in _result if any('pinnacle' in b.get('title','').lower() for b in g.get('bookmakers',[])))}/{len(_result)}")
 
         if _rem != "?" and _rem:
             _rem_i = int(_rem)
@@ -13815,8 +13816,8 @@ def _card_analyze_game(game: dict, sport_key: str) -> dict:
             except Exception:
                 pass
             adj      = pitcher_run_adjustment(era_h, era_a)
-            home_exp = max(0.5, home_exp + adj)
-            away_exp = max(0.5, away_exp - adj)
+            home_exp = max(0.5, home_exp + adj / 2)
+            away_exp = max(0.5, away_exp + adj / 2)
             p_home   = pythagorean_win_prob(home_exp, away_exp)
             p_away   = 1.0 - p_home
             # ML
@@ -15950,7 +15951,6 @@ if __name__ == "__main__":
                         ntfy_post("🚨 PATRONES SITUACIONALES", _body, "high")
                         if _tg_broadcast_fn:
                             _tg_broadcast_fn(
-                                ["955204527"],
                                 "🚨 PATRONES SITUACIONALES\n\n" + _body,
                             )
                         print(f"  🚨 Patrones getaway: {len(_alerts)} alerta(s) enviada(s)")
