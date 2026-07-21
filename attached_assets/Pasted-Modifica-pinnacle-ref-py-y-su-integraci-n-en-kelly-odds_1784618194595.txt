@@ -1,0 +1,17 @@
+Modifica pinnacle_ref.py y su integración en kelly_odds.py para priorizar las llamadas de OddsPapi por valor detectado. Cambios quirúrgicos, no toques el blend ni el panel.
+
+CONTEXTO: OddsPapi cobra 1 llamada por partido y _MAX_DAILY_CALLS=8 solo cubre ~6 juegos/día de un slate MLB de ~15. Hoy el fetch toma los primeros juegos sin criterio. El objetivo: gastar esas llamadas SOLO en juegos donde el modelo ya encontró un candidato con EV, que es donde la calibración Pinnacle importa.
+
+CAMBIO 1 — pinnacle_ref.py:
+Agrega fetch_pinnacle_for_games(game_list) que recibe una lista de tuplas (home, away) y consulta OddsPapi SOLO para esos partidos específicos, respetando el contador diario de _MAX_DAILY_CALLS y el caché existente (si un juego ya está en caché con menos de 4 horas, no gasta llamada). Los fixtures/participants del día se siguen obteniendo con la lógica actual (esas llamadas de índice no cambian). Mantén fetch_pinnacle_slate() como está para compatibilidad, pero que ya no se llame desde run_scan.
+
+CAMBIO 2 — kelly_odds.py, analyze_game_full():
+Después de que candidates se llena y ANTES de llamar _apply_pinnacle_calibration, si hay al menos un candidato con ev_pct >= 3.0 y el juego no está en el caché de Pinnacle, llama pinnacle_ref.fetch_pinnacle_for_games([(home, away)]) para traer la referencia de ESE juego bajo demanda. Si el contador diario ya se agotó, sigue sin Pinnacle (comportamiento actual) con un print informativo.
+
+CAMBIO 3 — kelly_odds.py, run_scan():
+Elimina o comenta la llamada a fetch_pinnacle_slate() del inicio del procesamiento MLB (la del cambio 3d anterior). El fetch ahora es bajo demanda por juego con edge. Mantén el print de estado del caché ("📌 Pinnacle ref (OddsPapi): X juegos en caché, Y llamadas hoy").
+
+VALIDACIÓN:
+Simula con un test: 10 juegos ficticios donde solo 3 tienen candidato con EV >= 3% — verifica que solo se consultan esos 3 y que el contador diario se respeta. Syntax check y tests completos al final.
+
+Resumen: archivos y líneas modificadas, resultado del test de priorización.

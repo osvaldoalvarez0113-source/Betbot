@@ -336,6 +336,138 @@ def fetch_pinnacle_slate() -> dict:
     return cache
 
 
+def fetch_pinnacle_for_games(game_list: list) -> dict:
+    """
+    Fetch Pinnacle odds on-demand for specific (home, away) pairs.
+
+    Only spends API calls on games not already in fresh cache.
+    Ensures the fixture index and participant map are loaded first (1-2 calls),
+    then fetches per-game odds only for the requested games (1 call each).
+    Respects _MAX_DAILY_CALLS quota at every step.
+
+    game_list : list of (home_team, away_team) tuples
+    Returns updated cache dict.
+    """
+    if not _API_KEY:
+        return _load_cache()
+
+    cache = _load_cache()
+    today = _today_utc()
+
+    # Reset odds bucket when the day rolls over
+    if cache.get("date") != today:
+        cache["odds"] = {}
+        cache["date"] = today
+
+    # ── Helper: is this game already in fresh per-entry cache? ───────────────
+    def _game_cached_fresh(home: str, away: str) -> bool:
+        for entry in cache.get("odds", {}).values():
+            if (_fuzzy_match(home, entry.get("home_name", ""))
+                    and _fuzzy_match(away, entry.get("away_name", ""))):
+                entry_ts = float(entry.get("_fetched_at",
+                                           cache.get("fetched_at", 0)))
+                return (_now_ts() - entry_ts) < _CACHE_TTL_SECS
+        return False
+
+    games_needed = [(h, a) for h, a in game_list
+                    if not _game_cached_fresh(h, a)]
+    if not games_needed:
+        return cache   # all requested games already fresh
+
+    # ── Refresh fixture index if stale ────────────────────────────────────────
+    if not cache.get("fixtures") or cache.get("date") != today:
+        if not _daily_calls_ok(cache):
+            print(f"  [pinnacle_ref] ℹ️ cuota diaria alcanzada — no se pueden cargar fixtures")
+            return cache
+        tomrw = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
+        fx_raw = _api_get("fixtures", {
+            "tournamentId": _MLB_TOURNAMENT,
+            "from": today,
+            "to": tomrw,
+        })
+        _increment_calls(cache, 1)
+        if fx_raw is None:
+            _save_cache(cache)
+            return cache
+        lst = fx_raw if isinstance(fx_raw, list) else []
+        fixtures_today = [f for f in lst
+                          if f.get("startTime", "").startswith(today) and f.get("hasOdds")]
+        if not fixtures_today:
+            fixtures_today = [f for f in lst if f.get("hasOdds")]
+        cache["fixtures"] = fixtures_today
+
+    # ── Refresh participants if stale ─────────────────────────────────────────
+    if not _participants_fresh(cache) and _daily_calls_ok(cache):
+        ptcp_raw = _api_get("participants", {"sportId": _MLB_SPORT_ID})
+        _increment_calls(cache, 1)
+        if isinstance(ptcp_raw, dict):
+            cache["participants"]    = ptcp_raw
+            cache["participants_at"] = _now_ts()
+        elif isinstance(ptcp_raw, list):
+            cache["participants"] = {
+                str(p.get("participantId", "")): p.get("participantName", "")
+                for p in ptcp_raw
+            }
+            cache["participants_at"] = _now_ts()
+
+    ptcp = cache.get("participants", {})
+    if "odds" not in cache:
+        cache["odds"] = {}
+
+    # ── Fetch per-game odds for only the requested games ─────────────────────
+    for home, away in games_needed:
+        if not _daily_calls_ok(cache):
+            print(f"  [pinnacle_ref] ℹ️ cuota diaria alcanzada "
+                  f"({cache.get('daily_calls', 0)}/{_MAX_DAILY_CALLS}) — "
+                  f"{home} vs {away} seguirá sin Pinnacle")
+            break
+
+        # Find matching fixture by team-name fuzzy match
+        target_fx = None
+        for fx in cache.get("fixtures", []):
+            p1 = str(fx.get("participant1Id", ""))
+            p2 = str(fx.get("participant2Id", ""))
+            h_name = ptcp.get(p1, "")
+            a_name = ptcp.get(p2, "")
+            if _fuzzy_match(home, h_name) and _fuzzy_match(away, a_name):
+                target_fx = fx
+                break
+
+        if target_fx is None:
+            print(f"  [pinnacle_ref] ⚠️ fixture no encontrado: {home} vs {away}")
+            continue
+
+        fid = target_fx.get("fixtureId")
+        if not fid:
+            continue
+
+        # Skip if this specific fixtureId is still fresh
+        if fid in cache["odds"]:
+            entry_ts = float(cache["odds"][fid].get("_fetched_at", 0))
+            if (_now_ts() - entry_ts) < _CACHE_TTL_SECS:
+                continue
+
+        time.sleep(0.35)
+        raw = _api_get("odds", {"fixtureId": fid})
+        _increment_calls(cache, 1)
+        if raw is not None:
+            parsed                = _parse_pinnacle_odds(raw)
+            parsed["home_name"]   = ptcp.get(str(target_fx.get("participant1Id", "")), "")
+            parsed["away_name"]   = ptcp.get(str(target_fx.get("participant2Id", "")), "")
+            parsed["startTime"]   = target_fx.get("startTime", "")
+            parsed["_fetched_at"] = _now_ts()
+            cache["odds"][fid]    = parsed
+            h2h_ok = "✓" if parsed.get("h2h") else "✗"
+            tot_ok = "✓" if parsed.get("totals") else "✗"
+            print(f"  [pinnacle_ref] 📌 on-demand: {home} vs {away} "
+                  f"— ML {h2h_ok}  O/U {tot_ok}  "
+                  f"({cache.get('daily_calls', 0)}/{_MAX_DAILY_CALLS} llamadas hoy)")
+
+    cache["fetched_at"] = _now_ts()
+    _save_cache(cache)
+    return cache
+
+
 def get_pinnacle_for_game(home_team: str, away_team: str) -> "dict | None":
     """
     Look up Pinnacle odds for a game from the on-disk cache (never calls API).

@@ -6908,6 +6908,17 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
     # Drop any pick whose true probability is below the minimum threshold
     candidates = [c for c in candidates if c["true_prob"] >= PROB_MIN]
 
+    # ── On-demand Pinnacle fetch (MLB only) ───────────────────────────────
+    # If any candidate has EV >= 3.0% and the game isn't in fresh cache,
+    # spend one API call to get Pinnacle reference for this game now.
+    # This prioritizes quota toward games with actual detected value.
+    if is_mlb and any(c.get("ev_pct", 0) >= 3.0 for c in candidates):
+        try:
+            import pinnacle_ref as _pref_od
+            _pref_od.fetch_pinnacle_for_games([(home, away)])
+        except Exception:
+            pass   # non-fatal; calibration will just use model-only probs
+
     # ── Pinnacle calibration: blend model prob 40% + Pinnacle 60% ─────────
     # Recomputes EV and stake for every candidate where Pinnacle has odds.
     # Candidates that fall below PROB_MIN after blending are dropped.
@@ -15658,10 +15669,10 @@ def run_scan():
             # Override Odds-API times with authoritative MLB Stats API times
             if "mlb" in sport_key.lower():
                 _patch_mlb_commence_times(games)
-                # Pre-load Pinnacle ref cache (OddsPapi) — respects own quota/TTL
+                # Pinnacle ref: fetch is now on-demand per game with EV (see analyze_game_full).
+                # Print cache status only; no upfront slate fetch.
                 try:
                     import pinnacle_ref as _pref
-                    _pref.fetch_pinnacle_slate()
                     print(f"  📌 Pinnacle ref (OddsPapi): {_pref.cache_status()}")
                 except Exception as _pre:
                     print(f"  ⚠️ pinnacle_ref error: {_pre}")
