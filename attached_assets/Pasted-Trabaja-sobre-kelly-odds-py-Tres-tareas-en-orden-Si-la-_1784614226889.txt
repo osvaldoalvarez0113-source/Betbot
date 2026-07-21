@@ -1,0 +1,20 @@
+Trabaja sobre kelly_odds.py. Tres tareas, en orden. Si la tarea 1 falla, DETENTE y repórtame el error sin hacer las tareas 2 y 3.
+
+TAREA 1 — VERIFICACIÓN (obligatoria primero):
+Escribe y ejecuta un script temporal que use la variable de entorno ODDSPAPI_KEY para consultar la API de OddsPapi (docs: https://oddspapi.io/us/docs) y confirmar que devuelve odds de Pinnacle (bookmaker "pinnacle") para partidos de MLB de hoy, mercados moneyline y totals. Imprime cuántos juegos MLB traen Pinnacle y un ejemplo de odds home/away. Si devuelve 0 juegos con Pinnacle o error de autenticación, DETENTE y repórtalo.
+
+TAREA 2 — MÓDULO pinnacle_ref.py (solo si tarea 1 pasó):
+Crea pinnacle_ref.py con:
+- fetch_pinnacle_slate(): consulta OddsPapi UNA vez y trae odds Pinnacle (h2h y totals) de todos los juegos MLB de hoy. Guarda en caché de disco pinnacle_cache.json con timestamp.
+- get_pinnacle_for_game(home_team, away_team): lee del caché (nunca llama la API directo) y devuelve {"home": precio_decimal, "away": precio_decimal} para h2h y {"line": x, "over": p, "under": p} para totals, con matching difuso de nombres de equipos (mismo estilo que _lookup_pitcher_data en kelly_odds.py). Devuelve None si no hay match.
+- Regla de frecuencia ESTRICTA: máximo 3 llamadas a OddsPapi por día (tier gratis = 250 req/mes). Refresca el caché solo si tiene más de 4 horas. Contador diario persistido en el mismo json.
+- Manejo de errores: si OddsPapi falla, usa el caché viejo si existe (con print de advertencia); si no hay caché, devuelve None. Nunca rompas el scan.
+
+TAREA 3 — INTEGRACIÓN EN kelly_odds.py (cambios quirúrgicos):
+a) En get_odds(), revierte "regions": "us,eu" a "regions": "us" (OddsPapi ahora cubre Pinnacle; no quemar quota doble).
+b) En _extract_pinnacle_odds(game): si el loop sobre bookmakers no encuentra Pinnacle, antes de devolver None intenta: from pinnacle_ref import get_pinnacle_for_game y devuelve su resultado h2h para game["home_team"]/game["away_team"].
+c) En _extract_pinnacle_totals(game): mismo fallback con el resultado de totals.
+d) En run_scan(), al inicio del procesamiento de baseball_mlb, llama pinnacle_ref.fetch_pinnacle_slate() (respeta su propia regla de caché/frecuencia interna).
+e) Agrega un print por scan: "📌 Pinnacle ref (OddsPapi): X juegos en caché, edad Y min".
+
+No toques kelly_stake, el panel, ni la lógica del blend — ya están listos para recibir estos datos. Confirma cada cambio con línea modificada.
