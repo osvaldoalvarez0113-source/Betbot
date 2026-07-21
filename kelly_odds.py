@@ -2802,16 +2802,36 @@ def _fetch_statcast_all(player_type: str = "pitcher") -> dict:
     Download Baseball Savant leaderboard CSV once per calendar day.
     player_type: "pitcher" or "batter"
     Returns {name_key → metrics_dict}.  Returns {} silently on any failure.
+
+    URL uses ?selections= to request only the columns we need.
+    min=10 filters players with fewer than 10 PA/BF (removes noise).
+
+    CSV quirk: Savant emits a UTF-8 BOM that shifts DictReader headers unless
+    stripped.  After stripping, the name column is "last_name, first_name"
+    (a single combined field, not two separate columns).
+
+    Confirmed column names (2026):
+      pitcher: last_name, first_name | p_era | xera | whiff_percent |
+               hard_hit_percent | barrel_batted_rate | oz_swing_percent
+      batter:  last_name, first_name | xba | xslg |
+               hard_hit_percent | barrel_batted_rate
     """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     cache = _statcast_pitcher_cache if player_type == "pitcher" else _statcast_batter_cache
     if today in cache:
         return cache[today]
 
+    import csv, io
+
+    if player_type == "pitcher":
+        selections = "p_era,xera,whiff_percent,hard_hit_percent,barrel_batted_rate,oz_swing_percent"
+    else:
+        selections = "xba,xslg,hard_hit_percent,barrel_batted_rate"
+
     url = (
         f"https://baseballsavant.mlb.com/leaderboard/custom"
-        f"?year={MLB_YEAR}&type={player_type}&min=1&pos=p"
-        f"&player_type={player_type}&csv=true"
+        f"?year={MLB_YEAR}&type={player_type}&min=10"
+        f"&selections={selections}&csv=true"
     )
     try:
         r = requests.get(url, timeout=25,
@@ -2821,42 +2841,49 @@ def _fetch_statcast_all(player_type: str = "pitcher") -> dict:
             cache[today] = {}
             return {}
 
-        import csv, io
-        reader = csv.DictReader(io.StringIO(r.text))
+        # Strip UTF-8 BOM — without this the first column header is malformed
+        # and DictReader splits "last_name, first_name" into two phantom columns,
+        # shifting all data values one position to the right.
+        reader = csv.DictReader(io.StringIO(r.text.lstrip('\ufeff')))
         result = {}
         for row in reader:
-            first = (row.get("first_name") or "").strip().lower()
-            last  = (row.get("last_name")  or "").strip().lower()
-            if not first or not last:
+            # Combined name column: "Scherzer, Max" → last="scherzer", first="max"
+            combined = (row.get("last_name, first_name") or "").strip()
+            if not combined:
                 continue
-            key = f"{last}_{first}"
+            parts = combined.split(", ", 1)
+            last  = parts[0].strip().lower()
+            first = parts[1].strip().lower() if len(parts) > 1 else ""
+            if not last:
+                continue
+            key = f"{last}_{first}" if first else last
+
             if player_type == "pitcher":
                 result[key] = {
-                    "xera":         _safe_float(row.get("p_era")   or row.get("xera")
-                                               or row.get("est_era")),
+                    "xera":         _safe_float(row.get("xera")),
                     "whiff_pct":    _safe_float(row.get("whiff_percent")),
                     "hard_hit_pct": _safe_float(row.get("hard_hit_percent")),
-                    "barrel_pct":   _safe_float(row.get("barrel_batted_rate")
-                                               or row.get("barrel_percent")),
-                    "chase_pct":    _safe_float(row.get("oz_swing_percent")
-                                               or row.get("chase_percent")),
+                    "barrel_pct":   _safe_float(row.get("barrel_batted_rate")),
+                    "chase_pct":    _safe_float(row.get("oz_swing_percent")),
                 }
             else:
                 result[key] = {
                     "xba":          _safe_float(row.get("xba")),
                     "xslg":         _safe_float(row.get("xslg")),
                     "hard_hit_pct": _safe_float(row.get("hard_hit_percent")),
-                    "barrel_pct":   _safe_float(row.get("barrel_batted_rate")
-                                               or row.get("barrel_percent")),
+                    "barrel_pct":   _safe_float(row.get("barrel_batted_rate")),
                 }
+
         cache[today] = result
-        # FIX 4: diagnostic — report actual CSV columns when expected pitcher keys are missing
-        if player_type == "pitcher" and (not result or not any(
+
+        # Diagnostic: warn if key metrics are still all-None after parse
+        if player_type == "pitcher" and result and not any(
             v.get("xera") is not None or v.get("whiff_pct") is not None
             or v.get("hard_hit_pct") is not None
             for v in list(result.values())[:5]
-        )):
-            print(f"⚠️ Statcast columnas recibidas: {reader.fieldnames}")
+        ):
+            print(f"⚠️ Statcast columnas recibidas (inesperadas): {reader.fieldnames}")
+
         print(f"  🔬 Statcast {player_type}s cargados: {len(result)} jugadores")
         return result
     except Exception as _e:
