@@ -1,0 +1,18 @@
+Aplica estos 5 fixes a kelly_odds.py. Cambios quirúrgicos, NO toques pinnacle_ref.py ni nada de la integración Pinnacle recién hecha.
+
+FIX 1 — Activar _perf_adj (hoy se calcula y nunca se usa):
+En analyze_totals(), donde se compara "if abs(diff) < threshold", multiplica el threshold por el ajuste del mercado: threshold_adj = threshold * _perf_adj.get("totals", 1.0), y usa threshold_adj en la comparación. En analyze() (ML), donde se compara r["edge"] < MIN_EDGE, usa MIN_EDGE * _perf_adj.get("h2h", 1.0). Agrega un print cuando el ajuste sea distinto de 1.0.
+
+FIX 2 — Liberar exposición diaria de picks expirados:
+En _poll_ntfy_confirmations() o al inicio de queue_for_confirmation(), agrega limpieza: recorre la cola de pending_confirm.json y elimina entradas cuyo juego ya comenzó hace más de 2 horas (usa _game_already_started con grace_min=120 sobre el campo "time" del entry). Por cada entrada eliminada, resta su suggested_stake de _daily_exposure (sin bajar de 0) y llama _save_daily_exposure(). Print resumiendo cuántos picks expiraron y cuánta exposición se liberó.
+
+FIX 3 — Athletics en Sacramento (2025+):
+En MLB_PARK_CITIES cambia "Oakland Athletics" a ("Sacramento", 38.5802, -121.5133) — Sutter Health Park. En MLB_STADIUM_TIMEZONE mantén America/Los_Angeles. En MLB_PARK_CF_BEARING pon None temporalmente (sin dato confiable de orientación → sin ajuste de viento, mejor que un ajuste equivocado). Además, en _MLB_TEAM_IDS y en los dicts de parks, agrega la clave "Athletics" (sin "Oakland") apuntando a los mismos valores, porque la Odds API puede usar ese nombre corto.
+
+FIX 4 — Verificar columnas del CSV de Statcast:
+En _fetch_statcast_all(), después de parsear el CSV, si result queda vacío O si en la primera fila ninguna de las claves esperadas (xera/whiff_pct/hard_hit_pct) obtuvo valor no-None, imprime las columnas reales del CSV: print(f"⚠️ Statcast columnas recibidas: {reader.fieldnames}") y repórtame en tu resumen qué columnas devuelve realmente Baseball Savant para que corrijamos los nombres si no coinciden.
+
+FIX 5 — Sacar bet365 de los libros US de steam:
+En _STEAM_US_SLUGS elimina "bet365" (es libro internacional, bloqueado en el resto del código).
+
+Ejecuta el syntax check y los tests después. Resumen final: cambio, línea, y el output del FIX 4 sobre las columnas de Statcast.

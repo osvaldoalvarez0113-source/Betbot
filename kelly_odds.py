@@ -318,7 +318,8 @@ MLB_PARK_CITIES = {
     "Minnesota Twins":        ("Minneapolis",    44.9817,  -93.2776),
     "New York Mets":          ("New York",       40.7571,  -73.8458),
     "New York Yankees":       ("New York",       40.8296,  -73.9262),
-    "Oakland Athletics":      ("Oakland",        37.7516, -122.2005),
+    "Oakland Athletics":      ("Sacramento",      38.5802, -121.5133),   # Sutter Health Park (2025+)
+    "Athletics":              ("Sacramento",      38.5802, -121.5133),
     "Philadelphia Phillies":  ("Philadelphia",   39.9061,  -75.1665),
     "Pittsburgh Pirates":     ("Pittsburgh",     40.4469,  -80.0057),
     "San Diego Padres":       ("San Diego",      32.7076, -117.1570),
@@ -355,7 +356,8 @@ MLB_PARK_CF_BEARING = {
     "Minnesota Twins":        295,    # Target Field — CF toward NW
     "New York Mets":           25,    # Citi Field — CF toward NNE
     "New York Yankees":         5,    # Yankee Stadium — CF toward N
-    "Oakland Athletics":      355,    # RingCentral Coliseum — CF toward N
+    "Oakland Athletics":      None,   # Sutter Health Park Sacramento — CF bearing not confirmed
+    "Athletics":              None,   # Sutter Health Park Sacramento — CF bearing not confirmed
     "Philadelphia Phillies":   20,    # Citizens Bank Park — CF toward NNE
     "Pittsburgh Pirates":      30,    # PNC Park — CF toward NE
     "San Diego Padres":         0,    # Petco Park — CF toward N
@@ -391,7 +393,8 @@ MLB_STADIUM_TIMEZONE = {
     "Minnesota Twins":         "America/Chicago",
     "New York Mets":           "America/New_York",
     "New York Yankees":        "America/New_York",
-    "Oakland Athletics":       "America/Los_Angeles",
+    "Oakland Athletics":       "America/Los_Angeles",   # Sutter Health Park, Sacramento
+    "Athletics":               "America/Los_Angeles",
     "Philadelphia Phillies":   "America/New_York",
     "Pittsburgh Pirates":      "America/New_York",
     "San Diego Padres":        "America/Los_Angeles",
@@ -2847,6 +2850,13 @@ def _fetch_statcast_all(player_type: str = "pitcher") -> dict:
                                                or row.get("barrel_percent")),
                 }
         cache[today] = result
+        # FIX 4: diagnostic — report actual CSV columns when expected pitcher keys are missing
+        if player_type == "pitcher" and (not result or not any(
+            v.get("xera") is not None or v.get("whiff_pct") is not None
+            or v.get("hard_hit_pct") is not None
+            for v in list(result.values())[:5]
+        )):
+            print(f"⚠️ Statcast columnas recibidas: {reader.fieldnames}")
         print(f"  🔬 Statcast {player_type}s cargados: {len(result)} jugadores")
         return result
     except Exception as _e:
@@ -4584,10 +4594,13 @@ def analyze_totals(games, sport_key):
             }
 
         diff = our_line - book_line
+        threshold_adj = threshold * _perf_adj.get("totals", 1.0)
+        if _perf_adj.get("totals", 1.0) != 1.0:
+            print(f"   🔧 _perf_adj totals={_perf_adj['totals']:.2f} → umbral ajustado {threshold:.2f}→{threshold_adj:.2f}")
         print(f"   📐 Proyección: {our_line:.1f}  Libro: {book_line}  "
-              f"Diff: {diff:+.1f}  Umbral: ±{threshold}")
-        if abs(diff) < threshold:
-            print(f"   ❌ Sin edge ({abs(diff):.1f} < {threshold} umbral)")
+              f"Diff: {diff:+.1f}  Umbral: ±{threshold_adj:.2f}")
+        if abs(diff) < threshold_adj:
+            print(f"   ❌ Sin edge ({abs(diff):.1f} < {threshold_adj:.2f} umbral)")
             continue
 
         bet_over = diff > 0
@@ -8741,6 +8754,17 @@ def queue_for_confirmation(bets: list, sport_key: str) -> None:
     max_daily = BANKROLL * MAX_DAILY_EXPO_PCT   # e.g. $150 at $1000 bankroll
 
     queue = _load_confirm_queue()
+
+    # ── Clean up expired pending picks (game started > 2h ago) ───────────────
+    expired = [e for e in queue if _game_already_started(e.get("time", ""), grace_min=120)]
+    if expired:
+        released = sum(float(e.get("suggested_stake", 0)) for e in expired)
+        queue = [e for e in queue if e not in expired]
+        _save_confirm_queue(queue)
+        _daily_exposure = max(0.0, _daily_exposure - released)
+        _save_daily_exposure()
+        print(f"  🗑️  {len(expired)} pick(s) expirado(s) eliminados — ${released:.2f} liberados de exposición")
+
     now   = datetime.now(CDT).strftime("%Y-%m-%d %H:%M CDT")
     queued_count = 0
 
@@ -13302,7 +13326,10 @@ def analyze(games, prev_map, new_map, sport_key=""):
             (away, fp_a, best_a, "AWAY", best_bk_a, bov_odds_a, top3_a),
         ]:
             r = kelly_stake(prob, best_odd)
-            if not r["has_value"] or r["edge"] < MIN_EDGE:
+            _min_edge_adj = MIN_EDGE * _perf_adj.get("h2h", 1.0)
+            if _perf_adj.get("h2h", 1.0) != 1.0:
+                print(f"   🔧 _perf_adj h2h={_perf_adj['h2h']:.2f} → MIN_EDGE ajustado {MIN_EDGE}→{_min_edge_adj:.2f}%")
+            if not r["has_value"] or r["edge"] < _min_edge_adj:
                 print(f"   📉 {team}: sin valor  edge={r['edge']:+.1f}%  odds={best_odd}")
                 continue
 
@@ -14407,7 +14434,7 @@ _STEAM_MIN_BOOKS    = 5     # Rule 1: need 5+ books moving same direction
 _STEAM_MIN_PCT_MOVE = 0.04  # Rule 4: minimum 4% price drop to count a book
 _STEAM_US_SLUGS     = {     # Rule 2: at least one of these must appear
     "bovada", "fanduel", "draftkings", "betonline", "mybookie",
-    "pointsbet", "betmgm", "caesars", "bet365",
+    "pointsbet", "betmgm", "caesars",
 }
 _STEAM_PREMIUM_BOOKS = 7    # Rule 5: 7+ books → premium steam
 _STEAM_PREMIUM_US    = 2    # Rule 5: 2+ US books required for premium
