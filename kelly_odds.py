@@ -2929,6 +2929,14 @@ def _extract_pinnacle_odds(game: dict) -> "dict | None":
                             pin_a = o["price"]
                     if pin_h is not None and pin_a is not None:
                         return {"home": pin_h, "away": pin_a}
+    # Fallback: OddsPapi Pinnacle ref cache
+    try:
+        from pinnacle_ref import get_pinnacle_for_game as _gpfg
+        _ref = _gpfg(home, away)
+        if _ref and _ref.get("h2h"):
+            return _ref["h2h"]
+    except Exception:
+        pass
     return None
 
 def _check_pinnacle_movement(game: dict, pick_label: str, home: str) -> str:
@@ -3054,6 +3062,16 @@ def _extract_pinnacle_totals(game: dict) -> "dict | None":
                             un   = o.get("price")
                     if ov and un and line is not None:
                         return {"line": line, "over": ov, "under": un}
+    # Fallback: OddsPapi Pinnacle ref cache
+    try:
+        _home = game.get("home_team", "")
+        _away = game.get("away_team", "")
+        from pinnacle_ref import get_pinnacle_for_game as _gpfg2
+        _ref2 = _gpfg2(_home, _away)
+        if _ref2 and _ref2.get("totals"):
+            return _ref2["totals"]
+    except Exception:
+        pass
     return None
 
 
@@ -9300,7 +9318,7 @@ def get_odds(sport_key, force_fresh=False):
     try:
         r = requests.get(
             f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={"apiKey": API_KEY, "regions": "us,eu",
+            params={"apiKey": API_KEY, "regions": "us",
                     "markets": "h2h,totals,spreads", "oddsFormat": "decimal"},
             timeout=10,
         )
@@ -15586,6 +15604,13 @@ def run_scan():
             # Override Odds-API times with authoritative MLB Stats API times
             if "mlb" in sport_key.lower():
                 _patch_mlb_commence_times(games)
+                # Pre-load Pinnacle ref cache (OddsPapi) — respects own quota/TTL
+                try:
+                    import pinnacle_ref as _pref
+                    _pref.fetch_pinnacle_slate()
+                    print(f"  📌 Pinnacle ref (OddsPapi): {_pref.cache_status()}")
+                except Exception as _pre:
+                    print(f"  ⚠️ pinnacle_ref error: {_pre}")
 
             # ── Soccer "today first" filter ────────────────────────────────
             # For soccer: prioritize today's games; only fall back to
