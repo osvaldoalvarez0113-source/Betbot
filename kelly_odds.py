@@ -11098,7 +11098,15 @@ def analyze_with_claude(game_data: dict, sport: str,
             system=(_CLAUDE_SYSTEM + ("\n\n" + _extra_system if _extra_system else "")),
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text.strip()
+        # Claude with extended thinking may return a ThinkingBlock before the TextBlock.
+        # Using content[0].text would raise AttributeError — find the first block with .text.
+        _text_block = next((b for b in msg.content if hasattr(b, "text")), None)
+        if _text_block is None:
+            raise ValueError(
+                f"Claude returned no TextBlock — content types: "
+                f"{[type(b).__name__ for b in msg.content]}"
+            )
+        raw = _text_block.text.strip()
         if raw.startswith("```"):
             parts = raw.split("```")
             raw   = parts[1] if len(parts) >= 2 else raw
@@ -11815,7 +11823,8 @@ def _generar_narrativa(context: dict, candidates: list, home: str, away: str,
             system="Eres un experto en béisbol que habla en español natural. Nunca uses JSON, listas, ni tecnicismos. Exactamente 3 oraciones cortas y directas.",
             messages=[{"role": "user", "content": prompt}]
         )
-        return msg.content[0].text.strip()
+        _tb_narr = next((b for b in msg.content if hasattr(b, "text")), None)
+        return (_tb_narr.text.strip() if _tb_narr else "")
     except Exception as _ne:
         print(f"  ⚠️  narrativa error: {_ne}")
         try:
@@ -12367,7 +12376,8 @@ def panel_expertos(game_data: dict, sport: str,
                 system="Eres un experto en apuestas deportivas. Responde SOLO en español conversacional. NUNCA uses JSON, NUNCA uses bloques de código, NUNCA uses comillas. Habla como un amigo directo. Máximo 4 oraciones.",
                 messages=[{"role": "user", "content": _synthesis_prompt if _expert_lines else json.dumps(game_data, default=str, ensure_ascii=False)[:1000]}],
             )
-            _syn_raw = _syn_msg.content[0].text.strip()
+            _syn_tb  = next((b for b in _syn_msg.content if hasattr(b, "text")), None)
+            _syn_raw = _syn_tb.text.strip() if _syn_tb else ""
             import re as _re_syn
             _syn_raw = _re_syn.sub(r'```[\w]*', '', _syn_raw)
             _syn_raw = _re_syn.sub(r'[{}\[\]]', '', _syn_raw)
