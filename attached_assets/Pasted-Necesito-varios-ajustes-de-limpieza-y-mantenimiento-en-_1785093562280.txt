@@ -1,0 +1,22 @@
+Necesito varios ajustes de limpieza y mantenimiento en kelly_odds.py, todos de bajo riesgo. Hazlos en este orden, con tests después de cada bloque:
+
+BLOQUE 1 — Eliminar código muerto del Mundial FIFA
+El Mundial 2026 ya terminó (la final fue a mediados de julio). Los comandos /picksfutbol, /mundial y /parlayfutbol y toda su lógica asociada (fetch de partidos del Mundial, cualquier función específica de FIFA) ya no tienen partidos que analizar. Encuentra y elimina todo ese código y las entradas correspondientes en el texto de /ayuda. Confírmame qué archivos/funciones tocaste.
+
+BLOQUE 2 — Agregar /kprops al menú de /ayuda
+El comando /kprops (del módulo k_props.py) ya existe y funciona en el bot, pero no aparece listado en el texto de respuesta de /ayuda. Agrégalo en la sección de MLB con una descripción breve, ej:
+/kprops Pitcher | Rival | Línea | Over/Under | Cuota — análisis manual de props de ponches
+
+También verifica: ¿el scan automático de k_props (run_k_props_scan) está efectivamente integrado dentro de run_scan() como quedó en la sesión donde lo agregamos, o quedó sin conectar? Confírmame el estado real, porque no hemos visto ninguna notificación automática de props llegar a Telegram en los últimos días.
+
+BLOQUE 3 — Resolver la confusión entre /estado y /salud
+Ambos comandos suenan a lo mismo pero hacen cosas distintas (/estado = salud del bot, /salud = diagnóstico completo de APIs y archivos). Renombra o aclara para que no se confundan: sugiero que /estado se enfoque en picks activos/bankroll/resumen operativo del día, y /salud se quede como el diagnóstico técnico de APIs y archivos. Actualiza el texto de /ayuda para reflejar la diferencia claramente.
+
+BLOQUE 4 — Agregar estado de los fixes de hoy a /salud
+Dentro del diagnóstico de /salud, agrega una sección que confirme si los 3 fixes aplicados hoy siguen activos:
+✅/❌ ERA de abridor confirmado (vs promedio de equipo)
+✅/❌ Boost de localía direccional (no favorece automáticamente al local)
+✅/❌ ELO seed para equipos sin historial (vs 50/50 falso)
+Esto es para poder verificar en segundos si alguno de estos se rompió en el futuro, sin auditar todo el pipeline de nuevo.
+
+PASO FINAL — Corre los tests existentes (deben seguir en verde) y prueba /kprops manualmente con un ejemplo real de hoy para confirmar que efectivamente sigue funcionando después de todos los cambios de API keys de hoy (Odds API nueva key, Anthropic recargado). Repórtame el resultado de esa prueba.

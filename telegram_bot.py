@@ -158,11 +158,8 @@ def _cmd_ayuda(chat_id: str):
         "/mlb — Análisis completo de todos los partidos MLB\n"
         "/parlay — Mejor parlay del día MLB\n"
         "/hoy — Resumen rápido MLB con pitchers\n"
-        "/analizar <code>Equipo A vs Equipo B</code> — análisis completo\n\n"
-        "🏆 <b>Mundial FIFA:</b>\n"
-        "/picksfutbol — Top 5 mejores picks del Mundial hoy\n"
-        "/mundial — Análisis completo partidos del Mundial\n"
-        "/parlayfutbol — Mejor parlay del Mundial hoy\n\n"
+        "/analizar <code>Equipo A vs Equipo B</code> — análisis completo\n"
+        "/kprops <code>Pitcher | Rival | Línea | Over/Under | Cuota</code> — props de ponches\n\n"
         "💰 <b>Bankroll:</b>\n"
         "/aposte <code>Pick $monto</code> — registrar apuesta\n"
         "/historial — tus apuestas de hoy con P&L\n"
@@ -171,8 +168,8 @@ def _cmd_ayuda(chat_id: str):
         "/clv — Closing Line Value\n\n"
         "📊 <b>Reportes:</b>\n"
         "/reporte — reporte completo W/L/ROI\n"
-        "/estado — salud del bot\n"
-        "/salud — diagnóstico completo de APIs y archivos\n"
+        "/estado — resumen operativo del día (picks activos, bankroll)\n"
+        "/salud — diagnóstico técnico de APIs, archivos y estado de los modelos\n"
         "/elite <code>Local vs Visitante</code> — análisis elite (claude-fable-5)\n\n"
         "ℹ️ /ayuda — esta lista"
     ))
@@ -329,10 +326,6 @@ def _cmd_best_picks(chat_id: str, sport_key: str, emoji: str, label: str):
 
 def _cmd_picks(chat_id: str):
     _cmd_best_picks(chat_id, "baseball_mlb", "⚾", "MLB")
-
-
-def _cmd_picks_futbol(chat_id: str):
-    _cmd_best_picks(chat_id, "soccer_fifa_world_cup", "🏆", "del Mundial")
 
 
 def _cmd_bankroll(chat_id: str):
@@ -510,25 +503,39 @@ def _cmd_clv(chat_id: str):
 
 
 def _cmd_estado(chat_id: str):
+    """Resumen operativo del día: picks activos, bankroll, últimas apuestas."""
     uptime  = datetime.datetime.now() - _start_time
     horas   = int(uptime.total_seconds() // 3600)
     minutos = int((uptime.total_seconds() % 3600) // 60)
-    trades  = _load_json(TRACKER_FILE, {"picks": []})
+    trades  = _load_json(TRACKER_FILE, {"picks": [], "bankroll": 1000.0})
     hoy     = _ct_today()
-    picks_hoy = sum(1 for p in trades.get("picks", []) if p.get("fecha") == hoy)
-    tk_ok   = "✅" if TELEGRAM_TOKEN else "❌"
-    anlz_ok = "✅" if _analyze_fn else "❌"
-    odds_ok = "✅" if _get_odds_fn else "❌"
-    _send(chat_id, (
-        f"🔧 <b>Estado del Bot</b>\n\n"
-        f"Uptime:   {horas}h {minutos}m\n"
-        f"Picks hoy: {picks_hoy}\n\n"
-        f"Módulos:\n"
-        f"  Telegram:  {tk_ok}\n"
-        f"  Análisis:  {anlz_ok}\n"
-        f"  Odds API:  {odds_ok}\n\n"
-        f"Fecha: {hoy}"
-    ))
+    picks   = trades.get("picks", [])
+    bankroll = trades.get("bankroll", 1000.0)
+
+    pending = [p for p in picks if p.get("estado") == "PENDING" and p.get("fecha") == hoy]
+    wins    = [p for p in picks if p.get("estado") == "WIN"     and p.get("fecha") == hoy]
+    losses  = [p for p in picks if p.get("estado") == "LOSS"    and p.get("fecha") == hoy]
+
+    pnl_hoy = sum(p.get("profit", 0) for p in picks
+                  if p.get("fecha") == hoy and p.get("estado") in ("WIN", "LOSS", "PUSH"))
+
+    lines = [
+        f"📋 <b>ESTADO OPERATIVO — {hoy}</b>\n",
+        f"🕐 Uptime: {horas}h {minutos}m\n",
+        f"💰 Bankroll: <b>${bankroll:,.2f}</b>",
+        f"📈 P&L hoy: {pnl_hoy:+.2f}\n",
+        f"🎯 Picks hoy:",
+        f"   ⏳ Pendientes: {len(pending)}",
+        f"   ✅ Wins:       {len(wins)}",
+        f"   ❌ Losses:     {len(losses)}",
+    ]
+
+    if pending:
+        lines.append("\n<b>Pendientes:</b>")
+        for p in pending[:5]:
+            lines.append(f"  • {p.get('pick','?')}  ${p.get('monto',0):.0f}")
+
+    _send(chat_id, "\n".join(lines))
 
 
 def _cmd_salud(chat_id: str):
@@ -616,6 +623,30 @@ def _cmd_salud(chat_id: str):
             lines.append("📊 Último scan: ⚠️ Sin datos (bot recién iniciado)")
     except Exception as _e:
         lines.append(f"📊 Último scan: ❌ {str(_e)[:80]}")
+
+    # ── Fix verification section ──────────────────────────────────────────────
+    import inspect as _inspect
+    try:
+        import kelly_odds as _ko
+        _src = _inspect.getsource(_ko)
+
+        # Fix 1: ERA del abridor confirmado vs promedio de equipo
+        _fix1 = "✅" if "_pitcher_adjusted_ra" in _src else "❌"
+
+        # Fix 2: Boost de localía direccional (signed_boost = boost if favored_is_home else -boost)
+        _fix2 = "✅" if "signed_boost" in _src else "❌"
+
+        # Fix 3: ELO seed desde win% temporada (no 50/50 falso)
+        _fix3 = "✅" if "_ensure_mlb_elo_seeded" in _src else "❌"
+
+        lines.append(
+            f"\n🔬 <b>Estado de los 3 fixes del modelo:</b>\n"
+            f"  {_fix1} ERA abridor confirmado (vs promedio equipo)\n"
+            f"  {_fix2} Boost localía direccional (no siempre +local)\n"
+            f"  {_fix3} ELO seed desde win% (no 50/50 falso)"
+        )
+    except Exception as _fe:
+        lines.append(f"\n🔬 Fixes: ⚠️ No se pudo verificar ({str(_fe)[:60]})")
 
     _send(chat_id, "\n".join(lines))
 
@@ -1348,7 +1379,7 @@ def _cmd_contexto(chat_id: str):
 
 
 def _cmd_bulk_analysis(chat_id: str, sport_key: str, emoji: str, label: str):
-    """Shared logic for /mlb y /mundial — analyzes all games for a sport key."""
+    """Shared logic for /mlb — analyzes all games for a sport key."""
     if not _get_odds_fn or not _analyze_fn:
         _send(chat_id, "⚠️ Módulo de análisis no disponible (bot en modo básico).")
         return
@@ -1417,10 +1448,6 @@ def _cmd_mlb(chat_id: str):
     _cmd_bulk_analysis(chat_id, "baseball_mlb", "⚾", "MLB")
 
 
-def _cmd_mundial(chat_id: str):
-    _cmd_bulk_analysis(chat_id, "soccer_fifa_world_cup", "🏆", "del Mundial")
-
-
 def _cmd_parlay(chat_id: str):
     """Build the best 2-3 leg parlay from today's strongest MLB (+ optional Mundial) picks."""
     if not _get_odds_fn or not _analyze_fn:
@@ -1475,10 +1502,8 @@ def _cmd_parlay(chat_id: str):
                     })
         return picks
 
-    # ── gather picks ─────────────────────────────────────────────────────────
-    mlb_picks   = _collect_picks("baseball_mlb")
-    wc_picks    = _collect_picks("soccer_fifa_world_cup")
-    all_picks   = mlb_picks + wc_picks
+    # ── gather picks (MLB only) ───────────────────────────────────────────────
+    all_picks = _collect_picks("baseball_mlb")
 
     # Sort by EV descending
     all_picks.sort(key=lambda x: -x["ev"])
@@ -1513,20 +1538,13 @@ def _cmd_parlay(chat_id: str):
         team = _team_from_label(pk["label"])
         mtype = _market_type(pk["label"])
         key = (team, pk["sport"])
-        # Block ML+RL of same team
         if mtype in ("ml", "rl") and key in used_team_market:
-            continue
-        # Try to have at least 1 MLB + 1 Mundial if both available
-        if (len(legs) == 0 and wc_picks and mlb_picks
-                and pk["sport"] == "soccer_fifa_world_cup"
-                and not any(l["sport"] == "baseball_mlb" for l in legs)):
-            # Defer first WC pick until we have at least 1 MLB leg
             continue
         legs.append(pk)
         used_matches.add(pk["match"])
         used_team_market.add(key)
 
-    # If we deferred WC picks and still have room, fill from all_picks again
+    # Second pass to fill remaining slots
     if len(legs) < 3:
         for pk in all_picks:
             if len(legs) >= 3:
@@ -1586,176 +1604,6 @@ def _cmd_parlay(chat_id: str):
         f"Panel aprobó cada pierna individualmente"
     )
 
-    _send(chat_id, "\n".join(lines))
-
-
-def _cmd_parlay_futbol(chat_id: str):
-    """Build the best 2-3 leg parlay from today's strongest FIFA World Cup picks."""
-    if not _get_odds_fn or not _analyze_fn:
-        _send(chat_id, "⚠️ Módulo de análisis no disponible.")
-        return
-
-    _send(chat_id, "🏆 Armando el mejor parlay del Mundial de hoy...")
-
-    GOOD_BOOKS = {"bovada", "betonline", "betonline.ag"}
-
-    def _to_decimal(american: float) -> float:
-        if american >= 0:
-            return round(american / 100 + 1, 4)
-        return round(100 / abs(american) + 1, 4)
-
-    def _market_type_soccer(label: str) -> str:
-        low = label.lower()
-        if any(x in low for x in ("handicap", "asian handicap", "spread", "+", "-")):
-            return "handicap"
-        if any(x in low for x in ("over", "under", "total")):
-            return "total"
-        return "ml"
-
-    # ── collect and filter picks ──────────────────────────────────────────────
-    try:
-        games = _get_odds_fn("soccer_fifa_world_cup") or []
-    except Exception as e:
-        _send(chat_id, f"⚠️ Error al obtener partidos: {e}")
-        return
-
-    if not games:
-        _send(chat_id,
-              "Sin partidos del Mundial hoy. Revisa mañana con /picksfutbol 📅")
-        return
-
-    all_picks = []
-    for game in sorted(games, key=lambda g: g.get("commence_time", ""))[:20]:
-        try:
-            result = _analyze_fn(game, "soccer_fifa_world_cup", {}, force_panel=False)
-        except Exception:
-            continue
-        if not result:
-            continue
-        intel    = result.get("claude_intel") or {}
-        panel_ok = intel.get("apostar") is True
-        razon_raw = intel.get("razonamiento", "")
-        razon = (razon_raw[:77] + "…") if len(razon_raw) > 80 else razon_raw
-        match = result.get("match", "")
-        for cand in result.get("candidates") or []:
-            ev   = cand.get("ev_pct", 0)
-            prob = cand.get("true_prob", 0)
-            book = (cand.get("book") or "").lower()
-            if (panel_ok and ev >= 5.0 and prob >= 0.55
-                    and book in GOOD_BOOKS):
-                all_picks.append({
-                    "match":  match,
-                    "label":  cand.get("label", "?"),
-                    "odds":   cand.get("odds", 0),
-                    "dec":    _to_decimal(cand.get("odds", 0)),
-                    "book":   cand.get("book", ""),
-                    "prob":   prob,
-                    "ev":     ev,
-                    "mtype":  _market_type_soccer(cand.get("label", "")),
-                    "razon":  razon,
-                })
-
-    if not all_picks:
-        _send(chat_id,
-              "No hay suficientes picks fuertes en el Mundial hoy para armar parlay.\n"
-              "Usa /picksfutbol para ver los picks individuales disponibles.")
-        return
-
-    # Sort by EV descending
-    all_picks.sort(key=lambda x: -x["ev"])
-
-    # ── select legs (anti-correlation for soccer) ─────────────────────────────
-    def _team_from_label_soccer(label: str) -> str:
-        for prefix in ("moneyline ", "ml ", "draw no bet ", "handicap ",
-                       "asian handicap ", "over ", "under ", "total over ",
-                       "total under "):
-            if label.lower().startswith(prefix):
-                rest = label[len(prefix):]
-                return rest.split()[0].lower()
-        return label.lower().split()[0]
-
-    legs = []
-    used_matches = set()
-    used_team_market = set()  # (team, mtype) — block ML+handicap same team
-
-    # Prefer: 1 ML + 1 total from different match
-    # Strategy: first pass prefer total after ML, second pass fill freely
-    for pk in all_picks:
-        if len(legs) >= 3:
-            break
-        if pk["match"] in used_matches:
-            continue
-        team  = _team_from_label_soccer(pk["label"])
-        key   = (team, pk["mtype"])
-        # Block ML + handicap same team
-        block_types = {"ml": "handicap", "handicap": "ml"}
-        conflict_key = (team, block_types.get(pk["mtype"], ""))
-        if conflict_key in used_team_market:
-            continue
-        # Prefer mixing ML and total across different matches
-        existing_types = {l["mtype"] for l in legs}
-        if legs and pk["mtype"] == "ml" and "ml" in existing_types and "total" not in existing_types:
-            continue  # defer: prefer a total next
-        legs.append(pk)
-        used_matches.add(pk["match"])
-        used_team_market.add(key)
-
-    # Second pass — fill remaining slots without the "prefer total" constraint
-    if len(legs) < 2:
-        for pk in all_picks:
-            if len(legs) >= 3:
-                break
-            if pk["match"] in used_matches:
-                continue
-            team  = _team_from_label_soccer(pk["label"])
-            key   = (team, pk["mtype"])
-            block_types = {"ml": "handicap", "handicap": "ml"}
-            conflict_key = (team, block_types.get(pk["mtype"], ""))
-            if conflict_key in used_team_market:
-                continue
-            legs.append(pk)
-            used_matches.add(pk["match"])
-            used_team_market.add(key)
-
-    if len(legs) < 2:
-        _send(chat_id,
-              "No hay suficientes picks fuertes en el Mundial hoy para armar parlay.\n"
-              "Usa /picksfutbol para ver los picks individuales disponibles.")
-        return
-
-    # ── calculate parlay stats ────────────────────────────────────────────────
-    bankroll  = _load_json(TRACKER_FILE, {"bankroll": 1000.0}).get("bankroll", 1000.0)
-    stake     = max(10.0, min(20.0, bankroll * 0.02))
-    odds_comb = 1.0
-    prob_comb = 1.0
-    for leg in legs:
-        odds_comb *= leg["dec"]
-        prob_comb *= leg["prob"]
-    ganancia  = stake * odds_comb
-    ev_parlay = (prob_comb * odds_comb - 1) * 100
-
-    # ── build message ─────────────────────────────────────────────────────────
-    DIV  = "━" * 22
-    RANK = ["1️⃣", "2️⃣", "3️⃣"]
-    lines = [f"🏆 <b>MEJOR PARLAY MUNDIAL HOY</b>\n{DIV}\n"]
-    for i, leg in enumerate(legs):
-        razon_block = f"\n   <i>'{leg['razon']}'</i>" if leg["razon"] else ""
-        lines.append(
-            f"{RANK[i]} <b>{leg['label']}</b>\n"
-            f"   {round(leg['prob']*100,1)}% | EV +{leg['ev']:.1f}% | "
-            f"{leg['odds']:.2f} @ {leg['book']}"
-            f"{razon_block}\n"
-        )
-    lines.append(
-        f"{DIV}\n"
-        f"💰 Cuota combinada: <b>{odds_comb:.2f}x</b>\n"
-        f"🎯 Apuesta: <b>${stake:.0f}</b> en {legs[0]['book']}\n"
-        f"📈 Si gana: <b>${ganancia:.0f}</b>\n"
-        f"📊 EV parlay: {ev_parlay:+.1f}%\n"
-        f"{DIV}\n"
-        f"⚠️ Apuesta pequeña — es parlay\n"
-        f"Panel aprobó cada pierna individualmente"
-    )
     _send(chat_id, "\n".join(lines))
 
 
@@ -2003,7 +1851,6 @@ def _dispatch(update: dict):
         "/ayuda":    lambda: _cmd_ayuda(chat_id),
         "/help":     lambda: _cmd_ayuda(chat_id),
         "/picks":        lambda: _cmd_picks(chat_id),
-        "/picksfutbol":  lambda: _cmd_picks_futbol(chat_id),
         "/mispicks":     lambda: _cmd_mispicks(chat_id),
         "/bankroll": lambda: _cmd_bankroll(chat_id),
         "/reporte":  lambda: _cmd_reporte(chat_id),
@@ -2018,9 +1865,7 @@ def _dispatch(update: dict):
         "/contexto": lambda: _cmd_contexto(chat_id),
         "/analizar": lambda: _cmd_analizar(chat_id, args),
         "/mlb":      lambda: _cmd_mlb(chat_id),
-        "/mundial":  lambda: _cmd_mundial(chat_id),
-        "/parlay":        lambda: _cmd_parlay(chat_id),
-        "/parlayfutbol":  lambda: _cmd_parlay_futbol(chat_id),
+        "/parlay":   lambda: _cmd_parlay(chat_id),
         "/aposte":        lambda: _cmd_aposte(chat_id, args),
         "/historial":     lambda: _cmd_historial(chat_id),
         "/resultado":     lambda: _cmd_resultado(chat_id, args),

@@ -419,7 +419,6 @@ _bankroll_mult:   float = 1.0   # Module P: scales Kelly stakes; updated daily
 _bankroll_paused: bool  = False  # True when bankroll < $400 → halt betting
 last_night_summary: date = date(2000, 1, 1)  # 11 PM nightly summary tracker
 last_mlb_card:     date = date(2000, 1, 1)  # 2 PM ET MLB daily card
-last_soccer_card:  date = date(2000, 1, 1)  # 10 AM ET soccer daily card
 last_backtest_report: date = date(2000, 1, 1)  # Sunday 10 AM ET backtest
 last_patrones_scan:   date = date(2000, 1, 1)  # 9 AM CT daily getaway-day scan
 _patrones_activos:    list = []                 # slate-wide pattern alerts for today
@@ -852,103 +851,16 @@ def save_elo_ratings(ratings):
 # Fix 2: Seed ELO for all WC 2026 teams using FIFA ranking estimates.
 # Prevents fake 50% default creating phantom value bets on big underdogs.
 # Tier mapping: Top-10 FIFA → 2000, 11-30 → 1800, 31-60 → 1650, 61-100 → 1550, 100+ → 1400
-_WC2026_ELO_SEED: dict = {
-    # ── Top-10 FIFA (2000) ────────────────────────────────────────────────────
-    "Argentina":           2058,
-    "France":              2000,
-    "England":             2000,
-    "Spain":               2000,
-    "Brazil":              1990,
-    "Portugal":            1970,
-    "Belgium":             1960,
-    "Netherlands":         1950,
-    "Croatia":             1940,
-    "Italy":               1930,
-    # ── 11-30 FIFA (1800) ─────────────────────────────────────────────────────
-    "Germany":             1820,
-    "Colombia":            1810,
-    "Uruguay":             1808,
-    "Morocco":             1800,
-    "Mexico":              1795,
-    "United States":       1790,
-    "USA":                 1790,
-    "Japan":               1785,
-    "Senegal":             1780,
-    "Denmark":             1775,
-    "Switzerland":         1770,
-    "Ecuador":             1765,
-    "Canada":              1764,
-    "Serbia":              1762,
-    "Australia":           1760,
-    "Austria":             1750,
-    "South Korea":         1745,
-    "Hungary":             1740,
-    "Ukraine":             1735,
-    "Wales":               1730,
-    "Czech Republic":      1720,
-    # ── 31-60 FIFA (1650) ─────────────────────────────────────────────────────
-    "Poland":              1715,
-    "Turkey":              1712,
-    "Algeria":             1708,
-    "Peru":                1705,
-    "Iran":                1700,
-    "Egypt":               1698,
-    "Nigeria":             1695,
-    "Chile":               1690,
-    "Saudi Arabia":        1685,
-    "Paraguay":            1680,
-    "Venezuela":           1675,
-    "Bolivia":             1660,
-    "Ivory Coast":         1658,
-    "Cote d'Ivoire":       1658,
-    "Mali":                1655,
-    "Cameroon":            1650,
-    "Burkina Faso":        1645,
-    "Guatemala":           1640,
-    # ── 61-100 FIFA (1550) ────────────────────────────────────────────────────
-    "Jamaica":             1635,
-    "Honduras":            1630,
-    "Panama":              1625,
-    "Costa Rica":          1622,
-    "Scotland":            1620,
-    "Greece":              1618,
-    "Romania":             1615,
-    "Cape Verde":          1610,
-    "Tunisia":             1608,
-    "Ghana":               1600,
-    "DR Congo":            1592,
-    "New Zealand":         1570,
-    "Indonesia":           1555,
-    "Tanzania":            1550,
-    "Zambia":              1545,
-    "Ethiopia":            1540,
-    "Qatar":               1535,
-    "Slovakia":            1620,
-    "Slovenia":            1615,
-    "Albania":             1590,
-    "Georgia":             1585,
-    "Iraq":                1530,
-    "Uzbekistan":          1525,
-    # ── 100+ FIFA (1400) ─────────────────────────────────────────────────────
-    "Bahrain":             1450,
-    "Kuwait":              1440,
-    "Oman":                1430,
-    "Jordan":              1420,
-    "South Africa":        1510,
-}
-
 def _elo_for(team: str) -> float:
     """
-    Return ELO for a team. Lookup order:
+    Return ELO for a team.
     1. Learned runtime ratings (elo_ratings.json)
-    2. WC 2026 seed table (FIFA-ranking based)
-    3. Never returns 1500 blindly — uses 1400 as true unknown floor.
+    2. MLB teams: seeded at runtime from season win% via _ensure_mlb_elo_seeded()
+    3. Unknown teams fall back to 1400 (below average, not a fake 50/50)
     """
     if team in _elo_ratings:
         return _elo_ratings[team]
-    if team in _WC2026_ELO_SEED:
-        return _WC2026_ELO_SEED[team]
-    return 1400   # true unknown — well below average, not a fake 50%
+    return 1400   # true unknown floor
 
 def load_elo_ratings():
     ratings = {}
@@ -958,10 +870,6 @@ def load_elo_ratings():
                 ratings = json.load(f)
         except Exception:
             pass
-    # Seed any missing WC teams without overwriting learned values
-    for team, elo in _WC2026_ELO_SEED.items():
-        if team not in ratings:
-            ratings[team] = elo
     return ratings
 
 _elo_ratings = load_elo_ratings()
@@ -14350,28 +14258,20 @@ def build_daily_card(sport_key: str) -> str:
     return card
 
 
-def send_daily_card(sport_key: str):
-    """Build and send the daily card for a sport via ntfy."""
-    global last_mlb_card, last_soccer_card
-    today   = datetime.now(ET).date()
-    is_mlb  = "mlb" in sport_key
-    tracker = last_mlb_card if is_mlb else last_soccer_card
-
-    if tracker >= today:
+def send_daily_card(sport_key: str = "baseball_mlb"):
+    """Build and send the daily MLB card via ntfy."""
+    global last_mlb_card
+    today = datetime.now(ET).date()
+    if last_mlb_card >= today:
         return
-
-    sport_label = "MLB ⚾" if is_mlb else "MUNDIAL 🏆"
-    print(f"\n📋 Enviando Tarjeta del Día — {sport_label}...")
+    print(f"\n📋 Enviando Tarjeta del Día — MLB ⚾...")
     try:
         body = build_daily_card(sport_key)
-        ntfy_post(f"📋 TARJETA DEL DÍA — {sport_label}", body, priority="high")
-        if is_mlb:
-            last_mlb_card = today
-        else:
-            last_soccer_card = today
-        print(f"  ✅ Tarjeta del Día enviada — {sport_label}")
+        ntfy_post("📋 TARJETA DEL DÍA — MLB ⚾", body, priority="high")
+        last_mlb_card = today
+        print("  ✅ Tarjeta del Día enviada — MLB ⚾")
     except Exception as exc:
-        print(f"  ⚠️  Daily Card error ({sport_label}): {exc}")
+        print(f"  ⚠️  Daily Card error (MLB): {exc}")
 
 
 def send_night_summary():
@@ -15693,7 +15593,7 @@ def _analyze_and_alert_futures():
         return
     _last_futures_check = today
     alerts = []
-    for sport_key, label in [("baseball_mlb", "MLB"), ("soccer_fifa_world_cup", "Mundial")]:
+    for sport_key, label in [("baseball_mlb", "MLB")]:
         if not is_in_season(sport_key):
             continue
         for game in _fetch_futures(sport_key)[:20]:
@@ -16234,13 +16134,6 @@ if __name__ == "__main__":
                     send_daily_card("baseball_mlb")
                 except Exception as e:
                     print(f"  ⚠️  MLB Daily Card error: {e}")
-
-            # Soccer Daily Card at 10 AM ET (once per day)
-            if now_et.hour == 10 and last_soccer_card < now_et.date():
-                try:
-                    send_daily_card("soccer_fifa_world_cup")
-                except Exception as e:
-                    print(f"  ⚠️  Soccer Daily Card error: {e}")
 
             # Night summary at 11 PM ET — Module P
             if now_et.hour == 23 and last_night_summary < now_et.date():

@@ -1,0 +1,14 @@
+Dos problemas confirmados en producción con datos reales de hoy (26 jul):
+
+PROBLEMA 1 — El panel de expertos sigue reportando "Panel no disponible" en /picks, A PESAR de que ya se recargó saldo en la cuenta de Anthropic hace más de una hora. Necesito el error EXACTO, no la etiqueta genérica:
+1. Revisa los logs de Railway del scan/comando más reciente y muéstrame la excepción completa (traceback) que se está capturando cuando se intenta llamar al panel
+2. Verifica que la variable ANTHROPIC_API_KEY en Railway sea exactamente la misma key de la cuenta donde se ve el saldo recargado (a veces hay múltiples keys/proyectos en una cuenta de Anthropic)
+3. Si el código atrapa la excepción de forma genérica (except Exception) y siempre muestra "Panel no disponible" sin loguear el detalle real, arréglalo para que loguee el mensaje de error específico en Railway aunque el mensaje de Telegram se mantenga simple
+
+PROBLEMA 2 — El pick de Yankees ML sigue en EV +35.9% después de los 3 fixes de hoy (bajó de +49.1%, pero sigue muy por encima del rango esperado de 3-8% que se proyectó tras aplicar la calibración Pinnacle 70/30).
+
+1. Muéstrame el desglose actual paso a paso de este pick específico: probabilidad de cada modelo individual (Poisson, ELO, Pythagorean) antes del blend, el blend final (55.9% o el que sea ahora), la probabilidad implícita del mercado desde cuota 2.71, y si el blend de Pinnacle 70/30 se está aplicando de verdad en este cálculo o si por algún motivo se está saltando
+2. Si el blend de Pinnacle no se está aplicando, dime por qué — ¿es porque OddsPapi no devolvió referencia de Pinnacle para este juego específico (recuerda el límite de _MAX_DAILY_CALLS=8 que solo cubre ~6 juegos/día)?
+3. Si el problema es que Pinnacle simplemente no está disponible para este juego, entonces el EV real reportado es SOLO el del modelo propio sin calibrar contra mercado sharp — necesito que el mensaje de Telegram lo indique explícitamente (ej. "⚠️ Sin referencia Pinnacle — EV no calibrado") en vez de mostrar el EV como si estuviera completo
+
+No apliques ningún fix todavía para el Problema 2 hasta que me confirmes el diagnóstico — solo para el Problema 1, ya que ese es un bug claro de logging/captura de errores.
