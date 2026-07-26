@@ -1,0 +1,17 @@
+Necesito el fix final para que /analizar Philadelphia Phillies vs New York Yankees entregue SIEMPRE el análisis completo (Pitcheo + Forma + Claves + Mercados + Panel de 3 expertos + Recomendación) sin morir por consumo de memoria.
+
+CONTEXTO CONFIRMADO: con _no_elite_panel=True (panel desactivado), el proceso corre en ~250MB y funciona. Con el panel completo activado (3 llamadas a Claude: Marco, Víctor, Elena), la memoria sube a 400-460MB y el proceso muere sin dejar traceback (probable pico de memoria simultáneo de las 3 llamadas).
+
+PASO 1 — Encuentra dónde se hacen las 3 llamadas al panel de expertos (Marco, Víctor, Elena) dentro de /analizar. Confirma si se ejecutan las 3 de forma simultánea/paralela o secuencial.
+
+PASO 2 — Si se ejecutan en paralelo o muy seguidas, cámbialas a estrictamente secuenciales, UNA A LA VEZ, con una pausa breve (1-2 segundos) entre cada llamada, y libera explícitamente la respuesta de la llamada anterior (del) antes de iniciar la siguiente, para que el pico de memoria de cada llamada no se acumule con las otras dos.
+
+PASO 3 — Después de que las 3 respuestas del panel estén guardadas (solo el texto del veredicto de cada experto, no el objeto completo de la respuesta de la API), llama explícitamente a gc.collect() antes de armar el mensaje final, para liberar cualquier memoria intermedia no necesaria.
+
+PASO 4 — Mantén el logging de RSS por etapa que ya existe, ahora agregando una línea de memoria DESPUÉS de cada una de las 3 llamadas del panel individualmente (no solo al inicio y final), para ver exactamente cuál de las 3 causa el pico si sigue habiendo problema.
+
+PASO 5 — El resultado final debe seguir siendo el análisis COMPLETO en 1-2 mensajes de Telegram (por el límite de caracteres), incluyendo el panel de los 3 expertos — nada recortado ni desactivado.
+
+PASO 6 — Corre /analizar Philadelphia Phillies vs New York Yankees tres veces seguidas para confirmar estabilidad, y pégame el mensaje completo que llega a Telegram cada vez, junto con el log de memoria por cada llamada del panel.
+
+Tests en verde. Esta es la versión final — quiero ver el análisis completo funcionando de punta a punta, con los 3 expertos incluidos, de forma consistente.

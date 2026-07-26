@@ -11226,11 +11226,13 @@ def analyze_with_claude(game_data: dict, sport: str,
         # Using content[0].text would raise AttributeError — find the first block with .text.
         _text_block = next((b for b in msg.content if hasattr(b, "text")), None)
         if _text_block is None:
-            raise ValueError(
-                f"Claude returned no TextBlock — content types: "
-                f"{[type(b).__name__ for b in msg.content]}"
-            )
+            _content_types = [type(b).__name__ for b in msg.content]
+            del msg, client
+            raise ValueError(f"Claude returned no TextBlock — content types: {_content_types}")
         raw = _text_block.text.strip()
+        # Release the large API response object immediately after extracting text
+        del msg, client, _text_block
+
         if raw.startswith("```"):
             parts = raw.split("```")
             raw   = parts[1] if len(parts) >= 2 else raw
@@ -11246,7 +11248,11 @@ def analyze_with_claude(game_data: dict, sport: str,
         result["datos_inconsistentes"] = existing + pre_warnings
         result["pre_warnings"] = pre_warnings   # keep for _claude_block
 
+        # Cache size guard: trim if too large to avoid unbounded memory growth
+        if len(_claude_cache) > 30:
+            _claude_cache.clear()
         _claude_cache[_ck] = result
+
         conf_icon = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(
             result.get("confianza", ""), "⚪"
         )
@@ -12332,6 +12338,22 @@ def panel_expertos(game_data: dict, sport: str,
         "que el edge podría ser falso."
     ) if _use_elite else ""
 
+    import gc as _gc, time as _ptime
+
+    def _panel_rss_mb() -> float:
+        try:
+            import resource as _pr
+            return round(_pr.getrusage(_pr.RUSAGE_SELF).ru_maxrss / 1024, 1)
+        except Exception:
+            try:
+                with open("/proc/self/status") as _pf:
+                    for _pl in _pf:
+                        if _pl.startswith("VmRSS:"):
+                            return round(int(_pl.split()[1]) / 1024, 1)
+            except Exception:
+                pass
+            return -1.0
+
     for i, (nombre, extra) in enumerate(_EXPERTOS):
         _panel_model = _modelo_panel_iter
         _extra_full  = extra + (_PATRONES_MLB_2026 if _is_mlb else "") + PANEL_DIVERSITY_ADDENDUM
@@ -12365,11 +12387,27 @@ def panel_expertos(game_data: dict, sport: str,
                     "de este pick, menciónalo explícitamente en tu análisis."
                 )
                 print(f"   🗓️  Elena: {len(_patrones_activos)} patrón(es) de slate inyectado(s)")
+
+        _rss_pre = _panel_rss_mb()
+        print(f"   📊 {nombre} ({i+1}/3): RSS antes={_rss_pre}MB — iniciando llamada Claude…")
+
         res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
                                   _model=_panel_model, _max_tokens=_elite_mtokens)
+
+        # Liberar el prompt del experto inmediatamente — ya no se necesita
+        del _extra_full
+
+        _rss_post = _panel_rss_mb()
+        print(f"   📊 {nombre} ({i+1}/3): RSS después={_rss_post}MB "
+              f"(delta={_rss_post - _rss_pre:.1f}MB)")
+
         if res is None:
             print(f"   🎓 {nombre}: no disponible")
             resultados.append(None)
+            # Pausa y GC entre expertos incluso en caso de error
+            if i < 2:
+                _gc.collect()
+                _ptime.sleep(1)
             continue
 
         apostar = res.get("apostar", True)
@@ -12384,10 +12422,32 @@ def panel_expertos(game_data: dict, sport: str,
         if not apostar and conf == "BAJA":
             veto_absoluto = True  # hard veto: kills consensus regardless of other votes
 
-        resultados.append(res)
-        factores_pos.extend(res.get("factores_positivos") or [])
-        factores_neg.extend(res.get("factores_negativos") or [])
-        inconsistencias.extend(res.get("datos_inconsistentes") or [])
+        # Guardar SOLO los campos mínimos necesarios — no el objeto completo de la API
+        # Esto evita acumular 3 dicts pesados simultáneamente en resultados[]
+        _minimal = {
+            "apostar":              apostar,
+            "confianza":            conf,
+            "razonamiento":         razon,
+            "factores_positivos":   list(res.get("factores_positivos") or []),
+            "factores_negativos":   list(res.get("factores_negativos") or []),
+            "datos_inconsistentes": list(res.get("datos_inconsistentes") or []),
+            "pick":                 res.get("pick", ""),
+            "line":                 res.get("line", ""),
+        }
+        # Liberar el objeto completo de respuesta de la API inmediatamente
+        del res
+
+        resultados.append(_minimal)
+        factores_pos.extend(_minimal.get("factores_positivos") or [])
+        factores_neg.extend(_minimal.get("factores_negativos") or [])
+        inconsistencias.extend(_minimal.get("datos_inconsistentes") or [])
+
+        # Entre expertos: liberar memoria y hacer pausa para que GC actúe
+        # ANTES de iniciar la siguiente llamada — evita picos acumulativos
+        if i < 2:
+            _gc.collect()
+            _ptime.sleep(1)
+            print(f"   📊 RSS post-GC (antes de {_EXPERTOS[i+1][0]}): {_panel_rss_mb()}MB")
 
     disponibles = sum(1 for r in resultados if r is not None)
     if disponibles == 0:
@@ -12508,6 +12568,11 @@ def panel_expertos(game_data: dict, sport: str,
             "Yankees en casa contra un bullpen cansado. Apuesta Yankees ML en FanDuel, no más de $20.'\n\n"
             "Responde en máximo 5 oraciones completas."
         )
+        # GC explícito antes de la 4ª llamada Claude (síntesis) — los 3 res objects ya se liberaron,
+        # pero las estructuras intermedias del loop pueden seguir en memoria.
+        _gc.collect()
+        _rss_syn = _panel_rss_mb()
+        print(f"   📊 Síntesis (4/4): RSS pre-síntesis={_rss_syn}MB — iniciando llamada Claude…")
         try:
             _syn_client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
             _syn_msg = _syn_client.messages.create(
@@ -12518,6 +12583,9 @@ def panel_expertos(game_data: dict, sport: str,
             )
             _syn_tb  = next((b for b in _syn_msg.content if hasattr(b, "text")), None)
             _syn_raw = _syn_tb.text.strip() if _syn_tb else ""
+            # Release synthesis API objects immediately after extracting text
+            del _syn_msg, _syn_client, _syn_tb
+            print(f"   📊 Síntesis (4/4): RSS post={_panel_rss_mb()}MB")
             import re as _re_syn
             _syn_raw = _re_syn.sub(r'```[\w]*', '', _syn_raw)
             _syn_raw = _re_syn.sub(r'[{}\[\]]', '', _syn_raw)
