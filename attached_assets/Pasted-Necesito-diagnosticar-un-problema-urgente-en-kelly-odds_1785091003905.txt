@@ -1,0 +1,17 @@
+Necesito diagnosticar un problema urgente en kelly_odds.py: los picks del scan de hoy muestran EV de +47.0%, +41.3%, +13.0% y +2.1% en moneyline y run-line de MLB. Edges de esa magnitud (40%+) son extremadamente improbables en un mercado tan eficiente como MLB moneyline — necesito saber si es un bug real antes de considerar apostar cualquiera de estos picks.
+
+PASO 1 — Toma el pick #1 exacto de hoy: New York Yankees ML vs Philadelphia Phillies, cuota 2.63 (Bovada, formato decimal), probabilidad calculada por el modelo 55.9%, EV reportado +47.0%.
+
+Muéstrame el cálculo COMPLETO paso a paso, con los números reales de este pick:
+1. ¿De dónde salió exactamente el 55.9%? ¿Qué modelo lo generó (Poisson, ELO, Pythagorean, o el blend de los tres)? Imprime el output crudo de cada modelo individual antes de cualquier blend.
+2. ¿Cómo se convirtió la cuota decimal 2.63 a probabilidad implícita? La fórmula correcta es 1/2.63 = 38.0% implícito. Confirma que el código está usando esta fórmula y no una fórmula de cuota americana aplicada por error a un número en formato decimal.
+3. Muéstrame la fórmula exacta que combina probabilidad del modelo (55.9%) y probabilidad implícita del mercado (¿38.0%?) para llegar a EV +47.0%. La fórmula estándar de EV es: EV = (prob_modelo × cuota_decimal) - 1. Con 0.559 × 2.63 = 1.470, eso da EV = +47.0% — el número CUADRA con la fórmula estándar SI la probabilidad del modelo (55.9%) es correcta. Así que el problema real está en el PASO 1: por qué el modelo dice 55.9% cuando el mercado (un mercado eficiente, con dinero real) dice 38.0%. Esa es una brecha de 18 puntos porcentuales, enorme para moneyline de MLB.
+
+PASO 2 — Investiga específicamente por qué el modelo está generando probabilidades tan alejadas del mercado en los picks de hoy. Revisa:
+1. Si el cambio reciente de API key de Odds API (Free → 20K) pudo haber traído datos de un endpoint o región distinta que esté alimentando mal alguno de los tres modelos (Poisson, ELO, Pythagorean)
+2. Si el ELO de algún equipo quedó desincronizado o con un valor extremo por el período en que el bot estuvo inactivo (más de un mes sin correr `update_elo`)
+3. Si hay algún dato de forma reciente, lesiones, o contexto de juego (contexto_juego.py, forma_reciente.py) que esté aplicando un ajuste desproporcionado
+
+PASO 3 — Repite el mismo análisis para el pick #2 (Yankees RL +1.5, prob 82.6%, EV +41.3%) — un run-line con 82.6% de probabilidad calculada es también una cifra que amerita sospecha.
+
+PASO 4 — Dame tu conclusión: ¿el problema está en el ELO desactualizado por la inactividad, en un dato mal alimentado por el cambio de Odds API, o en otro punto del pipeline? No apliques ningún fix todavía — solo diagnóstico completo con los números reales de estos dos picks.
