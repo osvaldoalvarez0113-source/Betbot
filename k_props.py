@@ -393,30 +393,41 @@ def run_k_props_scan(odds_api_key: str, bankroll: float = 1000) -> list:
         if not event_id:
             continue
 
-        _registrar_llamada_odds_api()
+        _registrar_llamada_odds_api()  # una sola llamada por juego — Over y Under vienen juntos
         odds_info = get_k_prop_odds(odds_api_key, event_id, juego["pitcher_name"])
         if not odds_info:
             continue
 
-        try:
-            resultado = analyze_k_prop(
-                pitcher_name=juego["pitcher_name"],
-                pitcher_id=juego["pitcher_id"],
-                rival_team_id=juego["rival_team_id"],
-                line=odds_info["line"],
-                side="Over",
-                odds_side=odds_info["over_odds"],
-                odds_other=odds_info["under_odds"],
-                bankroll=bankroll,
-            )
-        except Exception as e:
-            print(f"k_props: error analizando {juego['pitcher_name']}: {e}")
+        candidatos = []
+        for lado, cuota_lado, cuota_contraria in [
+            ("Over",  odds_info["over_odds"],  odds_info["under_odds"]),
+            ("Under", odds_info["under_odds"], odds_info["over_odds"]),
+        ]:
+            try:
+                resultado = analyze_k_prop(
+                    pitcher_name=juego["pitcher_name"],
+                    pitcher_id=juego["pitcher_id"],
+                    rival_team_id=juego["rival_team_id"],
+                    line=odds_info["line"],
+                    side=lado,
+                    odds_side=cuota_lado,
+                    odds_other=cuota_contraria,
+                    bankroll=bankroll,
+                )
+                candidatos.append(resultado)
+            except Exception as e:
+                print(f"k_props: error analizando {juego['pitcher_name']} ({lado}): {e}")
+                continue
+
+        if not candidatos:
             continue
 
-        log_k_prop(resultado)
+        # Se queda con el lado de mayor edge, sea Over o Under
+        mejor = max(candidatos, key=lambda r: r["edge"])
+        log_k_prop(mejor)
 
-        if resultado["hay_valor"]:
-            resultados_con_valor.append(resultado)
+        if mejor["hay_valor"]:
+            resultados_con_valor.append(mejor)
 
     return resultados_con_valor
 

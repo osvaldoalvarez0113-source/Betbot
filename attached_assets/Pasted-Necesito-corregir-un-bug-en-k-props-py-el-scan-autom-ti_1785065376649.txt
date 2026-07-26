@@ -1,0 +1,58 @@
+Necesito corregir un bug en k_props.py: el scan automático (run_k_props_scan) solo evalúa el lado "Over" de cada prop, nunca compara contra "Under". Esto está sesgando los resultados — de 6 props evaluadas, las 6 salieron "HAY VALOR" del lado Over, con edges hasta +25.9%, lo cual es estadísticamente muy improbable y sugiere que el análisis está forzado hacia un solo lado en vez de comparar ambos.
+
+PASO 1 — Modifica la función run_k_props_scan en k_props.py para que evalúe AMBOS lados (Over y Under) de cada prop, y solo se quede con el lado que realmente tenga edge — nunca fuerce Over por defecto. Reemplaza el bloque actual que llama a analyze_k_prop una sola vez, por esta lógica:
+
+    for juego in juegos:
+        if not _puede_llamar_odds_api():
+            print("k_props: tope diario de llamadas alcanzado, deteniendo scan")
+            break
+
+        home_name = juego["team_name"] if juego["is_home"] else juego["rival_team_name"]
+
+        if home_name not in event_id_cache:
+            event_id_cache[home_name] = get_odds_api_event_id_for_game(odds_api_key, home_name)
+        event_id = event_id_cache[home_name]
+        if not event_id:
+            continue
+
+        _registrar_llamada_odds_api()
+        odds_info = get_k_prop_odds(odds_api_key, event_id, juego["pitcher_name"])
+        if not odds_info:
+            continue
+
+        candidatos = []
+        for lado, cuota_lado, cuota_contraria in [
+            ("Over", odds_info["over_odds"], odds_info["under_odds"]),
+            ("Under", odds_info["under_odds"], odds_info["over_odds"]),
+        ]:
+            try:
+                resultado = analyze_k_prop(
+                    pitcher_name=juego["pitcher_name"],
+                    pitcher_id=juego["pitcher_id"],
+                    rival_team_id=juego["rival_team_id"],
+                    line=odds_info["line"],
+                    side=lado,
+                    odds_side=cuota_lado,
+                    odds_other=cuota_contraria,
+                    bankroll=bankroll,
+                )
+                candidatos.append(resultado)
+            except Exception as e:
+                print(f"k_props: error analizando {juego['pitcher_name']} ({lado}): {e}")
+                continue
+
+        if not candidatos:
+            continue
+
+        # Se queda con el lado de mayor edge, sea Over o Under
+        mejor = max(candidatos, key=lambda r: r["edge"])
+        log_k_prop(mejor)
+
+        if mejor["hay_valor"]:
+            resultados_con_valor.append(mejor)
+
+PASO 2 — Esto duplica las llamadas a analyze_k_prop por juego (una por lado), pero NO duplica las llamadas a Odds API — sigue siendo una sola llamada a get_k_prop_odds por juego, ya que ambas cuotas (Over y Under) vienen en la misma respuesta. Confírmame que el contador _k_props_calls_today sigue incrementándose solo una vez por juego, no dos.
+
+PASO 3 — Corre run_k_props_scan() de nuevo con los mismos juegos de hoy si siguen disponibles (o los de mañana si ya no), y repórtame:
+1. Cuántos resultados salieron con hay_valor=True
+2. De
