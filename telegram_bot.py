@@ -21,7 +21,9 @@
 import os
 import json
 import time
+import sys
 import threading
+import traceback as _traceback
 import datetime
 import urllib.request
 from zoneinfo import ZoneInfo
@@ -63,6 +65,50 @@ _get_hoy_fn          = None
 _get_patrones_fn     = None
 _start_time          = datetime.datetime.now()
 _last_scan_time      = None   # updated by kelly_odds integration if desired
+
+
+# ── Crash diagnostics: captura CUALQUIER excepción no atrapada ──────────────
+def _mem_rss_mb() -> float:
+    """Retorna memoria RSS actual del proceso en MB, o -1 si no disponible."""
+    try:
+        import resource as _res
+        return round(_res.getrusage(_res.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    except Exception:
+        try:
+            with open("/proc/self/status") as _f:
+                for line in _f:
+                    if line.startswith("VmRSS:"):
+                        return round(int(line.split()[1]) / 1024, 1)
+        except Exception:
+            pass
+        return -1.0
+
+
+def _global_excepthook(exc_type, exc_value, exc_tb):
+    """Captura excepciones no manejadas en el hilo PRINCIPAL."""
+    print(f"\n  💥 CRASH HILO PRINCIPAL [{exc_type.__name__}]: {exc_value}")
+    print(f"     Memoria RSS: {_mem_rss_mb()} MB")
+    _traceback.print_exception(exc_type, exc_value, exc_tb)
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
+sys.excepthook = _global_excepthook
+
+
+def _thread_excepthook(args):
+    """Captura excepciones no manejadas en CUALQUIER hilo (Python ≥3.8)."""
+    if args.exc_type in (SystemExit, KeyboardInterrupt):
+        return  # No logear estas — son shutdown normal
+    tname = getattr(args.thread, "name", "?")
+    print(f"\n  💥 CRASH HILO DAEMON '{tname}' [{args.exc_type.__name__}]: {args.exc_value}")
+    print(f"     Memoria RSS: {_mem_rss_mb()} MB")
+    _traceback.print_tb(args.exc_tb)
+
+
+try:
+    threading.excepthook = _thread_excepthook
+except AttributeError:
+    pass   # Python < 3.8 — no disponible, sin problema
 
 
 # ── Telegram API helpers ────────────────────────────────────────
@@ -860,6 +906,12 @@ def _translate_team_name(name: str) -> str:
 
 
 def _cmd_analizar(chat_id: str, args: str):
+    """
+    /analizar — análisis completo con panel de expertos.
+    Cada etapa está envuelta con diagnóstico de memoria y traceback completo
+    para que Railway logs muestren el punto exacto de cualquier crash.
+    """
+    # ── Validación inicial ────────────────────────────────────────────────────
     if not args or " vs " not in args.lower():
         _send(chat_id,
               "⚠️ Formato: /analizar <code>Equipo Local vs Equipo Visitante</code>\n"
@@ -870,40 +922,44 @@ def _cmd_analizar(chat_id: str, args: str):
         _send(chat_id, "⚠️ Módulo de análisis no disponible (bot en modo básico).")
         return
 
-    partes = args.split(" vs ", 1)
+    partes   = args.split(" vs ", 1)
     home_raw = partes[0].strip()
     away_raw = partes[1].strip()
-    home_q = _translate_team_name(home_raw).lower()
-    away_q = _translate_team_name(away_raw).lower()
+    home_q   = _translate_team_name(home_raw).lower()
+    away_q   = _translate_team_name(away_raw).lower()
 
+    _mem0 = _mem_rss_mb()
+    print(f"  [analizar] INICIO {home_raw} vs {away_raw} | RSS={_mem0}MB")
     _send(chat_id, f"🔍 Buscando <b>{home_raw} vs {away_raw}</b>…")
 
+    # ── ETAPA 1: Buscar el partido en la API de odds ──────────────────────────
     game_found  = None
     sport_found = "baseball_mlb"
-
-    for sport in ["baseball_mlb", "soccer_fifa_world_cup",
-                  "soccer_epl", "soccer_uefa_champs_league",
-                  "soccer_usa_mls", "soccer_spain_la_liga"]:
-        try:
-            games = _get_odds_fn(sport)
-            if not games:
-                print(f"  [analizar] {sport}: sin juegos disponibles (API vacía o error)")
-                continue
-            for g in games:
-                gh = g.get("home_team", "")
-                ga = g.get("away_team", "")
-                # Orden normal: home_q → local, away_q → visitante
-                # Orden inverso: home_q → visitante, away_q → local
-                if ((_team_words_match(home_q, gh) and _team_words_match(away_q, ga)) or
-                        (_team_words_match(away_q, gh) and _team_words_match(home_q, ga))):
-                    game_found  = g
-                    sport_found = sport
+    try:
+        for sport in ["baseball_mlb"]:   # solo MLB ahora que se eliminó WC/soccer
+            try:
+                games = _get_odds_fn(sport)
+                if not games:
+                    print(f"  [analizar] {sport}: sin juegos (API vacía o error)")
+                    continue
+                for g in games:
+                    gh = g.get("home_team", "")
+                    ga = g.get("away_team", "")
+                    if ((_team_words_match(home_q, gh) and _team_words_match(away_q, ga)) or
+                            (_team_words_match(away_q, gh) and _team_words_match(home_q, ga))):
+                        game_found  = g
+                        sport_found = sport
+                        break
+                if game_found:
                     break
-            if game_found:
-                break
-        except Exception as _gse:
-            print(f"  [analizar] excepción buscando en {sport}: {_gse}")
-            continue
+            except Exception as _gse:
+                print(f"  [analizar] excepción buscando en {sport}: {_gse}")
+                continue
+    except BaseException as _srch_err:
+        print(f"  💥 [analizar] CRASH en búsqueda de partido [{type(_srch_err).__name__}]: {_srch_err} | RSS={_mem_rss_mb()}MB")
+        _traceback.print_exc()
+        _send(chat_id, f"⚠️ Error buscando el partido [{type(_srch_err).__name__}]: {_srch_err}")
+        return
 
     if not game_found:
         _send(chat_id,
@@ -911,14 +967,28 @@ def _cmd_analizar(chat_id: str, args: str):
               "Verifica los nombres y que el partido esté en las próximas 48 horas.")
         return
 
+    print(f"  [analizar] ETAPA 1 OK — partido encontrado: {game_found.get('home_team')} vs {game_found.get('away_team')} | RSS={_mem_rss_mb()}MB")
+
+    # ── ETAPA 2: Análisis completo (panel de 3 expertos + todos los módulos) ──
+    result = None
     try:
+        print(f"  [analizar] ETAPA 2 — llamando analyze_game_full (force_panel=True, _no_elite_panel=True) | RSS={_mem_rss_mb()}MB")
         result = _analyze_fn(game_found, sport_found, {}, force_panel=True,
                              _no_elite_panel=True)
-    except Exception as e:
-        _send(chat_id, f"⚠️ Error en el análisis: {e}")
+        print(f"  [analizar] ETAPA 2 OK — analyze_game_full completado | RSS={_mem_rss_mb()}MB result={'ok' if result else 'None'}")
+    except BaseException as _anl_err:
+        _et = type(_anl_err).__name__
+        print(f"  💥 [analizar] CRASH en analyze_game_full [{_et}]: {_anl_err} | RSS={_mem_rss_mb()}MB")
+        _traceback.print_exc()
+        _send(chat_id,
+              f"⚠️ Error durante el análisis [{_et}]: {_anl_err}\n"
+              f"Ver Railway logs para el traceback completo.")
+        if isinstance(_anl_err, (SystemExit, KeyboardInterrupt)):
+            raise
         return
 
     if not result:
+        print(f"  [analizar] ETAPA 2 — resultado None (sin candidatos o datos insuficientes)")
         _send(chat_id, (
             "⚠️ No se pudo obtener análisis para este partido.\n"
             "Posibles causas: partido no encontrado en API, datos insuficientes, "
@@ -926,16 +996,26 @@ def _cmd_analizar(chat_id: str, args: str):
         ))
         return
 
-    # ── Usar build_analizar_text si está disponible (formato completo) ────────
+    # ── ETAPA 3: Formatear y enviar el resultado ──────────────────────────────
     if _build_text_fn:
         try:
+            print(f"  [analizar] ETAPA 3 — build_analizar_text | RSS={_mem_rss_mb()}MB")
             parts = _build_text_fn(result)
-            for part in parts:
+            print(f"  [analizar] ETAPA 3 — {len(parts)} parte(s) generadas: {[len(p) for p in parts]} chars")
+            for _pi, part in enumerate(parts):
                 if part and part.strip():
+                    print(f"  [analizar] ETAPA 3 — enviando parte {_pi+1}/{len(parts)} ({len(part)} chars) | RSS={_mem_rss_mb()}MB")
                     _send_long(chat_id, part)
+                    print(f"  [analizar] ETAPA 3 — parte {_pi+1} enviada OK")
+            print(f"  [analizar] COMPLETADO {home_raw} vs {away_raw} | RSS_final={_mem_rss_mb()}MB")
             return
-        except Exception as _bte:
-            _send(chat_id, f"⚠️ Error al formatear análisis: {_bte}")
+        except BaseException as _fmt_err:
+            _et = type(_fmt_err).__name__
+            print(f"  💥 [analizar] CRASH en formateo/envío [{_et}]: {_fmt_err} | RSS={_mem_rss_mb()}MB")
+            _traceback.print_exc()
+            _send(chat_id, f"⚠️ Error al formatear análisis [{_et}]: {_fmt_err}")
+            if isinstance(_fmt_err, (SystemExit, KeyboardInterrupt)):
+                raise
             return
 
     # ── Fallback: formato básico si build_text_fn no está disponible ──────────
@@ -1944,9 +2024,17 @@ def _dispatch(update: dict):
     if handler:
         try:
             handler()
-        except Exception as e:
-            print(f"  ⚠️  Telegram handler [{cmd}]: {e}")
-            _send(chat_id, f"⚠️ Error procesando {cmd}: {e}")
+        except BaseException as e:
+            # BaseException captura también MemoryError, RecursionError, etc.
+            _etype = type(e).__name__
+            print(f"  💥 HANDLER CRASH [{cmd}] [{_etype}]: {e} | RSS={_mem_rss_mb()}MB")
+            _traceback.print_exc()
+            try:
+                _send(chat_id, f"⚠️ Error interno [{_etype}] procesando {cmd}\nVer Railway logs para detalles.")
+            except Exception:
+                pass
+            if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                raise   # propagar shutdown signals
     else:
         _send(chat_id, f"❓ Comando desconocido: <code>{cmd}</code>\nUsa /ayuda.")
 
@@ -2006,10 +2094,26 @@ def _polling_loop():
                 print(f"  📨 Telegram update #{update['update_id']}: {_upd_types} | msg keys: {_msg_keys}")
                 try:
                     _dispatch(update)
-                except Exception as _de:
-                    print(f"  ⚠️  Telegram dispatch error: {_de}")
-        except Exception as e:
-            print(f"  ⚠️  Telegram polling error: {e}")
+                except BaseException as _de:
+                    # BaseException (no solo Exception) — captura MemoryError, RecursionError, etc.
+                    _de_type = type(_de).__name__
+                    print(f"  💥 DISPATCH CRASH [{_de_type}]: {_de} | RSS={_mem_rss_mb()}MB")
+                    _traceback.print_exc()
+                    if isinstance(_de, (SystemExit, KeyboardInterrupt)):
+                        raise   # dejar que el loop exterior lo maneje
+                    # Para cualquier otra BaseException (MemoryError, etc.): logear y continuar
+                    try:
+                        _cmd = ((update.get("message") or {}).get("text") or "?").split()[0]
+                        for _cid in list(_authorized_ids)[:1]:
+                            _send(_cid, f"⚠️ Error interno [{_de_type}] — bot recuperado")
+                    except Exception:
+                        pass
+        except BaseException as e:
+            _et = type(e).__name__
+            print(f"  💥 POLLING CRASH [{_et}]: {e} | RSS={_mem_rss_mb()}MB")
+            _traceback.print_exc()
+            if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                raise
             time.sleep(10)
 
 
