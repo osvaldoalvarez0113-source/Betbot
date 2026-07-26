@@ -82,12 +82,83 @@ def _api(method: str, params: dict = None, timeout: int = 35) -> dict:
         return {}
 
 
+_TG_SAFE_LEN = 3900   # safe margin below Telegram's 4096-char hard limit
+
 def _send(chat_id, text: str, parse_mode: str = "HTML"):
+    """Send a single message. Logs a warning and truncates if text > _TG_SAFE_LEN.
+    For messages that may be long, use _send_long() instead."""
+    if len(text) > _TG_SAFE_LEN:
+        print(f"  ⚠️  _send: mensaje de {len(text)} chars truncado a {_TG_SAFE_LEN} "
+              f"— considera usar _send_long() en el llamador")
     _api("sendMessage", {
         "chat_id":    chat_id,
-        "text":       text[:4000],
+        "text":       text[:_TG_SAFE_LEN],
         "parse_mode": parse_mode,
     })
+
+
+def _split_message(text: str, max_len: int = _TG_SAFE_LEN) -> list:
+    """
+    Divide `text` en chunks ≤ max_len chars respetando límites lógicos del mensaje.
+    Prioriza cortes en separadores de sección (─── líneas), luego doble salto de
+    línea, luego salto simple. Solo hace hard-cut como último recurso.
+    Nunca devuelve chunks vacíos.
+    """
+    if len(text) <= max_len:
+        return [text]
+
+    chunks = []
+    remaining = text
+
+    while len(remaining) > max_len:
+        window = remaining[:max_len]
+
+        # 1. Buscar separador de sección (────) — corta antes de la siguiente sección
+        idx_sep = window.rfind("\n─")
+        if idx_sep > max_len // 4:
+            cut = idx_sep          # preserva el salto previo, la nueva sección va al siguiente chunk
+        else:
+            # 2. Doble salto de línea (separador de párrafo)
+            idx_pp = window.rfind("\n\n")
+            if idx_pp > max_len // 4:
+                cut = idx_pp + 1   # incluye el primer \n, el segundo inicia el siguiente chunk
+            else:
+                # 3. Salto simple de línea
+                idx_p = window.rfind("\n")
+                if idx_p > max_len // 4:
+                    cut = idx_p
+                else:
+                    cut = max_len  # último recurso: hard-cut
+
+        chunk = remaining[:cut].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:].lstrip("\n")
+
+    if remaining.strip():
+        chunks.append(remaining.strip())
+
+    return chunks or [text[:max_len]]
+
+
+def _send_long(chat_id: str, text: str, parse_mode: str = "HTML"):
+    """
+    Envía texto que puede exceder el límite de 4096 chars de Telegram.
+    Divide el mensaje en partes lógicas y las envía consecutivamente.
+    Usar en lugar de _send() para: resultados de build_analizar_text,
+    listas de picks, bulk analysis, o cualquier texto generado dinámicamente.
+    """
+    parts = _split_message(text)
+    if len(parts) > 1:
+        print(f"  📨 _send_long: {len(text)} chars → {len(parts)} partes "
+              f"({', '.join(str(len(p)) for p in parts)} chars)")
+    for part in parts:
+        if part:
+            _api("sendMessage", {
+                "chat_id":    chat_id,
+                "text":       part,
+                "parse_mode": parse_mode,
+            })
 
 
 # ── Chat ID management ──────────────────────────────────────────
@@ -321,7 +392,7 @@ def _cmd_best_picks(chat_id: str, sport_key: str, emoji: str, label: str):
             f"{votos_line}{razon_line}"
         )
 
-    _send(chat_id, "\n".join(lines))
+    _send_long(chat_id, "\n".join(lines))
 
 
 def _cmd_picks(chat_id: str):
@@ -715,7 +786,7 @@ def _cmd_elite(chat_id: str, args: str):
             parts = _build_text_fn(result)
             for part in parts:
                 if part and part.strip():
-                    _send(chat_id, part)
+                    _send_long(chat_id, part)
         except Exception as _bte:
             _send(chat_id, f"⚠️ Error al formatear análisis elite: {_bte}")
     else:
@@ -861,7 +932,7 @@ def _cmd_analizar(chat_id: str, args: str):
             parts = _build_text_fn(result)
             for part in parts:
                 if part and part.strip():
-                    _send(chat_id, part)
+                    _send_long(chat_id, part)
             return
         except Exception as _bte:
             _send(chat_id, f"⚠️ Error al formatear análisis: {_bte}")
@@ -1119,7 +1190,7 @@ def handle_photo(chat_id: str, msg: dict):
                 parts = _build_text_fn(result)
                 for part in parts:
                     if part and part.strip():
-                        _send(chat_id, part)
+                        _send_long(chat_id, part)
             except Exception as bte:
                 _send(chat_id, f"⚠️ Error formateando resultado: {bte}")
         else:
@@ -1165,7 +1236,7 @@ def _broadcast_to_all(payload):
         for part in parts:
             if part and part.strip():
                 try:
-                    _send(cid, part)
+                    _send_long(cid, part)
                 except Exception as _se:
                     print(f"  ⚠️  Telegram broadcast [{cid}]: {_se}")
 
@@ -1179,7 +1250,7 @@ def _cmd_hoy(chat_id: str):
         parts = _get_hoy_fn()
         for part in parts:
             if part and part.strip():
-                _send(chat_id, part)
+                _send_long(chat_id, part)
     except Exception as e:
         _send(chat_id, f"⚠️ Error obteniendo juegos: {e}")
 
@@ -1254,8 +1325,7 @@ def _cmd_pitchers(chat_id: str):
             )
 
         texto = "\n".join(lineas)
-        for i in range(0, len(texto), 4000):
-            _send(chat_id, texto[i:i+4000])
+        _send_long(chat_id, texto)
 
     except Exception as e:
         _send(chat_id, f"⚠️ Error consultando MLB Stats API: {e}")
@@ -1276,8 +1346,7 @@ def _cmd_patrones(chat_id: str):
             _send(chat_id, "✅ Sin patrones situacionales fuertes hoy.")
             return
         texto = "\n\n".join(alertas)
-        for i in range(0, len(texto), 4000):
-            _send(chat_id, texto[i:i+4000])
+        _send_long(chat_id, texto)
     except Exception as e:
         _send(chat_id, f"⚠️ Error escaneando patrones: {e}")
 
@@ -1424,7 +1493,7 @@ def _cmd_bulk_analysis(chat_id: str, sport_key: str, emoji: str, label: str):
                 parts = _build_text_fn(result)
                 for part in parts:
                     if part and part.strip():
-                        _send(chat_id, part)
+                        _send_long(chat_id, part)
             except Exception as bte:
                 _send(chat_id, f"⚠️ Error formateando {home} vs {away}: {bte}")
         else:
