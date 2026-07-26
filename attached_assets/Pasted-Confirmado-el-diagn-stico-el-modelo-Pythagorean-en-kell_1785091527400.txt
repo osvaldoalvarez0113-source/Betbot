@@ -1,0 +1,17 @@
+Confirmado el diagnóstico: el modelo Pythagorean en kelly_odds.py usa ERA/RA promedio de TEMPORADA del equipo completo, ignorando quién es el abridor confirmado del día. Esto infla sistemáticamente el EV cuando el abridor de hoy se desvía mucho del promedio de su equipo (para bien o para mal).
+
+PASO 1 — Verifica si forma_reciente.py o contexto_juego.py YA capturan el ERA/FIP individual del abridor confirmado del día (recuerdo que forma_reciente.py rastrea "pitcher form"). Si ya existe ese dato en algún lado del pipeline, dime exactamente en qué función y por qué no está llegando al cálculo del modelo Pythagorean.
+
+PASO 2 — Si el dato no existe, agrega una función que obtenga el ERA (o mejor, xFIP/SIERA si Statcast real ya está integrado) del abridor confirmado de HOY vía MLB Stats API, para ambos equipos.
+
+PASO 3 — Ajusta el cálculo del Pythagorean para que use un promedio ponderado en vez del ERA de equipo completo:; algo como:
+
+    ERA_efectivo_equipo = (ERA_abridor_hoy * innings_esperadas_abridor + ERA_bullpen * (9 - innings_esperadas_abridor)) / 9
+
+donde innings_esperadas_abridor viene del promedio de entradas por salida de ese pitcher (dato que ya calculamos y usamos en k_props.py — puedes reusar esa misma lógica de get_pitcher_season_stats), y ERA_bullpen es el ERA del bullpen del equipo (no el de todo el staff, para no repetir el ERA del abridor dos veces).
+
+PASO 4 — Corre el cálculo de nuevo para los dos picks de hoy (Yankees ML y Yankees RL +1.5 vs Phillies) con la fórmula corregida, y repórtame el EV nuevo. Si Sánchez tiene ERA ~2.71 con esta ponderación, espero que el EV baje de +47%/+41% a algo mucho más cercano a 0 o incluso negativo para Yankees.
+
+PASO 5 — Corre esto también retroactivamente contra 5-10 picks históricos del log (si existen de antes de la pausa de dos meses) para confirmar si este bug ya venía afectando resultados pasados, no solo los de hoy.
+
+PASO 6 — Tests existentes en verde. No toques k_props.py, el panel, ni la lógica de ELO — esto es exclusivamente el cálculo de Pythagorean dentro de kelly_odds.py.

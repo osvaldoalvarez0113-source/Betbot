@@ -2608,6 +2608,10 @@ def fetch_probable_pitchers_today():
                             if abs(_era_reg - _era_orig) > 0.15:
                                 print(f"  📊 ERA regresada: {_era_orig:.2f} → {_era_reg:.2f} ({_ip_val:.0f} inn)")
                             result[key][_era_key] = _era_reg
+                            # Avg IP per start — needed by _pitcher_adjusted_ra()
+                            _gs_val = int(_ip_stat.get('gamesStarted', 1) or 1)
+                            _ip_key = 'home_avg_ip' if _pid_r == 'home_id' else 'away_avg_ip'
+                            result[key][_ip_key] = round(float(_ip_val) / max(_gs_val, 1), 2)
                         except Exception:
                             pass
     except Exception as e:
@@ -2691,6 +2695,27 @@ def fetch_pitcher_vs_team(pitcher_id, opponent_team_name: str) -> "dict | None":
     except Exception:
         _pitcher_vs_team_cache[ck] = None
         return None
+
+LEAGUE_ERA = 4.20  # MLB average ERA used as normalizer in pitcher-adjusted expected runs
+
+
+def _pitcher_adjusted_ra(starter_era: float, avg_ip_per_start: float,
+                          bullpen_era: float) -> float:
+    """
+    Weighted effective 'runs allowed' combining today's specific starter ERA
+    and bullpen ERA. Replaces team season RA/G in the expected-runs formula
+    so the model reflects who pitches TODAY, not the season-long team average.
+
+    Formula:
+        ERA_eff = (starter_era × ip_starter + bullpen_era × ip_bullpen) / 9
+
+    ip_starter clamped to [4.0, 7.0] innings for robustness.
+    Call site normalizes against LEAGUE_ERA (not LEAGUE_AVG) since ERA is used.
+    """
+    ip_starter = max(4.0, min(float(avg_ip_per_start), 7.0))
+    ip_bullpen  = 9.0 - ip_starter
+    return round((starter_era * ip_starter + bullpen_era * ip_bullpen) / 9.0, 3)
+
 
 def pitcher_run_adjustment(home_era, away_era):
     """
@@ -5441,6 +5466,28 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
             pitch_adj = pitcher_run_adjustment(h_era_eff, a_era_eff)
             print(f"   🔬 Statcast: {h_pname} xERA={h_era_eff:.2f} | "
                   f"{a_pname} xERA={a_era_eff:.2f}")
+
+        # ── Pitcher-adjusted expected runs: starter + bullpen blend ──────────
+        # Replaces team season RA/G with a weighted combination of today's
+        # specific starter ERA and bullpen ERA.  This fixes the structural bias
+        # where team season RA averages all rotation slots; the ace or journeyman
+        # pitching today matters far more than the season mean.
+        _h_avg_ip = p_data.get("home_avg_ip", 5.5)
+        _a_avg_ip = p_data.get("away_avg_ip", 5.5)
+        try:
+            _h_bp_era, _ = fetch_bullpen_era(home)
+            _a_bp_era, _ = fetch_bullpen_era(away)
+        except Exception:
+            _h_bp_era = 4.20
+            _a_bp_era = 4.20
+        _h_ra_eff = _pitcher_adjusted_ra(h_era_eff, _h_avg_ip, _h_bp_era)
+        _a_ra_eff = _pitcher_adjusted_ra(a_era_eff, _a_avg_ip, _a_bp_era)
+        # Recompute expected runs with pitcher-specific RA (normalise vs LEAGUE_ERA)
+        home_exp = h_stats["rs_pg"] * (_a_ra_eff / LEAGUE_ERA) * park
+        away_exp = a_stats["rs_pg"] * (_h_ra_eff / LEAGUE_ERA) * park
+        pitch_adj = 0.0   # already baked into _ra_eff — zero out to avoid double-count
+        print(f"   🎯 RA efectivo: {home} {_h_ra_eff:.3f} | {away} {_a_ra_eff:.3f} "
+              f"[equipo: {h_stats['ra_pg']:.2f}/{a_stats['ra_pg']:.2f}]")
 
         park_city      = MLB_PARK_CITIES.get(home)
         _game_hour_utc = 0
