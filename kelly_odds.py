@@ -11022,6 +11022,11 @@ def analyze_with_claude(game_data: dict, sport: str,
     Cached per content hash to avoid duplicate API calls.
     """
     if not ANTHROPIC_API_KEY or not HAS_ANTHROPIC:
+        # Log the exact reason so Railway shows it — not just a silent None return.
+        if not HAS_ANTHROPIC:
+            print(f"  ⚠️  Panel: anthropic library not importable (HAS_ANTHROPIC=False)")
+        else:
+            print(f"  ⚠️  Panel: ANTHROPIC_API_KEY vacía o no configurada en entorno")
         return None
 
     import hashlib
@@ -11123,7 +11128,11 @@ def analyze_with_claude(game_data: dict, sport: str,
         )
         return result
     except Exception as e:
-        print(f"  ⚠️  Claude API error: {e}")
+        import traceback as _tb
+        # Print full exception type + message + traceback so Railway logs show the real cause
+        # (e.g. AuthenticationError, OverloadedError, RateLimitError, credit exhausted, etc.)
+        print(f"  ❌  Claude API error [{type(e).__name__}]: {e}")
+        print(_tb.format_exc())
         _claude_cache[_ck] = None
         return None
 
