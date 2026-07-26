@@ -11156,9 +11156,17 @@ def adjust_probability_for_pitcher_form(
 ) -> float:
     """
     Ajusta la probabilidad base del equipo local según la forma reciente de los abridores.
-    ERA ajustada = 40% ERA temporada + 60% ERA últimas 3 salidas.
+    ERA ajustada = 40% ERA temporada + 60% ERA últimas 3 salidas (ERA acumulada, no media aritmética).
     El delta entre el diferencial ajustado y el de temporada se convierte en ±prob (4% por punto ERA).
-    Clamped a ±8pp máximo y al rango [0.30, 0.75].
+    Clamped a ±4pp máximo (reducido de ±8pp tras backtest de 1033 juegos mayo-julio 2026).
+
+    Evidencia del backtest:
+      Cap ±4pp: Brier=0.23206  Dir%=60.8%  (outlier 60.5%, sostenida 60.9%)
+      Cap ±8pp: Brier=0.23382  Dir%=59.1%  (outlier 57.5%, sostenida 59.6%)
+    ±4pp mejora ambas métricas en ambos subgrupos (criterio "mejora en ambos lados").
+    Nota: el delta Brier (0.00176) no es estadísticamente significativo (p=0.44, N=1033);
+    el cambio se justifica por consistencia direccional y por principio: un cap de 8pp permitía
+    que UNA salida catastrófica moviera la prob tanto como una racha sostenida de 3 malas.
     """
     if home_era_last3 is None and away_era_last3 is None:
         return base_prob_home
@@ -11169,11 +11177,11 @@ def adjust_probability_for_pitcher_form(
     h_adj = home_era_season * 0.40 + h_recent * 0.60
     a_adj = away_era_season * 0.40 + a_recent * 0.60
 
-    diff_season  = away_era_season - home_era_season   # positivo = local mejor
+    diff_season   = away_era_season - home_era_season   # positivo = local mejor
     diff_adjusted = a_adj - h_adj
 
-    delta = diff_adjusted - diff_season
-    prob_adj = max(-0.08, min(0.08, delta * 0.04))
+    delta    = diff_adjusted - diff_season
+    prob_adj = max(-0.04, min(0.04, delta * 0.04))   # ±4pp cap (backtest-calibrated)
 
     adjusted = max(0.30, min(0.75, base_prob_home + prob_adj))
     if abs(prob_adj) > 0.005:

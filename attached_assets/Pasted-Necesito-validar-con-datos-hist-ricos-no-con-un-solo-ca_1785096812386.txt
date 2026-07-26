@@ -1,0 +1,16 @@
+Necesito validar con datos históricos, no con un solo caso, si el cap de ±8pp en adjust_probability_for_pitcher_form es correcto o demasiado agresivo.
+
+Confirmado hoy: el EV +38.8% de Yankees ML es matemáticamente correcto dado el diseño actual — no es un bug. Los Yankees vienen 7-3 en L10 (-5.0pp) y Sánchez tuvo un desastre real vs Royals el 6 de julio (9 ER en 3.1 IP), lo cual empuja el ajuste de forma del pitcher hasta el cap completo de -7.9pp (prácticamente el límite de ±8pp). El problema potencial: una sola salida catastrófica está recibiendo el mismo peso máximo que tendría una racha sostenida de varias salidas malas.
+
+PASO 1 — Escribe una función backtest_pitcher_form_cap() que:
+1. Tome los últimos 60-90 días de historial de MLB (abridores con game logs vía MLB Stats API)
+2. Para cada juego, calcule qué habría dicho el modelo con el cap actual (±8pp) vs caps alternativos (±4pp, ±5pp, ±6pp) en los casos donde el ajuste de forma reciente se disparó por UNA sola salida atípica (ej. un pitcher con ERA de temporada sólido que tuvo un solo blowup de 7+ carreras ganadas en su muestra reciente)
+3. Compare, para cada cap, qué tan seguido el resultado real del siguiente juego de ese pitcher coincidió con la dirección que predijo el modelo, y el Brier score de cada versión
+
+PASO 2 — Identifica específicamente los casos donde UNA salida atípica (no una racha de 2-3 malas) disparó el ajuste al cap completo, y compara el rendimiento del modelo en esos casos puntuales contra los casos donde el ajuste vino de una racha genuina de varias salidas mediocres/malas. Mi hipótesis: el cap debería aplicarse distinto según si es una racha sostenida o un outlier aislado, no un valor fijo para ambos casos.
+
+PASO 3 — Repórtame una tabla comparando Brier score y % de acierto direccional para los caps ±8pp (actual), ±5pp, y ±4pp. Si algún cap alternativo mejora la calibración SIN empeorarla en los demás escenarios (misma lógica de "mejora en ambos lados" que ya aplicamos con K-props), recomiéndalo. Si ningún cap alternativo mejora de forma consistente, dilo explícitamente y deja el ±8pp como está.
+
+PASO 4 — Si los datos lo justifican, implementa el cambio de cap (o la lógica diferenciada de outlier vs racha sostenida). Si no, no toques nada — solo repórtame la conclusión con la tabla de respaldo.
+
+No apliques ningún cambio de código hasta que el backtest confirme una mejora real y medible. Tests en verde al final si algo se modifica.
