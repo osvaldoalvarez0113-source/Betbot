@@ -2617,7 +2617,18 @@ def fetch_probable_pitchers_today():
     except Exception as e:
         print(f'  ⚠️  Pitcher fetch error: {e}')
 
-    _pitcher_cache[today_str] = result
+    # Only cache if every game has both starters confirmed (no TBD).
+    # A TBD entry would block refreshes for the rest of the process lifetime;
+    # by skipping the cache we guarantee the next call re-fetches the API and
+    # picks up the starter as soon as it is announced.
+    _has_tbd = any(
+        v.get("home_name") == "TBD" or v.get("away_name") == "TBD"
+        for v in result.values()
+    )
+    if not _has_tbd:
+        _pitcher_cache[today_str] = result
+    else:
+        print("  ⚠️  fetch_probable_pitchers_today: abridores TBD detectados — resultado no cacheado (se re-consultará)")
     return result
 
 def _lookup_pitcher_data(home, away, pitchers):
