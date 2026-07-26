@@ -1,0 +1,19 @@
+Necesito verificar una hipótesis sobre por qué el EV de Yankees ML sigue alto (+36.8%) después de los 3 fixes ya validados hoy.
+
+El reporte anterior atribuyó el EV residual a "3 salidas muy malas consecutivas" de Cristopher Sánchez que estaría capturando forma_reciente.py. Pero al revisar fuentes públicas (MLB.com, FOX Sports), su secuencia real de salidas es:
+- 6 jul vs Royals: 9 carreras en 3.1 innings (desastre real, un outlier)
+- ~11 jul vs Tigers: 7 innings, 2 carreras (buena)
+- Juego de Estrellas (exhibición, ~15 jul): mala salida
+- ~21 jul vs Dodgers (su salida más reciente real): 5.1 innings, 3 carreras (2 limpias), 7 K — decente, no mala
+
+Solo hay UNA salida realmente mala (Royals), no tres consecutivas. Sospecho que forma_reciente.py está contando el Juego de Estrellas como si fuera una salida de temporada regular, lo cual sería un bug de calidad de datos — las estadísticas del Juego de Estrellas no deberían mezclarse con el rendimiento de temporada regular (rivales distintos, contexto de exhibición, sin implicaciones reales).
+
+PASO 1 — Revisa forma_reciente.py: ¿de dónde saca el historial de "últimas N salidas" de un pitcher? ¿Usa un endpoint de MLB Stats API que podría incluir el Juego de Estrellas como un game log más, o filtra explícitamente por gameType='R' (temporada regular)?
+
+PASO 2 — Si confirmas que el Juego de Estrellas se está colando como una salida real, corrige el filtro para excluir cualquier gameType que no sea temporada regular (excluir All-Star Game, exhibiciones, postemporada si aplica un cálculo distinto).
+
+PASO 3 — Vuelve a correr el cálculo del pick de Yankees ML/RL con el fix aplicado y repórtame el EV nuevo. Si baja considerablemente hacia el rango 3-15% que veníamos esperando, confirma que el bug era ese.
+
+PASO 4 — Si el Juego de Estrellas NO se está colando y forma_reciente.py ya filtra correctamente por temporada regular, entonces dime qué otras 2 salidas está considerando "malas" para llegar a "3 consecutivas" — puede que el módulo esté usando un umbral de "mala salida" distinto al que yo estoy usando (ej. contando la salida vs Royals Y alguna otra con más de 2-3 carreras aunque el pitcher haya lanzado bien en innings).
+
+Tests en verde al final. No toques nada de k_props.py ni los 3 fixes ya validados — esto es exclusivamente forma_reciente.py.

@@ -11523,6 +11523,8 @@ def _fetch_enhanced_game_context(
             print(f"[DEBUG API] Total starts found for {label}: {len(starts)}")
             last3 = starts[-3:] if len(starts) >= 3 else starts
             entries = []
+            tot_ip_cum = 0.0
+            tot_er_cum = 0.0
             for g in last3:
                 ip = float(g["stat"].get("inningsPitched", 0))
                 er = float(g["stat"].get("earnedRuns", 0))
@@ -11535,8 +11537,14 @@ def _fetch_enhanced_game_context(
                     "k": g["stat"].get("strikeOuts", 0),
                     "hits": g["stat"].get("hits", 0),
                 })
-            era_avg = round(sum(x["era_game"] for x in entries) / len(entries), 2) if entries else None
-            print(f"[DEBUG API] {label} last3 ERA avg: {era_avg}")
+                tot_ip_cum += ip
+                tot_er_cum += er
+            # Use cumulative ERA (total_er * 9 / total_ip), NOT arithmetic mean of
+            # per-game ERAs. Arithmetic mean weights short disasters disproportionately:
+            # e.g. 3.1 IP / 9 ER → game ERA 26.13 inflates the average far more than
+            # the actual innings pitched would justify.
+            era_avg = round(tot_er_cum * 9 / tot_ip_cum, 2) if tot_ip_cum else None
+            print(f"[DEBUG API] {label} last3 ERA (cumulative {tot_er_cum:.0f}ER/{tot_ip_cum:.1f}IP): {era_avg}")
             result[f"{label}_last3_starts"] = entries
             result[f"{label}_last3_era_avg"] = era_avg
             if entries:
