@@ -2800,6 +2800,7 @@ def _lineup_impact(missing_list: list, order_dict: dict) -> float:
 
 _statcast_pitcher_cache: dict = {}   # date → {name_key → metrics dict}
 _statcast_batter_cache:  dict = {}   # date → {name_key → metrics dict}
+_statcast_pid_cache:     dict = {}   # "{player_id}_{date}" → metrics dict | None
 
 def _safe_float(val) -> "float | None":
     """Convert a CSV string value to float; return None if blank or non-numeric."""
@@ -2832,11 +2833,26 @@ def _fetch_statcast_all(player_type: str = "pitcher") -> dict:
                hard_hit_percent | barrel_batted_rate | oz_swing_percent
       batter:  last_name, first_name | xba | xslg |
                hard_hit_percent | barrel_batted_rate
+
+    Disk cache: saves parsed result to /tmp/statcast_{type}_{date}.pkl so it
+    survives Railway restarts within the same calendar day without re-downloading.
     """
     today = datetime.now(ET).strftime("%Y-%m-%d")
     cache = _statcast_pitcher_cache if player_type == "pitcher" else _statcast_batter_cache
     if today in cache:
         return cache[today]
+
+    # ── Disk cache (survives Railway restarts same day) ──────────────────────
+    import pickle as _pk, csv, io
+    _disk = f"/tmp/statcast_{player_type}_{today}.pkl"
+    try:
+        with open(_disk, "rb") as _df:
+            result = _pk.load(_df)
+        cache[today] = result
+        print(f"  🔬 Statcast {player_type} disk-cache: {len(result)} jugadores (sin red)")
+        return result
+    except (FileNotFoundError, Exception):
+        pass
 
     import csv, io
 
@@ -2902,17 +2918,117 @@ def _fetch_statcast_all(player_type: str = "pitcher") -> dict:
             print(f"⚠️ Statcast columnas recibidas (inesperadas): {reader.fieldnames}")
 
         print(f"  🔬 Statcast {player_type}s cargados: {len(result)} jugadores")
+
+        # Persist to disk so Railway restarts reuse this instead of re-downloading
+        try:
+            with open(_disk, "wb") as _df:
+                _pk.dump(result, _df)
+        except Exception:
+            pass
+
         return result
     except Exception as _e:
         print(f"  ⚠️  Statcast {player_type} fetch error: {_e}")
         cache[today] = {}
         return {}
 
+def fetch_statcast_pitcher_by_id(pitcher_id, pitcher_name: str = "") -> "dict | None":
+    """
+    Fetch Statcast metrics for ONE pitcher using their MLBAM player_id.
+
+    Downloads only 1 row from Baseball Savant instead of the full 541-pitcher
+    leaderboard CSV.  This is the preferred path when the MLBAM ID is available
+    (e.g. from fetch_probable_pitchers_today → p_data.get("home_id")).
+
+    Disk cache: /tmp/statcast_pid_{pitcher_id}_{date}.json — survives Railway
+    restarts within the same calendar day without any network call.
+
+    Falls back to None (not to the bulk fetch) on any failure — the caller is
+    responsible for providing a fallback via fetch_statcast_pitcher(name).
+    """
+    if not pitcher_id:
+        return None
+
+    import csv as _csv, io as _io, json as _jj
+
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    ck    = f"{pitcher_id}_{today}"
+    if ck in _statcast_pid_cache:
+        return _statcast_pid_cache[ck]
+
+    # ── Disk cache (survives Railway restarts) ───────────────────────────────
+    disk_path = f"/tmp/statcast_pid_{pitcher_id}_{today}.json"
+    try:
+        with open(disk_path) as _df:
+            result = _jj.load(_df)
+        _statcast_pid_cache[ck] = result
+        print(f"  🔬 Statcast disk-hit: {pitcher_name or pitcher_id} → "
+              f"xERA={result.get('xera') if result else 'N/A'}")
+        return result
+    except (FileNotFoundError, Exception):
+        pass
+
+    # ── Live fetch — only this one pitcher ───────────────────────────────────
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/custom"
+        f"?year={MLB_YEAR}&type=pitcher&min=1"
+        f"&player_id={pitcher_id}"
+        f"&selections=p_era,xera,whiff_percent,hard_hit_percent,"
+        f"barrel_batted_rate,oz_swing_percent"
+        f"&csv=true"
+    )
+    try:
+        r = requests.get(url, timeout=20,
+                         headers={"User-Agent": "Mozilla/5.0 (compatible; BetBot/1.0)"})
+        if r.status_code != 200:
+            print(f"  ⚠️  Statcast pid={pitcher_id} ({pitcher_name}): HTTP {r.status_code}")
+            _statcast_pid_cache[ck] = None
+            return None
+
+        reader = _csv.DictReader(_io.StringIO(r.text.lstrip('\ufeff')))
+        result = None
+        for row in reader:
+            result = {
+                "xera":         _safe_float(row.get("xera")),
+                "whiff_pct":    _safe_float(row.get("whiff_percent")),
+                "hard_hit_pct": _safe_float(row.get("hard_hit_percent")),
+                "barrel_pct":   _safe_float(row.get("barrel_batted_rate")),
+                "chase_pct":    _safe_float(row.get("oz_swing_percent")),
+            }
+            break  # only 1 row expected per player_id
+
+        if result is None:
+            # player_id not found (e.g. pitcher has < 1 BF this season)
+            print(f"  ⚠️  Statcast pid={pitcher_id} ({pitcher_name}): 0 rows returned")
+            _statcast_pid_cache[ck] = None
+            return None
+
+        print(f"  🔬 Statcast {pitcher_name or pitcher_id} → "
+              f"xERA={result.get('xera')} whiff={result.get('whiff_pct')} "
+              f"[1 pitcher, not 541]")
+        _statcast_pid_cache[ck] = result
+
+        # Persist to disk
+        try:
+            with open(disk_path, "w") as _df:
+                _jj.dump(result, _df)
+        except Exception:
+            pass
+
+        return result
+
+    except Exception as _se:
+        print(f"  ⚠️  Statcast pid={pitcher_id} ({pitcher_name}) error: {_se}")
+        _statcast_pid_cache[ck] = None
+        return None
+
+
 def fetch_statcast_pitcher(pitcher_name: str) -> "dict | None":
     """
     Return Statcast metrics dict for a pitcher (by display name), or None.
     Keys: xera, whiff_pct, hard_hit_pct, barrel_pct, chase_pct
     Falls back to last-name partial match if full-name lookup misses.
+    Prefer fetch_statcast_pitcher_by_id() when the MLBAM ID is available.
     """
     if not pitcher_name or pitcher_name in ("TBD", "Unknown", ""):
         return None
@@ -5446,8 +5562,16 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
         pitch_adj = pitcher_run_adjustment(h_era, a_era)
 
         # ── Elite Source 1: Baseball Savant / Statcast ────────────────────────
-        h_statcast = fetch_statcast_pitcher(h_pname)
-        a_statcast = fetch_statcast_pitcher(a_pname)
+        # Use per-pitcher fetch (MLBAM ID) when available — downloads only the
+        # 2 pitchers we need instead of the full 541-player leaderboard CSV.
+        # Falls back to name-based lookup (which uses the disk-cached full CSV)
+        # when no ID is available (TBD pitchers or data gaps).
+        _h_pid_sc = p_data.get("home_id")
+        _a_pid_sc = p_data.get("away_id")
+        h_statcast = (fetch_statcast_pitcher_by_id(_h_pid_sc, h_pname)
+                      if _h_pid_sc else fetch_statcast_pitcher(h_pname))
+        a_statcast = (fetch_statcast_pitcher_by_id(_a_pid_sc, a_pname)
+                      if _a_pid_sc else fetch_statcast_pitcher(a_pname))
         # Use xERA instead of ERA when available — more predictive than ERA alone
         h_era_eff = (h_statcast["xera"] if h_statcast and h_statcast.get("xera") is not None
                      else h_era)

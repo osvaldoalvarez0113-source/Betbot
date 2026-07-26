@@ -65,6 +65,7 @@ _get_hoy_fn          = None
 _get_patrones_fn     = None
 _start_time          = datetime.datetime.now()
 _last_scan_time      = None   # updated by kelly_odds integration if desired
+_last_analizar_chat_id: str = ""   # last chat_id that triggered /analizar (for crash notifications)
 
 
 # ── Crash diagnostics: captura CUALQUIER excepción no atrapada ──────────────
@@ -84,11 +85,29 @@ def _mem_rss_mb() -> float:
         return -1.0
 
 
+def _notify_analizar_error(label: str = ""):
+    """
+    Intenta enviar '⚠️ Error en el análisis, intenta de nuevo' al último chat_id
+    que ejecutó /analizar.  Solo se llama desde los exception hooks — nunca bloquea.
+    """
+    cid = _last_analizar_chat_id
+    if not cid:
+        return
+    try:
+        msg = "⚠️ Error en el análisis, intenta de nuevo"
+        if label:
+            msg += f" [{label}]"
+        _api("sendMessage", {"chat_id": cid, "text": msg, "parse_mode": "HTML"})
+    except Exception:
+        pass
+
+
 def _global_excepthook(exc_type, exc_value, exc_tb):
     """Captura excepciones no manejadas en el hilo PRINCIPAL."""
     print(f"\n  💥 CRASH HILO PRINCIPAL [{exc_type.__name__}]: {exc_value}")
     print(f"     Memoria RSS: {_mem_rss_mb()} MB")
     _traceback.print_exception(exc_type, exc_value, exc_tb)
+    _notify_analizar_error(exc_type.__name__)
     sys.__excepthook__(exc_type, exc_value, exc_tb)
 
 
@@ -103,6 +122,7 @@ def _thread_excepthook(args):
     print(f"\n  💥 CRASH HILO DAEMON '{tname}' [{args.exc_type.__name__}]: {args.exc_value}")
     print(f"     Memoria RSS: {_mem_rss_mb()} MB")
     _traceback.print_tb(args.exc_tb)
+    _notify_analizar_error(args.exc_type.__name__)
 
 
 try:
@@ -957,6 +977,10 @@ def _cmd_analizar(chat_id: str, args: str):
     away_q   = _translate_team_name(away_raw).lower()
 
     _mem0 = _mem_rss_mb()
+    # ── Registrar chat_id para notificación de crash (PASO 4) ───────────────
+    global _last_analizar_chat_id
+    _last_analizar_chat_id = chat_id
+
     # ── PASO 2 — Verificar chat_id ──────────────────────────────────────────
     # _authorized_ids es el set en memoria (poblado al arrancar por iniciar_telegram).
     # _load_authorized() lee env + archivo para comparar contra el estado en memoria.
@@ -1010,9 +1034,9 @@ def _cmd_analizar(chat_id: str, args: str):
     # ── ETAPA 2: Análisis completo (panel de 3 expertos + todos los módulos) ──
     result = None
     try:
-        print(f"  [analizar] ETAPA 2 — llamando analyze_game_full (force_panel=True, _no_elite_panel=True) | RSS={_mem_rss_mb()}MB")
+        print(f"  [analizar] ETAPA 2 — llamando analyze_game_full (force_panel=True, _no_elite_panel=False) | RSS={_mem_rss_mb()}MB")
         result = _analyze_fn(game_found, sport_found, {}, force_panel=True,
-                             _no_elite_panel=True)
+                             _no_elite_panel=False)
         print(f"  [analizar] ETAPA 2 OK — analyze_game_full completado | RSS={_mem_rss_mb()}MB result={'ok' if result else 'None'}")
     except BaseException as _anl_err:
         _et = type(_anl_err).__name__

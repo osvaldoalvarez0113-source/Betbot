@@ -1,0 +1,17 @@
+Necesito resolver de raíz por qué /analizar Philadelphia Phillies vs New York Yankees muere en silencio (probable OOM kill del kernel, sin traceback capturable) — sin más parches parciales, quiero la solución completa hoy.
+
+SOSPECHA PRINCIPAL: cada ejecución de /analizar carga Statcast de los 541 pitchers de TODAS las Grandes Ligas ("Statcast pitchers cargados: 541 jugadores"), cuando solo se necesitan los datos de los 2 abridores del juego analizado. Esto es una carga de memoria y tiempo completamente innecesaria para un análisis de un solo partido.
+
+PASO 1 — Encuentra la función que carga Statcast para /analizar y modifícala para que reciba los nombres/IDs de los 2 pitchers específicos del juego, y solo pida datos de esos 2 a la fuente de Statcast — no la liga completa. Si la función actual no soporta filtrar por jugador específico, agrega esa capacidad.
+
+PASO 2 — Aplica la misma optimización a cualquier otro dataset que se esté cargando de forma innecesariamente amplia dentro de /analizar (por ejemplo, si algo más carga los 30 equipos cuando solo hacen falta 2).
+
+PASO 3 — Mantén el logging de memoria por etapa que ya tienes (RSS en cada checkpoint), para confirmar que el consumo baja significativamente con este cambio.
+
+PASO 4 — Mantén el try/except de alto nivel ya implementado, pero ahora agrégale esto: si CUALQUIER excepción no capturada ocurre, que el bot mande un mensaje a Telegram diciendo "⚠️ Error en el análisis, intenta de nuevo" ANTES de que el proceso muera — así, aunque algo falle, el usuario nunca se queda sin ninguna respuesta.
+
+PASO 5 — El resultado final de /analizar debe seguir siendo el análisis COMPLETO como estaba diseñado desde el principio (Pitcheo + Forma + Claves + Mercados + Panel de expertos + Recomendación) — puede ir en 1 o 2 mensajes de Telegram por el límite de caracteres, eso está bien, pero debe ser el análisis completo de una sola ejecución, no fragmentos entregados como workaround de un crash.
+
+PASO 6 — Corre /analizar Philadelphia Phillies vs New York Yankees al menos 2 veces seguidas para confirmar que ya no se cae, y pégame el mensaje completo que llegó a Telegram en ambos intentos.
+
+Tests en verde. Esto es la prioridad total de hoy — necesito que este comando quede funcionando de punta a punta.
