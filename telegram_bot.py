@@ -1251,6 +1251,42 @@ def _cmd_patrones(chat_id: str):
         _send(chat_id, f"⚠️ Error escaneando patrones: {e}")
 
 
+def _cmd_kprops(chat_id: str, args: str):
+    """
+    /kprops [pitcher] | [rival] | [línea] | [Over/Under] | [cuota] | [cuota contraria, opcional]
+    Ejemplo: /kprops Cristopher Sanchez | Yankees | 6.5 | Over | -140
+    """
+    try:
+        from k_props import analyze_k_prop_by_name, format_notification, log_k_prop
+    except ImportError as e:
+        _send(chat_id, f"⚠️ Módulo k_props no disponible: {e}")
+        return
+
+    partes = [p.strip() for p in args.split("|")]
+    if len(partes) < 5:
+        _send(chat_id,
+              "Formato: /kprops [pitcher] | [rival] | [línea] | [Over/Under] | [cuota] | [cuota contraria, opcional]\n"
+              "Ejemplo: /kprops Cristopher Sanchez | Yankees | 6.5 | Over | -140")
+        return
+
+    try:
+        pitcher_name, rival_name, line_str, side, odds_str = partes[:5]
+        odds_other_str = partes[5] if len(partes) > 5 else None
+
+        resultado = analyze_k_prop_by_name(
+            pitcher_name=pitcher_name,
+            rival_team_name=rival_name,
+            line=float(line_str),
+            side=side.capitalize(),
+            odds_side=float(odds_str),
+            odds_other=float(odds_other_str) if odds_other_str else None,
+        )
+        log_k_prop(resultado)
+        _send(chat_id, format_notification(resultado))
+    except Exception as e:
+        _send(chat_id, f"⚠️ Error: {e}\nVerifica el nombre del pitcher y del equipo rival.")
+
+
 def _cmd_contexto(chat_id: str):
     """
     /contexto — Contexto de juego para todos los partidos MLB de hoy:
@@ -1977,6 +2013,7 @@ def _dispatch(update: dict):
         "/hoy":      lambda: _cmd_hoy(chat_id),
         "/pitchers": lambda: _cmd_pitchers(chat_id),
         "/patrones": lambda: _cmd_patrones(chat_id),
+        "/kprops":   lambda: _cmd_kprops(chat_id, args),
         "/contexto": lambda: _cmd_contexto(chat_id),
         "/analizar": lambda: _cmd_analizar(chat_id, args),
         "/mlb":      lambda: _cmd_mlb(chat_id),
