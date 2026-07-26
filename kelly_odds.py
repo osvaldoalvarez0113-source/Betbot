@@ -966,6 +966,79 @@ def load_elo_ratings():
 
 _elo_ratings = load_elo_ratings()
 
+# Cache so we only hit the standings endpoint once per process run per team.
+_mlb_win_pct_cache: dict = {}
+
+def _ensure_mlb_elo_seeded(home: str, away: str) -> str:
+    """
+    For MLB games: if either team is missing from the learned/seeded ELO dict,
+    fetch its 2026 season win% from the MLB Stats API and derive an estimated
+    ELO rating (formula: 1500 + (win_pct - 0.500) × 400).
+
+    Seeds are injected into _elo_ratings in-memory (not persisted to file) so
+    they are used for this run only.  Each seeded pick is flagged with a note
+    so the notification can mark the ELO as estimated rather than calculated.
+
+    Returns a note string (empty string when all teams already have real ELO).
+    """
+    global _elo_ratings
+    seeded = []
+    for team in (home, away):
+        if team in _elo_ratings:
+            continue
+        # Already tried and failed this session — skip to avoid repeated API calls.
+        if team in _mlb_win_pct_cache:
+            if _mlb_win_pct_cache[team] is not None:
+                _elo_ratings[team] = _mlb_win_pct_cache[team]
+                seeded.append(team)
+            continue
+        try:
+            tid = _team_id(team)
+            if not tid:
+                _mlb_win_pct_cache[team] = None
+                continue
+            data = _mlb_rest(f"/teams/{tid}/stats",
+                             {"stats": "season", "group": "hitting",
+                              "season": MLB_YEAR})
+            st = (data.get("stats", [{}])[0]
+                      .get("splits", [{}])[0]
+                      .get("stat", {}))
+            gp = int(st.get("gamesPlayed", 0) or 0)
+            # Hitting stats don't have wins — use the standings endpoint instead.
+            st_data = _mlb_rest("/standings",
+                                {"leagueId": "103,104", "season": MLB_YEAR,
+                                 "standingsTypes": "regularSeason",
+                                 "hydrate": "team,record"})
+            win_pct = None
+            for rec in st_data.get("records", []):
+                for tr in rec.get("teamRecords", []):
+                    if tr.get("team", {}).get("id") == tid:
+                        pct_str = tr.get("winningPercentage", "")
+                        try:
+                            win_pct = float(pct_str)
+                        except ValueError:
+                            w = tr.get("wins", 0)
+                            l = tr.get("losses", 0)
+                            win_pct = w / (w + l) if (w + l) > 0 else 0.5
+                        break
+                if win_pct is not None:
+                    break
+            if win_pct is None:
+                _mlb_win_pct_cache[team] = None
+                continue
+            estimated_elo = round(1500.0 + (win_pct - 0.500) * 400.0, 1)
+            _elo_ratings[team] = estimated_elo
+            _mlb_win_pct_cache[team] = estimated_elo
+            seeded.append(team)
+            print(f"  📊 ELO estimado [{team}]: win%={win_pct:.3f} → ELO={estimated_elo:.0f}")
+        except Exception as _elo_seed_e:
+            _mlb_win_pct_cache[team] = None
+            print(f"  ⚠️  ELO seed error [{team}]: {_elo_seed_e}")
+    if seeded:
+        return f"⚡ ELO estimado (win% temporada): {', '.join(seeded)}"
+    return ""
+
+
 def elo_win_prob(team_a, team_b):
     """Expected win probability for team_a vs team_b using ELO ratings."""
     ea = _elo_for(team_a)
@@ -5700,10 +5773,17 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
                 pass
 
         _pyth_p = pythagorean_win_prob(home_exp, away_exp)
+        # For MLB games, seed ELO from season win% when team has no learned rating.
+        # This prevents the fake 50/50 that occurs when both teams default to 1400.
+        _elo_seed_note = ""
+        if is_mlb:
+            _elo_seed_note = _ensure_mlb_elo_seeded(home, away)
         _elo_p  = elo_win_prob(home, away)
         # Blend 60% Pythagorean + 40% ELO so league-average fallback never gives 50/50
         p_home  = round(0.60 * _pyth_p + 0.40 * _elo_p, 4)
         p_away  = 1.0 - p_home
+        if _elo_seed_note:
+            print(f"   {_elo_seed_note}")
 
         # ── Module B2: Team streak ML adjustment (±5% per hot/cold team) ─
         _h_streak = _a_streak = None
@@ -11204,6 +11284,9 @@ def get_market_priority_for_game(home_era, away_era):
 def pitcher_mismatch_ml_boost(home_era, away_era, base_prob, favored_is_home=True):
     """
     Ajusta la probabilidad ML cuando hay mismatch significativo de ERA.
+    El signo del ajuste depende de favored_is_home:
+      True  → pitcher local es el mejor → suma boost a p_home
+      False → pitcher visitante es mejor → resta boost de p_home
     Cap de ±8pp igual que el sistema existente.
     """
     try:
@@ -11218,10 +11301,16 @@ def pitcher_mismatch_ml_boost(home_era, away_era, base_prob, favored_is_home=Tru
             boost = 0.015
         else:
             boost = 0.0
-        adjusted = min(float(base_prob) + boost, float(base_prob) + 0.08)
+        # Apply boost in the correct direction: positive when home pitcher is better,
+        # negative when the away pitcher is better.  Before this fix, favored_is_home
+        # was accepted but ignored — the boost always increased p_home regardless.
+        signed_boost = boost if favored_is_home else -boost
+        adjusted = float(base_prob) + signed_boost
         adjusted = max(0.0, min(1.0, adjusted))
+        direction = "local" if favored_is_home else "visitante"
         if boost > 0.0:
-            print(f"[ML_BOOST] ERA diff={era_diff:.2f} | boost=+{boost*100:.1f}pp | "
+            print(f"[ML_BOOST] ERA diff={era_diff:.2f} | pitcher mejor={direction} | "
+                  f"boost={signed_boost*100:+.1f}pp | "
                   f"{float(base_prob)*100:.1f}% → {adjusted*100:.1f}%")
         return adjusted
     except Exception as e:

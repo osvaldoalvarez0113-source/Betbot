@@ -1,0 +1,25 @@
+Necesito corregir dos bugs identificados en kelly_odds.py durante la sesión anterior. Ambos afectan la lógica base del modelo Pythagorean/ELO para TODOS los juegos, no solo casos puntuales — así que hazlos con cuidado quirúrgico, uno primero y luego el otro, con tests después de cada uno.
+
+BUG 1 — Boost de ERA que siempre favorece al equipo local, incluso cuando el abridor visitante lanza mejor.
+
+PASO 1 — Encuentra el bloque de código donde se aplica el ajuste/boost de ERA por localía dentro del cálculo del Pythagorean (el mismo que acabamos de corregir para usar el ERA del abridor confirmado en vez del promedio de equipo). Muéstrame la lógica actual exacta antes de tocarla.
+
+PASO 2 — Diagnostica: ¿el boost se aplica como un valor fijo sumado al equipo local sin importar la comparación de ERA entre abridores, o hay alguna condición que debería comparar ambos ERAs primero y no lo está haciendo? Repórtame la causa exacta.
+
+PASO 3 — Corrige para que el ajuste por localía sea un factor separado e independiente de la comparación de ERA entre abridores — es decir, la ventaja de jugar en casa (históricamente ~54% en MLB) debe aplicarse DESPUÉS de comparar los ERAs reales de ambos abridores, nunca como un boost que se suma al ERA del local de forma que enmascare que el visitante tiene mejor pitcheo. Si el abridor visitante es objetivamente mejor, el modelo debe poder reflejarlo aunque el equipo sea visitante.
+
+PASO 4 — Corre el cálculo de nuevo para 2-3 juegos de hoy donde el abridor visitante tenga mejor ERA que el local, y confírmame que el modelo ahora refleja eso correctamente en vez de seguir favoreciendo al local por defecto.
+
+BUG 2 — Probabilidades neutrales falsas (50/50) cuando falta el rating ELO de algún equipo, presentadas como si fueran una probabilidad real calculada.
+
+PASO 5 — Encuentra dónde el código hace fallback a 50/50 (o similar) cuando no encuentra rating ELO para un equipo. Muéstrame la lógica actual.
+
+PASO 6 — Corrige para que esto NO se trate como una probabilidad válida del modelo. Dos opciones, dime cuál es más viable dado el código actual:
+   a) Si falta el ELO de cualquiera de los dos equipos, el pick se marca explícitamente como "ELO no disponible — EV no confiable" y se EXCLUYE del filtro automático de edge ≥5%, en vez de generar un EV que parece real
+   b) Si es posible inicializar el ELO de un equipo nuevo/sin historial con un valor razonable basado en su récord de temporada actual (no necesariamente 1400 fijo), úsalo como estimado explícito, pero marca el pick con una nota de "ELO estimado, no calculado" en la notificación de Telegram
+
+PASO 7 — Corre los tests existentes (deben seguir en 43/43) y confírmame con qué opción (a o b) quedó implementado el Bug 2.
+
+PASO 8 — Repórtame ambos fixes juntos: qué cambió exactamente en cada bug, y si alguno de los picks de hoy (Yankees ML, Yankees RL, San Francisco Giants, etc.) cambia de EV o desaparece del todo con ambas correcciones aplicadas.
+
+No toques k_props.py, el panel de expertos, ni la lógica de ELO update — esto es exclusivamente el cálculo de localía y el manejo de ELO faltante dentro del modelo de probabilidad.
