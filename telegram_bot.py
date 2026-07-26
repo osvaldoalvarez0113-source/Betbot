@@ -1280,6 +1280,7 @@ def _cmd_kprops(chat_id: str, args: str):
             side=side.capitalize(),
             odds_side=float(odds_str),
             odds_other=float(odds_other_str) if odds_other_str else None,
+            bookmaker=None,
         )
         log_k_prop(resultado)
         _send(chat_id, format_notification(resultado))

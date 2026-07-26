@@ -105,7 +105,9 @@ def prob_over_from_diff(diff: float) -> float:
 
 def analyze_k_prop(pitcher_name: str, pitcher_id: int, rival_team_id: int,
                     line: float, side: str, odds_side: float,
-                    odds_other: float = None, bankroll: float = 1000) -> dict:
+                    odds_other: float = None, bankroll: float = 1000,
+                    team_name: str = None, rival_team_name: str = None,
+                    bookmaker: str = None) -> dict:
     p_stats = get_pitcher_season_stats(pitcher_id)
     rival_k_pct = get_team_k_pct(rival_team_id)
 
@@ -129,9 +131,12 @@ def analyze_k_prop(pitcher_name: str, pitcher_id: int, rival_team_id: int,
 
     resultado = {
         "pitcher": pitcher_name,
+        "team_name": team_name,
+        "rival_team_name": rival_team_name,
         "k9": p_stats["k9"],
         "avg_ip": p_stats["avg_ip_per_start"],
         "rival_k_pct": rival_k_pct,
+        "league_k_pct": LEAGUE_K_PCT,
         "k_esperado": k_esperado,
         "linea": line,
         "lado": side,
@@ -142,6 +147,7 @@ def analyze_k_prop(pitcher_name: str, pitcher_id: int, rival_team_id: int,
         "edge": edge,
         "hay_valor": hay_valor,
         "stake_sugerido": stake,
+        "bookmaker": bookmaker,
         "fecha": datetime.now().strftime("%Y-%m-%d"),
     }
     return resultado
@@ -158,16 +164,30 @@ def log_k_prop(resultado: dict):
 
 def format_notification(r: dict) -> str:
     veredicto = "🟢 HAY VALOR" if r["hay_valor"] else ("🟡 AL BORDE" if r["edge"] >= 0 else "🔴 SIN VALOR")
-    texto = (
-        f"{veredicto}\n"
-        f"⚾ {r['pitcher']} — {r['lado']} {r['linea']} K\n"
-        f"K esperados: {r['k_esperado']} (dif {r['diferencia']:+.2f})\n"
-        f"Tu prob: {r['mi_prob']}% · Mercado: {r['prob_mercado']}% · Edge: {r['edge']:+.1f}\n"
-    )
+
+    matchup = (f"{r['team_name']} vs {r['rival_team_name']}"
+               if r.get("team_name") and r.get("rival_team_name") else "")
+
+    texto = f"{veredicto}\n"
+    texto += f"⚾ {r['pitcher']} — {r['lado']} {r['linea']} K\n"
+    if matchup:
+        texto += f"🆚 {matchup}\n"
+    texto += f"\n📊 Datos del pitcher:\n"
+    texto += f"   K/9: {r['k9']} · Entradas prom: {r['avg_ip']}\n"
+    texto += f"   K% rival: {r['rival_k_pct']}% (liga: {r.get('league_k_pct', 22.0)}%)\n"
+    texto += f"\n🎯 Cálculo:\n"
+    texto += f"   K esperados: {r['k_esperado']} (dif {r['diferencia']:+.2f} vs línea)\n"
+    texto += f"   Tu prob: {r['mi_prob']}% · Mercado: {r['prob_mercado']}%\n"
+    texto += f"   Edge: {r['edge']:+.1f}%\n"
+
     if r["hay_valor"]:
-        texto += f"💰 Stake sugerido (¼ Kelly): ${r['stake_sugerido']}\n"
+        texto += f"\n💰 Stake sugerido (¼ Kelly): ${r['stake_sugerido']}\n"
+
+    if r.get("bookmaker"):
+        texto += f"📚 Cuota: {r['bookmaker']}\n"
     if not r["vig_quitado"]:
         texto += "⚠️ Vig estimado (sin cuota contraria)\n"
+
     return texto
 
 
@@ -209,7 +229,8 @@ def search_team_by_name(name: str) -> dict:
 
 def analyze_k_prop_by_name(pitcher_name: str, rival_team_name: str,
                             line: float, side: str, odds_side: float,
-                            odds_other: float = None, bankroll: float = 1000) -> dict:
+                            odds_other: float = None, bankroll: float = 1000,
+                            bookmaker: str = None) -> dict:
     pitcher = search_player_by_name(pitcher_name)
     rival = search_team_by_name(rival_team_name)
 
@@ -222,6 +243,9 @@ def analyze_k_prop_by_name(pitcher_name: str, rival_team_name: str,
         odds_side=odds_side,
         odds_other=odds_other,
         bankroll=bankroll,
+        team_name=pitcher.get("team_name"),
+        rival_team_name=rival["name"],
+        bookmaker=bookmaker,
     )
 
 
@@ -413,6 +437,9 @@ def run_k_props_scan(odds_api_key: str, bankroll: float = 1000) -> list:
                     odds_side=cuota_lado,
                     odds_other=cuota_contraria,
                     bankroll=bankroll,
+                    team_name=juego.get("team_name"),
+                    rival_team_name=juego.get("rival_team_name"),
+                    bookmaker=odds_info.get("bookmaker"),
                 )
                 candidatos.append(resultado)
             except Exception as e:

@@ -1,0 +1,70 @@
+Necesito ampliar el detalle del mensaje de notificación en k_props.py, sin tocar la lógica de cálculo ni de selección Over/Under que ya está validada.
+
+PASO 1 — Modifica analyze_k_prop() para que acepte dos parámetros opcionales nuevos: team_name (equipo del pitcher) y bookmaker (de dónde viene la cuota). Agrégalos al diccionario resultado que ya devuelve la función:
+
+def analyze_k_prop(pitcher_name: str, pitcher_id: int, rival_team_id: int,
+                    line: float, side: str, odds_side: float,
+                    odds_other: float = None, bankroll: float = 1000,
+                    team_name: str = None, rival_team_name: str = None,
+                    bookmaker: str = None) -> dict:
+    # ... lógica existente sin cambios ...
+    
+    resultado = {
+        "pitcher": pitcher_name,
+        "team_name": team_name,
+        "rival_team_name": rival_team_name,
+        "k9": p_stats["k9"],
+        "avg_ip": p_stats["avg_ip_per_start"],
+        "rival_k_pct": rival_k_pct,
+        "league_k_pct": league_k_pct,
+        "k_esperado": k_esperado,
+        "linea": line,
+        "lado": side,
+        "diferencia": diff,
+        "mi_prob": round(mi_prob, 1),
+        "prob_mercado": round(mercado * 100, 1),
+        "vig_quitado": vig_quitado,
+        "edge": edge,
+        "hay_valor": hay_valor,
+        "stake_sugerido": stake,
+        "bookmaker": bookmaker,
+        "fecha": datetime.now().strftime("%Y-%m-%d"),
+    }
+    return resultado
+
+PASO 2 — Actualiza run_k_props_scan() para pasar team_name, rival_team_name (ya los tiene en el dict "juego") y bookmaker (ya lo tiene en odds_info["bookmaker"]) al llamar analyze_k_prop en ambos lados (Over y Under).
+
+PASO 3 — Reemplaza format_notification() completo por esta versión ampliada:
+
+def format_notification(r: dict) -> str:
+    veredicto = "🟢 HAY VALOR" if r["hay_valor"] else ("🟡 AL BORDE" if r["edge"] >= 0 else "🔴 SIN VALOR")
+    
+    matchup = f"{r['team_name']} vs {r['rival_team_name']}" if r.get('team_name') and r.get('rival_team_name') else ""
+    
+    texto = f"{veredicto}\n"
+    texto += f"⚾ {r['pitcher']} — {r['lado']} {r['linea']} K\n"
+    if matchup:
+        texto += f"🆚 {matchup}\n"
+    texto += f"\n📊 Datos del pitcher:\n"
+    texto += f"   K/9: {r['k9']} · Entradas prom: {r['avg_ip']}\n"
+    texto += f"   K% rival: {r['rival_k_pct']}% (liga: {r['league_k_pct']}%)\n"
+    texto += f"\n🎯 Cálculo:\n"
+    texto += f"   K esperados: {r['k_esperado']} (dif {r['diferencia']:+.2f} vs línea)\n"
+    texto += f"   Tu prob: {r['mi_prob']}% · Mercado: {r['prob_mercado']}%\n"
+    texto += f"   Edge: {r['edge']:+.1f}%\n"
+    
+    if r["hay_valor"]:
+        texto += f"\n💰 Stake sugerido (¼ Kelly): ${r['stake_sugerido']}\n"
+    
+    if r.get("bookmaker"):
+        texto += f"📚 Cuota: {r['bookmaker']}\n"
+    if not r["vig_quitado"]:
+        texto += "⚠️ Vig estimado (sin cuota contraria)\n"
+    
+    return texto
+
+PASO 4 — Actualiza cmd_kprops (el comando manual de Telegram) para que también pase bookmaker=None (no aplica en el comando manual, ya que ahí el usuario escribe la cuota directamente) y team_name/rival_team_name si están disponibles del pitcher buscado por nombre (search_player_by_name ya devuelve team_name).
+
+PASO 5 — Corre run_k_props_scan() de nuevo con los datos de hoy o mañana y pégame un ejemplo real del mensaje completo que generaría, para confirmar que se ve bien formateado en Telegram (cuidado con saltos de línea raros o texto cortado).
+
+PASO 6 — Tests existentes en verde. No toques la fórmula de cálculo, el multiplicador validado, ni la lógica de selección Over/Under.
