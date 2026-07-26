@@ -259,6 +259,168 @@ def check_odds_api_pitcher_props(odds_api_key: str) -> dict:
     }
 
 
+def get_probable_pitchers_today() -> list:
+    """
+    Trae los juegos de MLB de hoy con abridores confirmados via MLB Stats API.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    url = f"{MLB_STATS_BASE}/schedule"
+    params = {
+        "sportId": 1,
+        "date": today,
+        "hydrate": "probablePitcher,team",
+    }
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+
+    juegos = []
+    for date_block in data.get("dates", []):
+        for game in date_block.get("games", []):
+            game_pk = game["gamePk"]
+            teams = game["teams"]
+            for lado in ("home", "away"):
+                equipo = teams[lado]
+                rival_lado = "away" if lado == "home" else "home"
+                rival = teams[rival_lado]
+
+                probable = equipo.get("probablePitcher")
+                if not probable:
+                    continue
+
+                juegos.append({
+                    "game_pk": game_pk,
+                    "pitcher_id": probable["id"],
+                    "pitcher_name": probable["fullName"],
+                    "team_id": equipo["team"]["id"],
+                    "team_name": equipo["team"]["name"],
+                    "rival_team_id": rival["team"]["id"],
+                    "rival_team_name": rival["team"]["name"],
+                    "is_home": lado == "home",
+                })
+    return juegos
+
+
+def get_odds_api_event_id_for_game(odds_api_key: str, home_team_name: str) -> str:
+    """
+    Mapea un juego a un event_id de The Odds API, buscando por equipo local.
+    """
+    url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/events"
+    r = requests.get(url, params={"apiKey": odds_api_key}, timeout=10)
+    r.raise_for_status()
+    for evento in r.json():
+        if home_team_name.lower() in evento.get("home_team", "").lower():
+            return evento["id"]
+    return None
+
+
+def get_k_prop_odds(odds_api_key: str, event_id: str, pitcher_full_name: str) -> dict:
+    """
+    Trae línea + cuotas Over/Under de pitcher_strikeouts para un pitcher específico.
+    Devuelve None si no está disponible en ningún bookmaker.
+    """
+    url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{event_id}/odds"
+    params = {
+        "apiKey": odds_api_key,
+        "regions": "us",
+        "markets": "pitcher_strikeouts",
+        "oddsFormat": "american",
+    }
+    r = requests.get(url, params=params, timeout=10)
+    if r.status_code != 200:
+        return None
+
+    data = r.json()
+    for bookmaker in data.get("bookmakers", []):
+        for market in bookmaker.get("markets", []):
+            if market["key"] != "pitcher_strikeouts":
+                continue
+            outcomes_por_linea = {}
+            for outcome in market.get("outcomes", []):
+                if outcome.get("description") != pitcher_full_name:
+                    continue
+                outcomes_por_linea.setdefault(outcome["point"], {})[outcome["name"]] = outcome["price"]
+
+            for line, precios in outcomes_por_linea.items():
+                if "Over" in precios and "Under" in precios:
+                    return {
+                        "line": line,
+                        "over_odds": precios["Over"],
+                        "under_odds": precios["Under"],
+                        "bookmaker": bookmaker["title"],
+                    }
+    return None
+
+
+# Control de cuota propio del módulo — ajústalo al patrón que ya exista en kelly_odds.py
+# si el Paso 1 encontró uno; si no, usa este tal cual.
+_K_PROPS_MAX_DAILY_CALLS = 10
+_k_props_calls_today = {"fecha": None, "contador": 0}
+
+
+def _puede_llamar_odds_api() -> bool:
+    hoy = datetime.now().strftime("%Y-%m-%d")
+    if _k_props_calls_today["fecha"] != hoy:
+        _k_props_calls_today["fecha"] = hoy
+        _k_props_calls_today["contador"] = 0
+    return _k_props_calls_today["contador"] < _K_PROPS_MAX_DAILY_CALLS
+
+
+def _registrar_llamada_odds_api():
+    _k_props_calls_today["contador"] += 1
+
+
+def run_k_props_scan(odds_api_key: str, bankroll: float = 1000) -> list:
+    """
+    Escanea los abridores confirmados de hoy, busca su línea de ponches,
+    calcula el edge, y devuelve solo los que superan el filtro de valor (5%+).
+    Respeta un tope diario de llamadas para no quemar cuota de Odds API.
+    """
+    resultados_con_valor = []
+    juegos = get_probable_pitchers_today()
+    event_id_cache = {}
+
+    for juego in juegos:
+        if not _puede_llamar_odds_api():
+            print("k_props: tope diario de llamadas alcanzado, deteniendo scan")
+            break
+
+        home_name = juego["team_name"] if juego["is_home"] else juego["rival_team_name"]
+
+        if home_name not in event_id_cache:
+            event_id_cache[home_name] = get_odds_api_event_id_for_game(odds_api_key, home_name)
+        event_id = event_id_cache[home_name]
+        if not event_id:
+            continue
+
+        _registrar_llamada_odds_api()
+        odds_info = get_k_prop_odds(odds_api_key, event_id, juego["pitcher_name"])
+        if not odds_info:
+            continue
+
+        try:
+            resultado = analyze_k_prop(
+                pitcher_name=juego["pitcher_name"],
+                pitcher_id=juego["pitcher_id"],
+                rival_team_id=juego["rival_team_id"],
+                line=odds_info["line"],
+                side="Over",
+                odds_side=odds_info["over_odds"],
+                odds_other=odds_info["under_odds"],
+                bankroll=bankroll,
+            )
+        except Exception as e:
+            print(f"k_props: error analizando {juego['pitcher_name']}: {e}")
+            continue
+
+        log_k_prop(resultado)
+
+        if resultado["hay_valor"]:
+            resultados_con_valor.append(resultado)
+
+    return resultados_con_valor
+
+
 if __name__ == "__main__":
     resultado = analyze_k_prop_by_name(
         pitcher_name="Cristopher Sanchez",

@@ -15904,6 +15904,22 @@ def run_scan():
     except Exception as _ce:
         print(f"  ⚠️  Cross-game error: {_ce}")
 
+    # ── K-Props scan (MLB strikeout props) ──────────────────────────────────
+    if API_KEY:
+        try:
+            from k_props import run_k_props_scan, format_notification as _kp_fmt
+            _kp_results = run_k_props_scan(API_KEY, bankroll=BANKROLL)
+            for _kp_r in _kp_results:
+                _kp_msg = f"⚾ <b>K-PROP CON VALOR</b>\n{_kp_fmt(_kp_r)}"
+                if _tg_broadcast_fn:
+                    try:
+                        _tg_broadcast_fn(_kp_msg)
+                    except Exception as _tge:
+                        print(f"  ⚠️  k_props Telegram error: {_tge}")
+                ntfy_post("⚾ K-PROP CON VALOR", _kp_fmt(_kp_r), "high")
+        except Exception as _kpe:
+            print(f"  ⚠️  k_props scan error: {_kpe}")
+
     # Lineup check every 15 min (every 3rd 10-min scan)
     lineup_scan_counter += 1
     if lineup_scan_counter >= 3:
