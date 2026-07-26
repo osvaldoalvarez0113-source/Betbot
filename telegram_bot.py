@@ -122,9 +122,23 @@ def _api(method: str, params: dict = None, timeout: int = 35) -> dict:
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())
+            raw = r.read()
+            status = r.status
+            parsed = json.loads(raw)
+            if not parsed.get("ok"):
+                print(f"  ⚠️  Telegram API [{method}] HTTP {status} ok=false: "
+                      f"{raw.decode('utf-8', errors='replace')[:400]}")
+            return parsed
+    except urllib.error.HTTPError as http_err:
+        # Telegram devuelve 4xx con JSON de error — necesitamos leer el cuerpo
+        try:
+            body = http_err.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = "(no se pudo leer el cuerpo)"
+        print(f"  ⚠️  Telegram API [{method}] HTTP {http_err.code}: {body[:400]}")
+        return {"ok": False, "_http_code": http_err.code, "_body": body}
     except Exception as e:
-        print(f"  ⚠️  Telegram API [{method}]: {e}")
+        print(f"  ⚠️  Telegram API [{method}] excepción [{type(e).__name__}]: {e}")
         return {}
 
 
@@ -187,7 +201,8 @@ def _split_message(text: str, max_len: int = _TG_SAFE_LEN) -> list:
     return chunks or [text[:max_len]]
 
 
-def _send_long(chat_id: str, text: str, parse_mode: str = "HTML"):
+def _send_long(chat_id: str, text: str, parse_mode: str = "HTML",
+               _caller: str = ""):
     """
     Envía texto que puede exceder el límite de 4096 chars de Telegram.
     Divide el mensaje en partes lógicas y las envía consecutivamente.
@@ -195,16 +210,29 @@ def _send_long(chat_id: str, text: str, parse_mode: str = "HTML"):
     listas de picks, bulk analysis, o cualquier texto generado dinámicamente.
     """
     parts = _split_message(text)
-    if len(parts) > 1:
-        print(f"  📨 _send_long: {len(text)} chars → {len(parts)} partes "
-              f"({', '.join(str(len(p)) for p in parts)} chars)")
-    for part in parts:
-        if part:
-            _api("sendMessage", {
-                "chat_id":    chat_id,
-                "text":       part,
-                "parse_mode": parse_mode,
-            })
+    tag   = f"[{_caller}] " if _caller else ""
+    print(f"  📨 {tag}_send_long → chat_id={chat_id!r} | "
+          f"{len(text)} chars → {len(parts)} parte(s) "
+          f"({', '.join(str(len(p)) for p in parts)} chars)")
+    for i, part in enumerate(parts, 1):
+        if not part:
+            continue
+        print(f"  📨 {tag}Enviando parte {i}/{len(parts)} a Telegram… ({len(part)} chars)")
+        resp = _api("sendMessage", {
+            "chat_id":    chat_id,
+            "text":       part,
+            "parse_mode": parse_mode,
+        })
+        ok       = resp.get("ok", False)
+        http_c   = resp.get("_http_code", 200 if ok else "?")
+        msg_id   = (resp.get("result") or {}).get("message_id", "?")
+        err_desc = resp.get("description", resp.get("_body", ""))
+        if ok:
+            print(f"  ✅ {tag}Respuesta de Telegram parte {i}: HTTP {http_c} OK "
+                  f"(message_id={msg_id})")
+        else:
+            print(f"  ❌ {tag}Respuesta de Telegram parte {i}: HTTP {http_c} FALLÓ — "
+                  f"description={err_desc!r} | resp={resp}")
 
 
 # ── Chat ID management ──────────────────────────────────────────
@@ -929,7 +957,17 @@ def _cmd_analizar(chat_id: str, args: str):
     away_q   = _translate_team_name(away_raw).lower()
 
     _mem0 = _mem_rss_mb()
+    # ── PASO 2 — Verificar chat_id ──────────────────────────────────────────
+    # _authorized_ids es el set en memoria (poblado al arrancar por iniciar_telegram).
+    # _load_authorized() lee env + archivo para comparar contra el estado en memoria.
+    _ids_disk = _load_authorized()
     print(f"  [analizar] INICIO {home_raw} vs {away_raw} | RSS={_mem0}MB")
+    print(f"  [analizar] CHATID CHECK → "
+          f"chat_id del update: {chat_id!r} | "
+          f"_authorized_ids en memoria: {sorted(_authorized_ids)!r} | "
+          f"IDs en env+archivo (disk): {sorted(_ids_disk)!r} | "
+          f"¿autorizado?: {chat_id in _authorized_ids} | "
+          f"TELEGRAM_CHAT_ID env: {TELEGRAM_CHAT_ID!r}")
     _send(chat_id, f"🔍 Buscando <b>{home_raw} vs {away_raw}</b>…")
 
     # ── ETAPA 1: Buscar el partido en la API de odds ──────────────────────────
@@ -1000,13 +1038,42 @@ def _cmd_analizar(chat_id: str, args: str):
     if _build_text_fn:
         try:
             print(f"  [analizar] ETAPA 3 — build_analizar_text | RSS={_mem_rss_mb()}MB")
-            parts = _build_text_fn(result)
-            print(f"  [analizar] ETAPA 3 — {len(parts)} parte(s) generadas: {[len(p) for p in parts]} chars")
-            for _pi, part in enumerate(parts):
-                if part and part.strip():
-                    print(f"  [analizar] ETAPA 3 — enviando parte {_pi+1}/{len(parts)} ({len(part)} chars) | RSS={_mem_rss_mb()}MB")
-                    _send_long(chat_id, part)
-                    print(f"  [analizar] ETAPA 3 — parte {_pi+1} enviada OK")
+            build_parts = _build_text_fn(result)
+            # Normalizar: build_text_fn puede devolver lista de strings o string único
+            if isinstance(build_parts, str):
+                build_parts = [build_parts]
+            build_parts = [p for p in build_parts if p and p.strip()]
+
+            # Expandir: si alguna parte todavía supera el límite, dividir con _split_message
+            _all_chunks: list = []
+            for _bp in build_parts:
+                _all_chunks.extend(_split_message(_bp))
+
+            total_chars = sum(len(c) for c in _all_chunks)
+            print(f"  [analizar] Mensaje armado, longitud: {total_chars} caracteres "
+                  f"({len(_all_chunks)} parte(s): {[len(c) for c in _all_chunks]})")
+
+            for _pi, chunk in enumerate(_all_chunks):
+                pnum = _pi + 1
+                ptot = len(_all_chunks)
+                print(f"  [analizar] Enviando parte {pnum} a Telegram… ({len(chunk)} chars, "
+                      f"chat_id={chat_id!r})")
+                _resp = _api("sendMessage", {
+                    "chat_id":    chat_id,
+                    "text":       chunk,
+                    "parse_mode": "HTML",
+                })
+                _ok      = _resp.get("ok", False)
+                _http    = _resp.get("_http_code", 200 if _ok else "?")
+                _msg_id  = (_resp.get("result") or {}).get("message_id", "?")
+                _desc    = _resp.get("description", _resp.get("_body", ""))
+                if _ok:
+                    print(f"  [analizar] Respuesta de Telegram parte {pnum}: HTTP {_http} ✅ "
+                          f"(message_id={_msg_id})")
+                else:
+                    print(f"  [analizar] Respuesta de Telegram parte {pnum}: HTTP {_http} ❌ — "
+                          f"description={_desc!r} | respuesta completa: {_resp}")
+
             print(f"  [analizar] COMPLETADO {home_raw} vs {away_raw} | RSS_final={_mem_rss_mb()}MB")
             return
         except BaseException as _fmt_err:
