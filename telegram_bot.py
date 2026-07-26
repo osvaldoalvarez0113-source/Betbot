@@ -1050,12 +1050,26 @@ def _cmd_analizar(chat_id: str, args: str):
         return
 
     if not result:
-        print(f"  [analizar] ETAPA 2 — resultado None (sin candidatos o datos insuficientes)")
-        _send(chat_id, (
-            "⚠️ No se pudo obtener análisis para este partido.\n"
-            "Posibles causas: partido no encontrado en API, datos insuficientes, "
-            "o error de conexión. Intenta de nuevo en unos minutos."
-        ))
+        # Leer la razón específica que analyze_game_full dejó registrada
+        try:
+            import kelly_odds as _ko_ref
+            _skip_reason = getattr(_ko_ref, "_analizar_skip_reason", "")
+        except Exception:
+            _skip_reason = ""
+
+        if _skip_reason:
+            _none_msg = f"⚠️ Análisis no disponible:\n{_skip_reason}"
+        else:
+            _none_msg = (
+                "⚠️ No encontré un pick con ventaja suficiente para este partido.\n\n"
+                "<b>Nota:</b> Los filtros de tiempo fueron <b>ignorados</b> — "
+                "no es un problema de horario.\n"
+                "El partido existe en la API pero ningún mercado (ML/RL/Totals) "
+                "superó el umbral mínimo de edge. "
+                "Esto puede cambiar si las líneas se mueven antes del inicio."
+            )
+        print(f"  [analizar] ETAPA 2 — resultado None | skip_reason={_skip_reason!r}")
+        _send(chat_id, _none_msg)
         return
 
     # ── ETAPA 3: Formatear y enviar el resultado ──────────────────────────────

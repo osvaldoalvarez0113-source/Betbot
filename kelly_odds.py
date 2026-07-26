@@ -5495,17 +5495,32 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
 
     print(f"\n🔍 ANÁLISIS: {home} vs {away}  [{sport_key}]")
 
+    # Reset skip-reason so _cmd_analizar siempre lee la razón de ESTE juego
+    global _analizar_skip_reason
+    _analizar_skip_reason = ""
+
     if _game_already_started(commence, grace_min=5):
+        _analizar_skip_reason = (
+            f"El juego ya comenzó (hora programada: {commence}). "
+            "Solo se analizan partidos que aún no han empezado."
+        )
         print(f"   🚫 OMITIDO — juego ya comenzó: {commence}")
         return None
 
-    if game_starts_soon(commence, 60) and not force_panel:
-        print(f"   ⏰ OMITIDO — inicia en < 60 min")
-        return None
-    tc = _timing_check(commence, is_mlb)
-    if tc["skip"] and not force_panel:
-        print(f"   ⏰ OMITIDO — fuera de ventana horaria")
-        return None
+    if force_panel:
+        # /analizar (demanda manual): los filtros de tiempo se IGNORAN siempre.
+        # Solo se omite si el juego YA empezó (guard de arriba).
+        print(f"   ✅ [ANALIZAR] force_panel=True — filtros de tiempo ignorados "
+              f"(60min/ventana) para {home} vs {away}")
+    else:
+        # Scan automático: respetar ventana de 60 min y horaria.
+        if game_starts_soon(commence, 60):
+            print(f"   ⏰ [SCAN] OMITIDO — inicia en < 60 min: {home} vs {away}")
+            return None
+        tc = _timing_check(commence, is_mlb)
+        if tc["skip"]:
+            print(f"   ⏰ [SCAN] OMITIDO — fuera de ventana horaria: {home} vs {away}")
+            return None
 
     f5_tot = None   # initialize here — only assigned in MLB branch
     f5_h2h = {}     # initialize here — only assigned in MLB branch
@@ -10945,6 +10960,11 @@ def fetch_venue_temp(venue_city: str) -> float | None:
 
 # ── CLAUDE AI ANALYSIS ENGINE ────────────────────────────────────────────────
 _claude_cache: dict = {}
+
+# Razón del último return None dentro de analyze_game_full.
+# Escrito antes de cada return None; leído por _cmd_analizar en telegram_bot.py
+# para enviar un mensaje específico al usuario en vez de silencio.
+_analizar_skip_reason: str = ""
 
 # ── ERA validity window used by both pre-validator and range guard ────────────
 _ERA_MIN = 0.50   # ERA élite legítima puede bajar de 1.50 (ej. Sanchez 1.46)
