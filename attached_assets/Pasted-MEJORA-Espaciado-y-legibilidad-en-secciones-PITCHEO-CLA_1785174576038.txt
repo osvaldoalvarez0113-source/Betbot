@@ -1,0 +1,136 @@
+MEJORA — Espaciado y legibilidad en secciones PITCHEO, CLAVES, FORMA 14d
+
+PROBLEMA: Estas tres secciones siguen viéndose como bloques de texto apretados, 
+aunque el razonamiento del panel ya se arregló con flechas. Cada dato dentro de 
+estas secciones va pegado al siguiente sin separación visual clara.
+
+═══════════════════════════════════════════════
+REGLA GENERAL
+═══════════════════════════════════════════════
+
+Cada "dato" individual dentro de una sección debe:
+1. Empezar en su propia línea (nunca dos datos en la misma línea separados 
+   solo por " | ")
+2. Tener una línea en blanco entre cada pitcher/equipo cuando se listan 
+   varios seguidos
+3. Usar sangría con 2 espacios para sub-datos que pertenecen a un dato 
+   principal (ej. Statcast debajo del nombre del pitcher)
+
+═══════════════════════════════════════════════
+EJEMPLO — SECCIÓN PITCHEO (aplicar a build_analizar_text y notify_game_analysis)
+═══════════════════════════════════════════════
+
+ANTES (actual):
+🎯 PITCHEO
+🔵 Miami Marlins Tyler Phillips (diestro): ERA real: 3.52 | ERA ajustado: 3.59 | FIP 4.47 — promedio ⚪
+  Forma: EN DECLIVE ⚠️ | 18.0 → 4.39
+🔬 Statcast Tyler Phillips:
+  xERA: 4.76 (peor que ERA — ha tenido suerte ⚠️)
+  Whiff%: 25.9% (sólido)
+  Hard hit%: 42.9% (alto ⚠️)
+  Barrel%: 7.8%
+
+DESPUÉS (nuevo formato):
+🎯 PITCHEO
+
+🔵 Miami Marlins — Tyler Phillips (diestro)
+  ERA real: 3.52
+  ERA ajustado: 3.59
+  FIP: 4.47 — promedio ⚪
+  Forma: EN DECLIVE ⚠️ (18.0 → 4.39)
+  
+  🔬 Statcast:
+    xERA: 4.76 ⚠️ (peor que ERA — suerte)
+    Whiff%: 25.9% (sólido)
+    Hard hit%: 42.9% ⚠️ (alto)
+    Barrel%: 7.8%
+
+🔴 Philadelphia Phillies — Zack Wheeler (diestro)
+  ERA real: 2.16
+  ERA ajustado: 2.36
+  FIP: 2.85 — dominante 🔥
+  Forma: DOMINANDO 🔥 (1.29 → 2.57)
+  
+  🔬 Statcast:
+    xERA: 2.60 (alineado con ERA)
+    Whiff%: 31.0% 🔥 (dominante)
+    Hard hit%: 33.9% (normal)
+    Barrel%: 5.9%
+
+⚾ Bullpen ERA:
+  Miami Marlins: 4.09
+  Philadelphia Phillies: 4.21
+
+═══════════════════════════════════════════════
+EJEMPLO — SECCIÓN CLAVES (mismo tratamiento)
+═══════════════════════════════════════════════
+
+ANTES:
+📊 CLAVES
+  Miami Marlins: anota 4.4 | recibe 4.4/jgo
+  Philadelphia Phillies: anota 4.3 | recibe 4.4/jgo
+  Miami Marlins: AVG 0.250 | OPS 0.729 (promedio ⚪) | K% 22%
+
+DESPUÉS:
+📊 CLAVES
+
+🔵 Miami Marlins
+  Anota: 4.4/juego
+  Recibe: 4.4/juego
+  AVG: 0.250
+  OPS: 0.729 ⚪ (promedio)
+  K%: 22%
+
+🔴 Philadelphia Phillies
+  Anota: 4.3/juego
+  Recibe: 4.4/juego
+  AVG: 0.236
+  OPS: 0.704 ⚪ (promedio)
+  K%: 24%
+
+🌡️ Clima: 89°F (+0.3 carreras ajustadas)
+💨 Viento: 6mph cruzado (sin ajuste)
+
+🤕 Lesionados:
+  Miami Marlins: Brian Navarreto, Esteury Ruiz, Graham Pauley
+  Philadelphia Phillies: Alec Bohm, Brandon Marsh, Bryce Harper
+
+═══════════════════════════════════════════════
+EJEMPLO — SECCIÓN FORMA 14d
+═══════════════════════════════════════════════
+
+ANTES:
+📈 FORMA 14d
+  Miami Marlins: OPS-14d 0.601 (FRIO) | bullpen (QUEMADO) | abridor (NORMAL)
+  Philadelphia Phillies: OPS-14d 0.734 (NORMAL) | bullpen (NORMAL) | abridor (EN RACHA)
+
+DESPUÉS:
+📈 FORMA 14d
+
+🔵 Miami Marlins
+  Ofensiva: 0.601 OPS 🥶 (FRÍO)
+  Bullpen: QUEMADO 🔥
+  Abridor: NORMAL
+
+🔴 Philadelphia Phillies
+  Ofensiva: 0.734 OPS (NORMAL)
+  Bullpen: NORMAL
+  Abridor: EN RACHA 📈
+
+═══════════════════════════════════════════════
+DÓNDE APLICAR
+═══════════════════════════════════════════════
+- build_analizar_text() — reformatear las tres secciones con el patrón de arriba
+- notify_game_analysis() — mismo tratamiento en el cuerpo del mensaje ntfy
+
+═══════════════════════════════════════════════
+IMPORTANTE
+═══════════════════════════════════════════════
+- NO cambiar ningún dato, cálculo, ni valor — solo el formato/espaciado
+- Mantener compatibilidad con el límite de 4096 caracteres de Telegram — 
+  si el espaciado extra hace que el mensaje se acerque al límite, usar 
+  la función build_analizar_text() que ya divide en partes [p1, p2] para 
+  mover contenido a la segunda parte
+- Después de aplicar, correr los tests existentes
+- Confirmar con un ejemplo real (Miami Marlins vs Philadelphia Phillies, 
+  Phillips y Wheeler) que el output se ve como los ejemplos de arriba

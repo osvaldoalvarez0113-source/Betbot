@@ -1,0 +1,71 @@
+MEJORA — Espaciado y legibilidad en sección MERCADOS
+
+PROBLEMA: La sección MERCADOS muestra cada mercado en una sola línea larga 
+con emoji + veto/check + label + EV + Prob + odds + book todo junto, lo que 
+causa que el texto se corte de forma fea al llegar al borde de pantalla en 
+móvil (ej. "Prob 75%" se corta a la línea siguiente separado de "@1.51").
+
+═══════════════════════════════════════════════
+FORMATO NUEVO
+═══════════════════════════════════════════════
+
+Cada mercado debe ocupar 2 líneas propias, no una sola línea corrida:
+  Línea 1: ícono de veto + emoji de tipo + nombre del pick
+  Línea 2 (con sangría): EV, Prob, cuota y book
+
+ANTES (actual, todo en una línea que se corta mal):
+✅ 🔴 Philadelphia Phillies ML  EV +12.7%  Prob 75%  @1.51 [Bovada]
+➖ ⚡ Phillips K UNDER 3.5  EV +0.5%  Prob 50%  @2.00 [Props]
+❌ ⚡ Wheeler K UNDER 7.5  EV -2.3%  Prob 60%  @1.64 [Props]
+
+DESPUÉS (2 líneas por mercado, con línea en blanco entre cada uno):
+
+✅ 🔴 Philadelphia Phillies ML
+  EV +12.7% | Prob 75% | @1.51 (Bovada)
+
+➖ ⚡ Phillips K UNDER 3.5
+  EV +0.5% | Prob 50% | @2.00 (Props)
+
+❌ ⚡ Wheeler K UNDER 7.5
+  EV -2.3% | Prob 60% | @1.64 (Props)
+
+❌ 🏃 Philadelphia Phillies RL -1.5
+  EV -4.4% | Prob 50% | @1.91 (Bovada)
+
+❌ 🏃 Miami Marlins RL +1.5
+  EV -4.6% | Prob 50% | @1.91 (Bovada)
+
+❌ ⚡ Phillips K OVER 3.5
+  EV -12.4% | Prob 50% | @1.76 (Props)
+
+❌ ⚡ Wheeler K OVER 7.5
+  EV -13.1% | Prob 40% | @2.15 (Props)
+
+❌ 🔵 Miami Marlins ML
+  EV -26.0% | Prob 28% | @2.61 (Bovada)
+
+═══════════════════════════════════════════════
+DÓNDE APLICAR
+═══════════════════════════════════════════════
+
+Buscar el bloque que construye "all_mkts_lines" / "_mkt_row()" (usado tanto 
+en notify_game_analysis() para el ntfy como en build_analizar_text() para 
+Telegram — buscar la función _mkt_row(lbl, m, is_pick) y el loop que arma 
+all_mkts_lines).
+
+Cambiar el formato de string de una sola línea a dos líneas con salto \n 
+más línea en blanco entre cada mercado, siguiendo el patrón de arriba.
+
+═══════════════════════════════════════════════
+IMPORTANTE
+═══════════════════════════════════════════════
+- NO cambiar el orden de los mercados (ya vienen ordenados por EV o por 
+  pick primero)
+- NO cambiar ningún valor de EV, Prob, odds, ni el ícono de veto (✅/➖/❌)
+- Esto va a hacer el mensaje más largo verticalmente — si se acerca al 
+  límite de 4096 caracteres en Telegram, usar el mecanismo ya existente 
+  de dividir en partes [p1, p2] moviendo la sección MERCADOS completa a 
+  p2 si es necesario, para no cortar contenido a la mitad
+- Después de aplicar, correr los tests existentes
+- Confirmar con un ejemplo real (Miami Marlins vs Philadelphia Phillies) 
+  que cada mercado se ve en 2 líneas separadas con buen espaciado

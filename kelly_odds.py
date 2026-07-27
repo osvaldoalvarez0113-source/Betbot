@@ -947,6 +947,43 @@ def _ensure_mlb_elo_seeded(home: str, away: str) -> str:
     return ""
 
 
+_team_record_cache: dict = {}
+
+def fetch_team_record(team_name: str) -> "dict | None":
+    """
+    Return {"wins": W, "losses": L} from MLB regular-season standings, or None.
+    Cached per team per calendar day (ET).
+    """
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    ck = f"{team_name}|{today}"
+    if ck in _team_record_cache:
+        return _team_record_cache[ck]
+    try:
+        tid = _team_id(team_name)
+        if not tid:
+            _team_record_cache[ck] = None
+            return None
+        st_data = _mlb_rest("/standings", {
+            "leagueId":      "103,104",
+            "season":        MLB_YEAR,
+            "standingsTypes": "regularSeason",
+            "hydrate":        "team,record",
+        })
+        for rec in st_data.get("records", []):
+            for tr in rec.get("teamRecords", []):
+                if tr.get("team", {}).get("id") == tid:
+                    w = int(tr.get("wins",   0) or 0)
+                    l = int(tr.get("losses", 0) or 0)
+                    result = {"wins": w, "losses": l}
+                    _team_record_cache[ck] = result
+                    print(f"  📊 Récord [{team_name}]: {w}-{l}")
+                    return result
+    except Exception as e:
+        print(f"  ⚠️  fetch_team_record [{team_name}]: {e}")
+    _team_record_cache[ck] = None
+    return None
+
+
 def elo_win_prob(team_a, team_b):
     """Expected win probability for team_a vs team_b using ELO ratings."""
     ea = _elo_for(team_a)
@@ -1131,8 +1168,12 @@ def _patch_mlb_commence_times(games: list) -> None:
         print(f"  🕐 {patched} tiempo(s) MLB corregido(s) desde MLB Stats API")
 
 def fetch_pitcher_stats(name):
-    """Return dict with ERA, WHIP, K9 for a pitcher name."""
-    empty = {"era": "N/A", "whip": "N/A", "k9": "N/A"}
+    """Return dict with ERA, WHIP, K9, W, L, IP, K, H, BB, HR for a pitcher name."""
+    empty = {
+        "era": "N/A", "whip": "N/A", "k9": "N/A",
+        "wins": None, "losses": None, "ip": None,
+        "k": None, "hits": None, "bb": None, "hr": None,
+    }
     if not name or name == "TBD":
         return empty
     try:
@@ -1157,7 +1198,18 @@ def fetch_pitcher_stats(name):
         era  = stats.get("era",  stats.get("earnedRunAverage", "N/A"))
         whip = stats.get("whip", "N/A")
         so9  = stats.get("strikeoutsPer9Inn", stats.get("strikeoutPer9Inn", "N/A"))
-        return {"era": era, "whip": whip, "k9": so9}
+        return {
+            "era":    era,
+            "whip":   whip,
+            "k9":     so9,
+            "wins":   stats.get("wins"),
+            "losses": stats.get("losses"),
+            "ip":     stats.get("inningsPitched"),
+            "k":      stats.get("strikeOuts"),
+            "hits":   stats.get("hits"),
+            "bb":     stats.get("baseOnBalls"),
+            "hr":     stats.get("homeRuns"),
+        }
     except Exception:
         return empty
 
@@ -6501,6 +6553,42 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
         except Exception:
             pass
 
+        # Module 7: team season W-L records
+        _rec_home = _rec_away = None
+        try:
+            _rec_home = fetch_team_record(home)
+            _rec_away = fetch_team_record(away)
+        except Exception:
+            pass
+
+        # Module 8: day/night splits
+        _dn_home = _dn_away = None
+        try:
+            _dn_home = fetch_day_night_splits(home)
+            _dn_away = fetch_day_night_splits(away)
+        except Exception:
+            pass
+
+        # Module 9: extended pitcher stats (W-L, WHIP, IP, K, BB, HR — display only)
+        _ps_h_ext = _ps_a_ext = {}
+        try:
+            _ps_h_ext = fetch_pitcher_stats(h_pname) or {}
+            _ps_a_ext = fetch_pitcher_stats(a_pname) or {}
+        except Exception:
+            pass
+
+        def _safe_wl(ps):
+            w = ps.get("wins"); l = ps.get("losses")
+            if w is None or l is None: return None
+            try: return f"{int(float(w))}-{int(float(l))}"
+            except Exception: return None
+
+        def _safe_num(ps, key):
+            v = ps.get(key)
+            if v is None or v == "N/A": return None
+            try: return float(v)
+            except Exception: return None
+
         # MLB A1: pitcher recent form (last 3 starts)
         pform_h = pform_a = None
         try:
@@ -6705,6 +6793,25 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
             "bullpen_load_home":  _bp_load_h,
             "bullpen_load_away":  _bp_load_a,
             "ttt_note":           _ttt_note,
+            # Module 7: team season W-L records
+            "team_record_home":   _rec_home,
+            "team_record_away":   _rec_away,
+            # Module 8: day/night splits
+            "day_night_home":     _dn_home,
+            "day_night_away":     _dn_away,
+            # Module 9: extended pitcher stats (display only)
+            "pitcher_wl_home":    _safe_wl(_ps_h_ext),
+            "pitcher_wl_away":    _safe_wl(_ps_a_ext),
+            "pitcher_whip_home":  _safe_num(_ps_h_ext, "whip"),
+            "pitcher_whip_away":  _safe_num(_ps_a_ext, "whip"),
+            "pitcher_ip_home":    _safe_num(_ps_h_ext, "ip"),
+            "pitcher_ip_away":    _safe_num(_ps_a_ext, "ip"),
+            "pitcher_k_home":     _safe_num(_ps_h_ext, "k"),
+            "pitcher_k_away":     _safe_num(_ps_a_ext, "k"),
+            "pitcher_bb_home":    _safe_num(_ps_h_ext, "bb"),
+            "pitcher_bb_away":    _safe_num(_ps_a_ext, "bb"),
+            "pitcher_hr_home":    _safe_num(_ps_h_ext, "hr"),
+            "pitcher_hr_away":    _safe_num(_ps_a_ext, "hr"),
         }
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
@@ -7539,76 +7646,54 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     return "   📈 Mejor de lo que parece — ha sido víctima de mala suerte\n"
                 return ""
 
-            # Home pitcher block
-            h_hand_txt = f" ({_hand_es(hnd_h)})" if _hand_es(hnd_h) else ""
-            _k9_h_inline = ""
-            try:
-                _ps_h_n = fetch_pitcher_stats(pn_h)
-                _k9_h_v = _ps_h_n.get("k9") if _ps_h_n else None
-                if _k9_h_v not in (None, "N/A", ""):
-                    _k9_h_inline = f"  |  K/9: {float(_k9_h_v):.1f}"
-            except Exception:
-                pass
-            _era_h_disp = (
-                f"ERA real: {er_h_raw:.2f} | ERA ajustado: {er_h:.2f}"
-                if er_h_raw is not None and abs(float(er_h) - er_h_raw) >= 0.03
-                else f"ERA {float(er_h):.2f}"
-            )
-            ctx_lines  = (
-                f"🎯 PITCHEO\n"
-                f"🔵 Pitcher local: {pn_h}{h_hand_txt}\n"
-                f"   {_era_h_disp} — {_era_label(er_h)}{_k9_h_inline}\n"
-            )
-            if fip_h is not None:
-                ctx_lines += (
-                    f"   FIP (rendimiento real): {fip_h:.2f} — {_era_label(fip_h)}\n"
-                    + _fip_luck(er_h, fip_h)
-                )
-            _pace_h_ctx = ctx.get("pitcher_pace_home")
-            if _pace_h_ctx:
-                ctx_lines += f"   Ritmo: {_pace_h_ctx['avg_pi']} pitches/entrada"
-                if _pace_h_ctx.get("flag"):
-                    ctx_lines += f" {_pace_h_ctx['flag']}"
-                ctx_lines += "\n"
-            # ── Elite Source 1: Statcast block — home pitcher ────────────────
+            # ── ⚾ LANZADORES — tabla comparativa ─────────────────────────────
             sc_h = ctx.get("statcast_home")
             sc_a = ctx.get("statcast_away")
-            er_eff_h = ctx.get("era_eff_home", er_h)
-            er_eff_a = ctx.get("era_eff_away", er_a)
+            ctx_lines = _pitchers_table_block(
+                pn_h, pn_a,
+                float(er_h), float(er_a),
+                er_h_raw, er_a_raw,
+                wl_h   = ctx.get("pitcher_wl_home"),
+                wl_a   = ctx.get("pitcher_wl_away"),
+                whip_h = ctx.get("pitcher_whip_home"),
+                whip_a = ctx.get("pitcher_whip_away"),
+                ip_h   = ctx.get("pitcher_ip_home"),
+                ip_a   = ctx.get("pitcher_ip_away"),
+                k_h    = ctx.get("pitcher_k_home"),
+                k_a    = ctx.get("pitcher_k_away"),
+                bb_h   = ctx.get("pitcher_bb_home"),
+                bb_a   = ctx.get("pitcher_bb_away"),
+                hr_h   = ctx.get("pitcher_hr_home"),
+                hr_a   = ctx.get("pitcher_hr_away"),
+                is_notify=True,
+            )
+            # FIP luck warnings (shown when diff > 1.0 vs ERA)
+            for _pn_fip, _er_fip, _fip_v in (
+                (pn_h, float(er_h), fip_h),
+                (pn_a, float(er_a), fip_a),
+            ):
+                if _fip_v is not None and abs(_fip_v - _er_fip) > 1.0:
+                    _diff = _fip_v - _er_fip
+                    _last = _pn_fip.split()[-1] if " " in _pn_fip else _pn_fip
+                    if _diff > 0:
+                        ctx_lines += f"   ⚠️ {_last} FIP {_fip_v:.2f} — ha tenido suerte\n"
+                    else:
+                        ctx_lines += f"   📈 {_last} FIP {_fip_v:.2f} — mejor de lo que parece\n"
+            # Pitcher pace (pitches per inning)
+            for _pn_pc, _pace_key in ((pn_h, "pitcher_pace_home"), (pn_a, "pitcher_pace_away")):
+                _pace_ctx = ctx.get(_pace_key)
+                if _pace_ctx:
+                    _last = _pn_pc.split()[-1] if " " in _pn_pc else _pn_pc
+                    ctx_lines += f"   Ritmo {_last}: {_pace_ctx['avg_pi']} pitches/entrada"
+                    if _pace_ctx.get("flag"):
+                        ctx_lines += f" {_pace_ctx['flag']}"
+                    ctx_lines += "\n"
+            # Statcast alerts
             ctx_lines += _statcast_alert_block(pn_h, sc_h, er_h)
-
-            # Away pitcher block
-            a_hand_txt = f" ({_hand_es(hnd_a)})" if _hand_es(hnd_a) else ""
-            _k9_a_inline = ""
-            try:
-                _ps_a_n = fetch_pitcher_stats(pn_a)
-                _k9_a_v = _ps_a_n.get("k9") if _ps_a_n else None
-                if _k9_a_v not in (None, "N/A", ""):
-                    _k9_a_inline = f"  |  K/9: {float(_k9_a_v):.1f}"
-            except Exception:
-                pass
-            _era_a_disp = (
-                f"ERA real: {er_a_raw:.2f} | ERA ajustado: {er_a:.2f}"
-                if er_a_raw is not None and abs(float(er_a) - er_a_raw) >= 0.03
-                else f"ERA {float(er_a):.2f}"
-            )
-            ctx_lines += (
-                f"🔴 Pitcher visita: {pn_a}{a_hand_txt}\n"
-                f"   {_era_a_disp} — {_era_label(er_a)}{_k9_a_inline}\n"
-            )
-            if fip_a is not None:
-                ctx_lines += (
-                    f"   FIP (rendimiento real): {fip_a:.2f} — {_era_label(fip_a)}\n"
-                    + _fip_luck(er_a, fip_a)
-                )
-            _pace_a_ctx = ctx.get("pitcher_pace_away")
-            if _pace_a_ctx:
-                ctx_lines += f"   Ritmo: {_pace_a_ctx['avg_pi']} pitches/entrada"
-                if _pace_a_ctx.get("flag"):
-                    ctx_lines += f" {_pace_a_ctx['flag']}"
-                ctx_lines += "\n"
-            # ── Elite Source 1: Statcast block — away pitcher ────────────────
             ctx_lines += _statcast_alert_block(pn_a, sc_a, er_a)
+            # Supplementary context (RÉCORD / HOME/AWAY / DÍA/NOCHE / VS MANOS)
+            ctx_lines += _supplementary_context_blocks(
+                ctx, home_es, away_es, is_mlb=True, is_notify=True)
 
             # ── 📊 CLAVES ─────────────────────────────────────────────────────
             ctx_lines += "📊 CLAVES\n"
@@ -7784,16 +7869,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             if p_intel.get("reasoning"):
                 ctx_lines += f"{p_intel['reasoning']}\n"
 
-            # ── L/R Matchup (MLB A5) ──────────────────────────────────────
-            for lr in ctx.get("lr_notes", []):
-                if lr["verdict"] == "normal":
-                    continue
-                avg_pct = f"{lr['avg']:.3f}".lstrip("0")  # ".218"
-                ctx_lines += (
-                    f"⚔️ {_es(lr['lineup'])} vs pitchers {lr['hand']}s:\n"
-                    f"   Promedio de bateo: {avg_pct} ({lr['verdict']})\n"
-                    f"   → Ventaja para {lr['favor']}\n"
-                )
+            # ── L/R Matchup (MLB A5) — now shown via _supplementary_context_blocks ─
 
             # ── H2H últimos encuentros (MLB A6) ───────────────────────────
             h2h = ctx.get("h2h_data")
@@ -8230,6 +8306,155 @@ def _pitcher_line(name: str, era: float, fip, hand: str, pform, side: str,
     return base
 
 
+def _pitchers_table_block(
+    pn_h: str, pn_a: str,
+    er_h: float, er_a: float,
+    er_h_raw, er_a_raw,
+    wl_h, wl_a,
+    whip_h, whip_a,
+    ip_h, ip_a,
+    k_h, k_a,
+    bb_h, bb_a,
+    hr_h, hr_a,
+    is_notify: bool = False,
+) -> str:
+    """
+    Side-by-side pitcher comparison table rendered inside a Telegram <pre> block.
+    is_notify=True omits <b> on the header (used in ntfy-style alerts).
+    Era dual-display: 'R:X.XX/A:X.XX' when |er - er_raw| >= 0.03.
+    """
+    LEFT = 10   # label column width (chars)
+    COL  = 16   # each team-data column width
+
+    def _pad(s, w):
+        s = str(s)
+        return s[:w].ljust(w)
+
+    def _era_cell(er, er_raw, w):
+        if er_raw is not None:
+            try:
+                if abs(float(er) - float(er_raw)) >= 0.03:
+                    return _pad(f"R:{er_raw:.2f}/A:{er:.2f}", w)
+            except Exception:
+                pass
+        try:
+            return _pad(f"{float(er):.2f}", w)
+        except Exception:
+            return _pad("N/D", w)
+
+    def _fv(v, fmt="{:.2f}"):
+        if v is None: return _pad("N/D", COL)
+        try: return _pad(fmt.format(float(v)), COL)
+        except Exception: return _pad("N/D", COL)
+
+    def _fi(v):
+        if v is None: return _pad("N/D", COL)
+        try: return _pad(str(int(float(v))), COL)
+        except Exception: return _pad("N/D", COL)
+
+    # Use last name only for header row to keep columns narrow
+    def _lastname(name):
+        return (name.split()[-1] if name and " " in name else (name or "TBD"))
+
+    nh = _pad(_lastname(pn_h), COL)
+    na = _pad(_lastname(pn_a), COL)
+
+    rows = [
+        f"{'':>{LEFT}}{nh}{na}",
+        f"{'W-L:':<{LEFT}}{_pad(wl_h or 'N/D', COL)}{_pad(wl_a or 'N/D', COL)}",
+        f"{'ERA:':<{LEFT}}{_era_cell(er_h, er_h_raw, COL)}{_era_cell(er_a, er_a_raw, COL)}",
+        f"{'WHIP:':<{LEFT}}{_fv(whip_h)}{_fv(whip_a)}",
+        f"{'IP:':<{LEFT}}{_fv(ip_h, '{:.1f}')}{_fv(ip_a, '{:.1f}')}",
+        f"{'K:':<{LEFT}}{_fi(k_h)}{_fi(k_a)}",
+        f"{'BB:':<{LEFT}}{_fi(bb_h)}{_fi(bb_a)}",
+        f"{'HR:':<{LEFT}}{_fi(hr_h)}{_fi(hr_a)}",
+    ]
+    table = "\n".join(rows)
+    hdr = "🎯 PITCHEO\n" if is_notify else "🎯 <b>PITCHEO</b>\n"
+    return f"{hdr}<pre>{table}</pre>\n"
+
+
+def _supplementary_context_blocks(
+    ctx: dict,
+    home_es: str, away_es: str,
+    is_mlb: bool,
+    is_notify: bool = False,
+) -> str:
+    """
+    Build RÉCORD + HOME/AWAY + DÍA/NOCHE + VS ZURDOS/DERECHOS blocks.
+    Returns empty string when no data is available.
+    Used by both build_analizar_text and notify_game_analysis.
+    """
+    if not is_mlb:
+        return ""
+    out = ""
+
+    # ── 🏆 RÉCORD DE TEMPORADA ─────────────────────────────────────────────
+    rec_h = ctx.get("team_record_home")
+    rec_a = ctx.get("team_record_away")
+    if rec_h or rec_a:
+        hdr = "🏆 RÉCORD" if is_notify else "🏆 <b>RÉCORD</b>"
+        line_h = f"{home_es}: {rec_h['wins']}-{rec_h['losses']}" if rec_h else ""
+        line_a = f"{away_es}: {rec_a['wins']}-{rec_a['losses']}" if rec_a else ""
+        both = " | ".join(x for x in [line_h, line_a] if x)
+        if both:
+            out += f"{hdr}  {both}\n"
+
+    # ── 🏠 HOME/AWAY ───────────────────────────────────────────────────────
+    sp_h = ctx.get("h_splits")
+    sp_a = ctx.get("a_splits")
+    if sp_h or sp_a:
+        hdr = "🏠 HOME/AWAY" if is_notify else "🏠 <b>HOME/AWAY</b>"
+        out += f"{hdr}\n"
+        if sp_h:
+            out += (f"   {home_es} en casa: "
+                    f"anota {sp_h['home_rs']} | recibe {sp_h['home_ra']} | "
+                    f"gana {round(sp_h['home_wpct'] * 100):.0f}%\n")
+        if sp_a:
+            out += (f"   {away_es} de visita: "
+                    f"anota {sp_a['away_rs']} | recibe {sp_a['away_ra']} | "
+                    f"gana {round(sp_a['away_wpct'] * 100):.0f}%\n")
+
+    # ── ☀️ DÍA/NOCHE ──────────────────────────────────────────────────────
+    dn_h = ctx.get("day_night_home")
+    dn_a = ctx.get("day_night_away")
+    if dn_h or dn_a:
+        hdr = "☀️ DÍA/NOCHE" if is_notify else "☀️ <b>DÍA/NOCHE</b>"
+        out += f"{hdr}\n"
+        for team_es, dn in ((home_es, dn_h), (away_es, dn_a)):
+            if not dn:
+                continue
+            parts = []
+            if dn.get("day_gp"):
+                parts.append(f"día {round(dn['day_wpct'] * 100):.0f}% W ({dn['day_wins']}-{dn['day_losses']})")
+            if dn.get("night_gp"):
+                parts.append(f"noche {round(dn['night_wpct'] * 100):.0f}% W ({dn['night_wins']}-{dn['night_losses']})")
+            if parts:
+                out += f"   {team_es}: {' | '.join(parts)}\n"
+
+    # ── ⚔️ VS ZURDOS/DERECHOS ─────────────────────────────────────────────
+    lr_notes = ctx.get("lr_notes", [])
+    lr_lines = []
+    for lr in lr_notes:
+        if lr.get("verdict") == "normal":
+            continue
+        avg_v  = lr.get("avg")
+        ops_v  = lr.get("ops")
+        if avg_v is None:
+            continue
+        avg_fmt = f".{round(float(avg_v) * 1000):03d}"
+        line    = f"   {_es(lr['lineup'])} vs {lr['hand']}s: AVG {avg_fmt}"
+        if ops_v:
+            line += f" | OPS .{round(float(ops_v) * 1000):03d}"
+        line += f" — {lr['verdict']}, ventaja {lr['favor']}"
+        lr_lines.append(line)
+    if lr_lines:
+        hdr = "⚔️ VS MANOS" if is_notify else "⚔️ <b>VS MANOS</b>"
+        out += f"{hdr}\n" + "\n".join(lr_lines) + "\n"
+
+    return out
+
+
 def _mkt_row(lbl: str, m: dict, is_pick: bool) -> str:
     """Single clean market row with icon."""
     ev   = m.get("ev_pct", 0)
@@ -8325,7 +8550,7 @@ def build_analizar_text(result: dict) -> list:
 
     p1 += SEP
 
-    # ─── 5. 🎯 PITCHEO ────────────────────────────────────────────────────────
+    # ─── 5. ⚾ LANZADORES + contexto comparativo ──────────────────────────────
     pn_h = ctx.get("pname_home","TBD") if ctx else "TBD"
     pn_a = ctx.get("pname_away","TBD") if ctx else "TBD"
     er_h = float(ctx.get("era_home") or 4.50) if ctx else 4.50
@@ -8342,15 +8567,56 @@ def build_analizar_text(result: dict) -> list:
 
         _er_h_raw = ctx.get("era_home_raw")
         _er_a_raw = ctx.get("era_away_raw")
-        p1 += f"🎯 <b>PITCHEO</b>\n"
-        p1 += _pitcher_line(pn_h, er_h, fip_h, hnd_h, pf_h, f"🔵 {home_es}",
-                            era_raw=_er_h_raw) + "\n"
+
+        # ── Tabla comparativa de pitchers (monospace) ──────────────────────
+        p1 += _pitchers_table_block(
+            pn_h, pn_a,
+            er_h, er_a,
+            _er_h_raw, _er_a_raw,
+            wl_h  = ctx.get("pitcher_wl_home"),
+            wl_a  = ctx.get("pitcher_wl_away"),
+            whip_h = ctx.get("pitcher_whip_home"),
+            whip_a = ctx.get("pitcher_whip_away"),
+            ip_h   = ctx.get("pitcher_ip_home"),
+            ip_a   = ctx.get("pitcher_ip_away"),
+            k_h    = ctx.get("pitcher_k_home"),
+            k_a    = ctx.get("pitcher_k_away"),
+            bb_h   = ctx.get("pitcher_bb_home"),
+            bb_a   = ctx.get("pitcher_bb_away"),
+            hr_h   = ctx.get("pitcher_hr_home"),
+            hr_a   = ctx.get("pitcher_hr_away"),
+            is_notify=False,
+        )
+
+        # FIP luck warnings (below table)
+        def _fip_luck_line(name, era, fip):
+            if fip is None: return ""
+            diff = fip - era
+            last = name.split()[-1] if " " in name else name
+            if diff > 1.0:
+                return f"   ⚠️ {last} FIP {fip:.2f} — ha tenido suerte (rendimiento real peor)\n"
+            elif diff < -1.0:
+                return f"   📈 {last} FIP {fip:.2f} — mejor de lo que parece\n"
+            return ""
+        p1 += _fip_luck_line(pn_h, er_h, fip_h)
+        p1 += _fip_luck_line(pn_a, er_a, fip_a)
+
+        # Pitcher form trend (last 3 starts)
+        for pn, pf in ((pn_h, pf_h), (pn_a, pf_a)):
+            if pf:
+                clean = _clean_era_form(pf.get("eras", []))
+                if clean:
+                    last = pn.split()[-1] if " " in pn else pn
+                    trend = pf.get("trend", "")
+                    p1 += f"   Forma {last}: {trend} | {' → '.join(str(e) for e in clean[-3:])}\n"
+
+        # Statcast
         _sch = _statcast_alert_block(pn_h, sc_h, er_h)
         if _sch: p1 += _sch
-        p1 += _pitcher_line(pn_a, er_a, fip_a, hnd_a, pf_a, f"🔴 {away_es}",
-                            era_raw=_er_a_raw) + "\n"
         _sca = _statcast_alert_block(pn_a, sc_a, er_a)
         if _sca: p1 += _sca
+
+        # Bullpen ERA
         try:
             _bph, _ = fetch_bullpen_era(home)
             _bpa, _ = fetch_bullpen_era(away)
@@ -8360,6 +8626,10 @@ def build_analizar_text(result: dict) -> list:
         for _cf in ctx.get("pitcher_conflicts", []):
             p1 += (f"⚠️ {_cf['pitcher'].split()[-1]} ERA {_cf['era']:.2f} vs "
                    f"ofensiva {_es(_cf['rival'])}: {' / '.join(_cf['flags'])}\n")
+
+        # ── Supplementary context: RÉCORD / HOME-AWAY / DÍA-NOCHE / MANOS ──
+        p1 += _supplementary_context_blocks(ctx, home_es, away_es,
+                                             is_mlb=True, is_notify=False)
         p1 += SEP
 
     # ─── 6. 📈 FORMA 14d ─────────────────────────────────────────────────────
@@ -10505,6 +10775,84 @@ def fetch_mlb_home_away_splits(team_name: str) -> dict | None:
           f"Último error: {last_err}")
     _splits_cache[ck] = None
     return None
+
+
+def _day_night_from_schedule(tid: int, team_name: str) -> "dict | None":
+    """
+    Compute day/night W-L win% from this season's completed regular-season games.
+    'Day' = game has dayNight == 'D', or start-hour (ET) < 17 when field is absent.
+    Returns dict with keys day_gp/day_wins/day_losses/day_wpct/night_*  or None.
+    """
+    try:
+        data = _mlb_rest("/schedule", {
+            "teamId":   tid,
+            "season":   MLB_YEAR,
+            "gameType": "R",
+            "sportId":  1,
+        })
+        d_w = d_l = n_w = n_l = 0
+        for date_entry in (data.get("dates") or []):
+            for g in date_entry.get("games", []):
+                if g.get("status", {}).get("abstractGameState") != "Final":
+                    continue
+                teams  = g.get("teams", {})
+                is_home = teams.get("home", {}).get("team", {}).get("id") == tid
+                h_sc   = teams.get("home", {}).get("score")
+                a_sc   = teams.get("away", {}).get("score")
+                if h_sc is None or a_sc is None:
+                    continue
+                h_sc, a_sc = int(h_sc), int(a_sc)
+                my_sc  = h_sc if is_home else a_sc
+                opp_sc = a_sc if is_home else h_sc
+                won    = my_sc > opp_sc
+                lost   = my_sc < opp_sc
+                dn = (g.get("dayNight") or "").upper()
+                if not dn:
+                    try:
+                        ct = g.get("gameDate", "")
+                        utc_hour = datetime.fromisoformat(
+                            ct.replace("Z", "+00:00")).astimezone(ET).hour
+                        dn = "D" if utc_hour < 17 else "N"
+                    except Exception:
+                        dn = "N"
+                if dn == "D":
+                    d_w += int(won); d_l += int(lost)
+                else:
+                    n_w += int(won); n_l += int(lost)
+        d_gp = d_w + d_l
+        n_gp = n_w + n_l
+        if d_gp < 3 and n_gp < 3:
+            return None
+        result: dict = {}
+        if d_gp >= 3:
+            result.update({"day_gp": d_gp, "day_wins": d_w, "day_losses": d_l,
+                           "day_wpct": round(d_w / d_gp, 3)})
+        if n_gp >= 3:
+            result.update({"night_gp": n_gp, "night_wins": n_w, "night_losses": n_l,
+                           "night_wpct": round(n_w / n_gp, 3)})
+        print(f"  🌙 DÍA/NOCHE [{team_name}]: día {d_w}-{d_l} | noche {n_w}-{n_l}")
+        return result or None
+    except Exception as e:
+        print(f"  ⚠️  _day_night_from_schedule error [{team_name}]: {e}")
+        return None
+
+
+_day_night_cache: dict = {}
+
+def fetch_day_night_splits(team_name: str) -> "dict | None":
+    """
+    Day/night win% splits for a team derived from this season's schedule.
+    Cached per team per calendar day (ET). Returns None if < 3 games in either bucket.
+    """
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    ck = f"dn|{team_name}|{today}"
+    if ck in _day_night_cache:
+        return _day_night_cache[ck]
+    tid    = _team_id(team_name)
+    result = _day_night_from_schedule(tid, team_name) if tid else None
+    _day_night_cache[ck] = result
+    return result
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANALYSIS IMPROVEMENTS — MLB & SOCCER (7 new data modules)

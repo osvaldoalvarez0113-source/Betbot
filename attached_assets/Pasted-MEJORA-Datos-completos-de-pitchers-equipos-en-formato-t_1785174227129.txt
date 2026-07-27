@@ -1,0 +1,100 @@
+MEJORA — Datos completos de pitchers + equipos en formato tabla comparativa
+
+OBJETIVO: Agregar al análisis de /analizar y a las alertas automáticas los 
+siguientes datos que actualmente faltan o no se muestran de forma clara, 
+en formato de tabla comparativa similar a ESPN (lado a lado).
+
+═══════════════════════════════════════════════
+DATOS A AGREGAR
+═══════════════════════════════════════════════
+
+1. RÉCORD W-L DEL PITCHER (nuevo — no existe actualmente)
+   fetch_pitcher_stats() actualmente solo trae era/whip/k9. Agregar wins 
+   y losses del pitcher, disponibles en el mismo endpoint de MLB Stats 
+   API (people/{id}/stats con group=pitching) — el campo es "wins" y 
+   "losses" en el mismo objeto stat que ya se consulta.
+
+2. IP, H, BB, HR DEL PITCHER (nuevo)
+   Mismo endpoint, agregar los campos "inningsPitched", "hits", 
+   "baseOnBalls", "homeRuns" al dict que retorna fetch_pitcher_stats().
+
+3. RÉCORD W-L DEL EQUIPO EN LA TEMPORADA (nuevo)
+   Usar el endpoint /standings de MLB Stats API (ya se usa en otras 
+   partes del código, ej. _ensure_mlb_elo_seeded) para obtener wins/losses 
+   del equipo. Agregar función fetch_team_record(team_name) que retorne 
+   {"wins": X, "losses": Y} usando el mismo patrón de búsqueda por 
+   team_id ya existente.
+
+4. HOME/AWAY SPLITS — asegurar que SIEMPRE se muestren cuando existan
+   fetch_mlb_home_away_splits() ya existe y funciona — revisar por qué 
+   a veces no aparece en el mensaje final (posible filtro silencioso). 
+   Debe mostrarse consistentemente cuando la función retorna datos válidos.
+
+5. SPLITS DE DÍA VS NOCHE (nuevo)
+   Agregar función fetch_day_night_splits(team_name) usando MLB Stats 
+   API /teams/{id}/stats con parámetro "dayNight" split type (día/noche), 
+   similar al patrón ya usado en fetch_mlb_home_away_splits() pero con 
+   splitType diurno/nocturno en vez de home/away.
+
+6. MATCHUP ZURDO/DERECHO — mostrar como comparación clara, no solo nota
+   lr_notes ya existe — reformatear para que se vea como comparación 
+   directa (ej. "vs Zurdos: AVG .XXX | vs Derechos: AVG .XXX") en vez 
+   de solo la nota de texto actual.
+
+═══════════════════════════════════════════════
+FORMATO DE SALIDA — TABLA COMPARATIVA
+═══════════════════════════════════════════════
+
+En build_analizar_text() y notify_game_analysis(), reemplazar el bloque 
+actual de PITCHEO (que muestra cada pitcher en párrafos separados) por 
+una tabla de texto plano tipo:
+
+⚾ LANZADORES
+              {Pitcher Local}      {Pitcher Visitante}
+W-L:          8-8                  3-8
+ERA:          3.57                 4.13 → ajustado 4.20
+WHIP:         1.28                 1.31
+IP:           116.0                96.0
+K:            104                  86
+BB:           25                   36
+HR:           11                   12
+
+(usar espaciado con caracteres monoespaciados o alineación simple con 
+padding de espacios — Telegram soporta bloques <pre> o formato monospace 
+con backticks si ayuda a alinear columnas en HTML)
+
+Debajo de la tabla, agregar:
+
+🏆 RÉCORD DE TEMPORADA
+{Equipo Local}: XX-XX
+{Equipo Visitante}: XX-XX
+
+🏠 HOME/AWAY (cuando disponible)
+{Equipo Local} en casa: anota X.X | recibe X.X | gana XX%
+{Equipo Visitante} de visita: anota X.X | recibe X.X | gana XX%
+
+☀️ DÍA/NOCHE (cuando disponible)
+{Equipo Local}: día XX% W | noche XX% W
+{Equipo Visitante}: día XX% W | noche XX% W
+
+⚔️ VS ZURDOS/DERECHOS (cuando disponible, reemplaza el formato actual de lr_notes)
+{Equipo Local} vs zurdos: AVG .XXX | vs derechos: AVG .XXX
+{Equipo Visitante} vs zurdos: AVG .XXX | vs derechos: AVG .XXX
+
+═══════════════════════════════════════════════
+IMPORTANTE — LÍMITE DE TELEGRAM
+═══════════════════════════════════════════════
+Telegram tiene límite de 4096 caracteres por mensaje. build_analizar_text() 
+ya retorna una lista de partes [p1, p2] para dividir mensajes largos — 
+si con estos datos nuevos el mensaje p1 se acerca al límite, mover la 
+tabla de pitchers y récords al inicio de p1 (son los datos más importantes) 
+y considerar mover contenido menos crítico (ej. algunas líneas de CLAVES) 
+a p2 si es necesario para no cortar contenido a la mitad.
+
+Si algún dato no está disponible (API no responde, campo faltante), 
+omitir esa sección completa en vez de mostrar "N/D" en cada campo — 
+mantener el mensaje limpio.
+
+Después de aplicar, correr los tests existentes y confirmar con un 
+ejemplo real (usar Seattle Mariners vs Texas Rangers, pitchers Kirby 
+y Rocker) que la tabla se ve correctamente formateada y con datos reales.
