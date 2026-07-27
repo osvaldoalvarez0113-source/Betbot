@@ -6334,9 +6334,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
                 candidates.append(max(_hits_cands, key=lambda x: x["ev_pct"]))
 
         # ── Ponches del pitcher titular (Strikeout K props) ───────────────────
-        # REGLA K/9: solo se genera candidato de ponches si K/9 confirmado
-        # por MLB Stats API es estrictamente mayor a 8.5.  Sin K/9 confirmado
-        # o con K/9 ≤ 8.5, el prop se bloquea y se intenta fallback a ML.
+        # REGLA K/9: se calcula prop de ponches para cualquier K/9 confirmado
+        # por MLB Stats API, sin importar si es alto o bajo.  El filtro real
+        # de calidad lo hacen los umbrales de EV≥3% y prob≥0.52 abajo.
+        # Solo se bloquea (y se intenta fallback a ML) si K/9 no está disponible.
         # NUNCA usar estimación por ERA como sustituto de K/9 real.
         # GUARDIA DE API: reusar _has_early_ev del bloque F5 — si sigue sin
         # candidatos con EV>3%, no hay razón para gastar una llamada en K props.
@@ -6379,13 +6380,13 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
                 except (ValueError, TypeError):
                     _kp_k9_f = None
 
-                if _kp_k9_f is None or _kp_k9_f <= 8.5:
-                    _why = f"K/9={_kp_k9_f:.1f}" if _kp_k9_f is not None else "K/9 no disponible"
-                    print(f"   ⏭️  K prop {_kp_nm}: {_why} — necesita >8.5 confirmado → preferir ML")
+                if _kp_k9_f is None:
+                    _why = "K/9 no disponible"
+                    print(f"   ⏭️  K prop {_kp_nm}: {_why} → preferir ML")
                     _k9_prop_blocked = True
-                    continue   # bloquear este prop por completo
+                    continue   # bloquear solo si no hay K/9 real confirmado
 
-                # K/9 confirmado y > 8.5 → calcular prop normalmente
+                # K/9 confirmado (cualquier valor) → calcular prop normalmente
                 _kp_k9   = _kp_k9_f
                 _kp_ip   = (6.0 if _kp_era < 3.00 else
                              5.5 if _kp_era < 4.00 else 5.0)
@@ -8055,7 +8056,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             if "⚡" in _lbl:
                 _has_k_n = True
         if not _has_k_n and is_mlb and _all_mkts_n:
-            all_mkts_lines += "  ⚡ Props K: sin K/9 confirmado >8.5 — se prefiere ML\n"
+            all_mkts_lines += "  ⚡ Props K: sin K/9 confirmado — se prefiere ML\n"
 
         # Verdict — cap to MEDIA whenever any ⚠️ warning is present
         if tc.get("cap_conf") or has_warning:
