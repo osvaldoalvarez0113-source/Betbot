@@ -1,0 +1,73 @@
+MEJORA — Contexto de correlación entre mercados del mismo juego/pitcher para el panel
+
+OBJETIVO: Cuando el panel de expertos evalúa un mercado (ej. K Under de un pitcher),
+debe saber si YA existen otros mercados del mismo juego/pitcher siendo evaluados
+o recomendados en el mismo análisis, para que puedan advertir sobre riesgo
+correlacionado. Esto NO reduce cuántos mercados se evalúan — es información 
+adicional para que el panel razone mejor, especialmente Elena (Abogado del Diablo).
+
+═══════════════════════════════════════════════
+DÓNDE APLICAR
+═══════════════════════════════════════════════
+
+En analyze_game_full(), justo antes de las llamadas a panel_expertos() (tanto 
+la del top3[0] principal como las de _extra_candidates_results para top3[1:] 
+en el flujo de force_panel/analizar):
+
+1. Construir un resumen de "otros candidatos del mismo juego" a partir de la 
+   lista completa de `candidates` (o `top3`), EXCLUYENDO el candidato actual 
+   que se está evaluando. Para cada uno, identificar si depende del mismo 
+   pitcher (comparando si el nombre del pitcher aparece en el label, ej. 
+   "Kirby" apareciendo en "Kirby K UNDER 5.5" y en un eventual "Seattle 
+   Mariners ML" si Kirby es el abridor).
+
+2. Formato del resumen (ejemplo):
+
+   "MERCADOS CORRELACIONADOS EN ESTE MISMO PARTIDO:
+   - Seattle Mariners ML (EV +6.6%) — depende del mismo pitcher (Kirby)
+   - Kirby K OVER 5.5 (EV -25.6%) — mismo pitcher, lado opuesto del prop
+   
+   Si varios de estos picks comparten la misma causa raíz (ej. que Kirby 
+   tenga una noche dominante), una mala salida del pitcher puede hacer 
+   perder varios picks a la vez, no solo uno."
+
+3. Inyectar este resumen en game_data como una nueva clave, por ejemplo:
+   
+   _claude_data_g["correlacion_mercados"] = <el resumen de arriba>
+   
+   Solo agregar la clave si hay al menos 1 mercado correlacionado — si no 
+   hay ninguno, no agregar nada (para no inflar el prompt sin necesidad).
+
+4. Aplicar el mismo tratamiento en el bloque de _extra_candidates_results 
+   (cuando force_panel=True evalúa top3[1:] con su propio panel_expertos), 
+   pasando el mismo tipo de resumen de correlación relativo a ESE candidato 
+   específico.
+
+═══════════════════════════════════════════════
+INSTRUCCIÓN PARA ELENA (Abogado del Diablo)
+═══════════════════════════════════════════════
+
+En panel_expertos(), dentro del bloque donde se construye el system prompt 
+de Elena (índice 2 de _EXPERTOS), si game_data.get("correlacion_mercados") 
+existe, agregar al system prompt de Elena (similar a como ya se hace con 
+_build_elena_situational_addendum):
+
+    "\n\nCORRELACIÓN DE MERCADOS EN ESTE PARTIDO:\n"
+    + game_data["correlacion_mercados"] + "\n\n"
+    "Si detectas que varios mercados de este análisis dependen de la misma "
+    "causa raíz (mismo pitcher, mismo supuesto), menciónalo explícitamente "
+    "en tu oración de riesgo — esto es evidencia real de concentración de "
+    "riesgo, no especulación."
+
+═══════════════════════════════════════════════
+IMPORTANTE
+═══════════════════════════════════════════════
+- NO reducir cuántos mercados se evalúan — cada uno sigue teniendo su 
+  propio panel independiente
+- NO cambiar EV, probabilidades, ni stakes — esto es solo contexto adicional 
+  para el razonamiento
+- Marco y Víctor NO reciben este contexto — solo Elena, ya que su rol es 
+  específicamente cazar riesgos operacionales/ocultos
+- Después de aplicar, correr los tests existentes
+- Confirmar con un ejemplo real que cuando hay 2+ mercados del mismo pitcher 
+  en un análisis, Elena menciona la correlación en su razonamiento

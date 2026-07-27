@@ -7307,6 +7307,12 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
     else:
         if is_mlb:
             _claude_data_g.update(_enrich_panel_data(_claude_data_g, game))
+        # ── Correlación de mercados: contexto para Elena ──────────────────────
+        _corr_main = _build_correlacion_mercados(top3, top3[0]["label"], h_pname, a_pname)
+        if _corr_main:
+            _claude_data_g["correlacion_mercados"] = _corr_main
+            print(f"   🔗 Correlación inyectada (pick principal): "
+                  f"{len([l for l in _corr_main.splitlines() if l.startswith('-')])} mercado(s)")
         _claude_result_g = panel_expertos(_claude_data_g, _claude_sport_g,
                                           _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
 
@@ -7324,6 +7330,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
                 }
                 _extra_data.update({k: v for k, v in context.items()
                                     if isinstance(v, (str, int, float, bool, type(None)))})
+                # Correlación relativa a ESTE candidato específico
+                _corr_extra = _build_correlacion_mercados(top3, _extra_c["label"], h_pname, a_pname)
+                if _corr_extra:
+                    _extra_data["correlacion_mercados"] = _corr_extra
                 _extra_panel = panel_expertos(_extra_data, _claude_sport_g,
                                              _no_elite=_no_elite_panel, _force_elite=_force_elite_panel)
                 _extra_candidates_results.append({
@@ -12019,6 +12029,79 @@ def _generar_narrativa(context: dict, candidates: list, home: str, away: str,
             return ""
 
 
+def _build_correlacion_mercados(candidates: list, current_label: str,
+                                h_pname: str, a_pname: str) -> str:
+    """
+    Build a correlation-context string listing other candidates from the same game
+    that share a pitcher (or game-outcome) dependency with the current pick.
+
+    Rules:
+    - A pitcher last name that appears in either label counts as shared dependency.
+    - If neither label has a pitcher name, any two game-outcome markets (ML/RL/
+      Over/Under/F5) are game-correlated by default.
+    Returns "" when no correlated markets are found (key will not be added).
+    """
+    if not candidates:
+        return ""
+
+    _pitcher_names = []
+    for _pn in (h_pname, a_pname):
+        if _pn and _pn not in ("TBD", "", None):
+            _last = _pn.strip().split()[-1]
+            if len(_last) >= 4:
+                _pitcher_names.append(_last)
+
+    current_up = current_label.upper()
+    _GAME_MKTS = (" ML", " RL", "OVER", "UNDER", "F5")
+
+    lines = []
+    for c in candidates:
+        lbl = c.get("label", "")
+        if lbl == current_label:
+            continue
+        lbl_up = lbl.upper()
+
+        pitcher_match = None
+        for _pn_last in _pitcher_names:
+            _pu = _pn_last.upper()
+            if _pu in current_up or _pu in lbl_up:
+                pitcher_match = _pn_last
+                break
+
+        if pitcher_match is None:
+            # Fall back: both are generic game-outcome markets → correlated
+            if (any(x in current_up for x in _GAME_MKTS) and
+                    any(x in lbl_up for x in _GAME_MKTS)):
+                pitcher_match = "__game__"
+
+        if pitcher_match is None:
+            continue
+
+        ev_s = f"EV {c['ev_pct']:+.1f}%" if "ev_pct" in c else ""
+        _pu  = pitcher_match.upper() if pitcher_match != "__game__" else ""
+        if _pu and _pu in current_up and _pu in lbl_up:
+            note = f"mismo pitcher ({pitcher_match}), lado opuesto del prop"
+        elif _pu:
+            note = f"depende del mismo pitcher ({pitcher_match})"
+        else:
+            note = "resultado correlacionado del mismo partido"
+
+        clean_lbl = (lbl.replace("🔵 ", "").replace("🔴 ", "")
+                        .replace("📈 ", "").replace("📉 ", "").replace("⚡ ", ""))
+        lines.append(f"- {clean_lbl} ({ev_s}) — {note}")
+
+    if not lines:
+        return ""
+
+    return (
+        "MERCADOS CORRELACIONADOS EN ESTE MISMO PARTIDO:\n"
+        + "\n".join(lines)
+        + "\n\nSi varios de estos picks comparten la misma causa raíz (ej. que el pitcher "
+        "tenga una noche dominante), una mala salida puede hacer perder varios picks "
+        "a la vez, no solo uno."
+    )
+
+
 def _build_elena_situational_addendum(game_data: dict) -> str:
     """
     Build a dynamic system-prompt addendum for Elena (El Abogado del Diablo)
@@ -12395,6 +12478,19 @@ def panel_expertos(game_data: dict, sport: str,
                     "Usa estos datos si aplican directamente al pick que estás evaluando "
                     "(e.g. bullpen del favorito quemado, regulares descansando)."
                 )
+            # Inject market correlation context — only Elena receives this
+            _corr_ctx = game_data.get("correlacion_mercados", "")
+            if _corr_ctx:
+                _extra_full += (
+                    "\n\nCORRELACIÓN DE MERCADOS EN ESTE PARTIDO:\n"
+                    + _corr_ctx
+                    + "\n\nSi detectas que varios mercados de este análisis dependen de la misma "
+                    "causa raíz (mismo pitcher, mismo supuesto), menciónalo explícitamente "
+                    "en tu oración de riesgo — esto es evidencia real de concentración de "
+                    "riesgo, no especulación."
+                )
+                print(f"   🔗 Elena: contexto de correlación de mercados inyectado")
+
             # Inject slate-wide getaway-day / bullpen pattern alerts when active
             if _patrones_activos:
                 _slate_txt  = "\n".join(f"• {a}" for a in _patrones_activos)
