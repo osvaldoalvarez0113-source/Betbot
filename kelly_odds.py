@@ -7720,10 +7720,8 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             ):
                 _rs_r  = ctx.get(_rs_k)
                 _bat_r = ctx.get(_bat_k)
-                if _rs_r or _bat_r:
+                if _bat_r:
                     ctx_lines += f"\n{_ic_r} {_te_r}\n"
-                    if _rs_r:
-                        ctx_lines += f"  Anota: {ctx[_rs_k]}/jgo | Recibe: {ctx[_ra_k]}/jgo\n"
                     if _bat_r:
                         _ops_r = _bat_r.get("ops")
                         _kp_r  = _bat_r.get("k_pct")
@@ -8729,10 +8727,8 @@ def build_analizar_text(result: dict) -> list:
             ):
                 _rs_v  = ctx.get(_rs_k)
                 _bat_v = ctx.get(_bat_k)
-                if _rs_v or _bat_v:
+                if _bat_v:
                     _cl += f"\n{_ic_c} <b>{_te_c}</b>\n"
-                    if _rs_v:
-                        _cl += f"  Anota: {ctx[_rs_k]}/jgo | Recibe: {ctx[_ra_k]}/jgo\n"
                     if _bat_v:
                         _avg_line = f"  AVG: {_bat_v['avg']:.3f}"
                         if _bat_v.get("ops"):
