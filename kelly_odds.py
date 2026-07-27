@@ -3098,13 +3098,18 @@ def fetch_statcast_pitcher(pitcher_name: str) -> "dict | None":
                 break
     return hit if hit else None
 
-def _statcast_alert_block(name: str, sc: "dict | None", era: float) -> str:
+def _statcast_alert_block(name: str, sc: "dict | None", era: float,
+                          icon: "str | None" = None) -> str:
     """
-    Format the 🔬 Statcast block for a pitcher.
+    Format the Statcast block for a pitcher.
     Returns empty string if no statcast data.
+    icon=None  -> legacy format: "\U0001f52c Statcast Name:\n   ..." (3-space indent)
+    icon="\U0001f535"  -> expanded format: "{icon} Name\n  ..." (2-space indent,
+                   caller emits the section header)
     """
     if not sc:
         return ""
+    indent = "  " if icon else "   "
     lines = []
     xera = sc.get("xera")
     if xera is not None:
@@ -3112,20 +3117,22 @@ def _statcast_alert_block(name: str, sc: "dict | None", era: float) -> str:
         trend = ("mejor que ERA — infravalorado ✅" if diff > 0.30
                  else "peor que ERA — ha tenido suerte ⚠️" if diff < -0.30
                  else "alineado con ERA")
-        lines.append(f"   xERA: {xera:.2f} ({trend})")
+        lines.append(f"{indent}xERA: {xera:.2f} ({trend})")
     whiff = sc.get("whiff_pct")
     if whiff is not None:
         lbl = ("dominante 🔥" if whiff > 30 else "sólido" if whiff > 22 else "bajo ⚠️")
-        lines.append(f"   Whiff%: {whiff:.1f}% ({lbl})")
+        lines.append(f"{indent}Whiff%: {whiff:.1f}% ({lbl})")
     hh = sc.get("hard_hit_pct")
     if hh is not None:
         lbl = ("controlado ✅" if hh < 32 else "alto ⚠️" if hh > 40 else "normal")
-        lines.append(f"   Hard hit%: {hh:.1f}% ({lbl})")
+        lines.append(f"{indent}Hard hit%: {hh:.1f}% ({lbl})")
     barrel = sc.get("barrel_pct")
     if barrel is not None:
-        lines.append(f"   Barrel%: {barrel:.1f}%")
+        lines.append(f"{indent}Barrel%: {barrel:.1f}%")
     if not lines:
         return ""
+    if icon:
+        return f"{icon} {name}\n" + "\n".join(lines) + "\n"
     return f"🔬 Statcast {name}:\n" + "\n".join(lines) + "\n"
 
 
@@ -6812,6 +6819,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
             "pitcher_bb_away":    _safe_num(_ps_a_ext, "bb"),
             "pitcher_hr_home":    _safe_num(_ps_h_ext, "hr"),
             "pitcher_hr_away":    _safe_num(_ps_a_ext, "hr"),
+            "pitcher_h_home":     _safe_num(_ps_h_ext, "hits"),
+            "pitcher_h_away":     _safe_num(_ps_a_ext, "hits"),
         }
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
@@ -7659,6 +7668,8 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                 whip_a = ctx.get("pitcher_whip_away"),
                 ip_h   = ctx.get("pitcher_ip_home"),
                 ip_a   = ctx.get("pitcher_ip_away"),
+                h_h    = ctx.get("pitcher_h_home"),
+                h_a    = ctx.get("pitcher_h_away"),
                 k_h    = ctx.get("pitcher_k_home"),
                 k_a    = ctx.get("pitcher_k_away"),
                 bb_h   = ctx.get("pitcher_bb_home"),
@@ -7688,9 +7699,13 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     if _pace_ctx.get("flag"):
                         ctx_lines += f" {_pace_ctx['flag']}"
                     ctx_lines += "\n"
-            # Statcast alerts
-            ctx_lines += _statcast_alert_block(pn_h, sc_h, er_h)
-            ctx_lines += _statcast_alert_block(pn_a, sc_a, er_a)
+            # Statcast alerts — expanded per-pitcher blocks with section header
+            _sc_h_n = _statcast_alert_block(pn_h, sc_h, er_h, icon="🔵")
+            _sc_a_n = _statcast_alert_block(pn_a, sc_a, er_a, icon="🔴")
+            if _sc_h_n or _sc_a_n:
+                ctx_lines += "\n🔬 STATCAST\n\n"
+                if _sc_h_n: ctx_lines += _sc_h_n + "\n"
+                if _sc_a_n: ctx_lines += _sc_a_n + "\n"
             # Supplementary context (RÉCORD / HOME/AWAY / DÍA/NOCHE / VS MANOS)
             ctx_lines += _supplementary_context_blocks(
                 ctx, home_es, away_es, is_mlb=True, is_notify=True)
@@ -8320,6 +8335,7 @@ def _pitchers_table_block(
     wl_h, wl_a,
     whip_h, whip_a,
     ip_h, ip_a,
+    h_h, h_a,
     k_h, k_a,
     bb_h, bb_a,
     hr_h, hr_a,
@@ -8372,6 +8388,7 @@ def _pitchers_table_block(
         f"{'ERA:':<{LEFT}}{_era_cell(er_h, er_h_raw, COL)}{_era_cell(er_a, er_a_raw, COL)}",
         f"{'WHIP:':<{LEFT}}{_fv(whip_h)}{_fv(whip_a)}",
         f"{'IP:':<{LEFT}}{_fv(ip_h, '{:.1f}')}{_fv(ip_a, '{:.1f}')}",
+        f"{'H:':<{LEFT}}{_fi(h_h)}{_fi(h_a)}",
         f"{'K:':<{LEFT}}{_fi(k_h)}{_fi(k_a)}",
         f"{'BB:':<{LEFT}}{_fi(bb_h)}{_fi(bb_a)}",
         f"{'HR:':<{LEFT}}{_fi(hr_h)}{_fi(hr_a)}",
@@ -8585,6 +8602,8 @@ def build_analizar_text(result: dict) -> list:
             whip_a = ctx.get("pitcher_whip_away"),
             ip_h   = ctx.get("pitcher_ip_home"),
             ip_a   = ctx.get("pitcher_ip_away"),
+            h_h    = ctx.get("pitcher_h_home"),
+            h_a    = ctx.get("pitcher_h_away"),
             k_h    = ctx.get("pitcher_k_home"),
             k_a    = ctx.get("pitcher_k_away"),
             bb_h   = ctx.get("pitcher_bb_home"),
@@ -8607,26 +8626,38 @@ def build_analizar_text(result: dict) -> list:
         p1 += _fip_luck_line(pn_h, er_h, fip_h)
         p1 += _fip_luck_line(pn_a, er_a, fip_a)
 
-        # Pitcher form trend (last 3 starts)
-        for pn, pf in ((pn_h, pf_h), (pn_a, pf_a)):
-            if pf:
-                clean = _clean_era_form(pf.get("eras", []))
-                if clean:
-                    last = pn.split()[-1] if " " in pn else pn
-                    trend = pf.get("trend", "")
-                    p1 += f"   Forma {last}: {trend} | {' → '.join(str(e) for e in clean[-3:])}\n"
+        # Pitcher form trend (last 3 starts) — expanded per-pitcher blocks
+        _forma_blks = []
+        for _pn_f, _pf_f, _ic_f in ((pn_h, pf_h, "🔵"), (pn_a, pf_a, "🔴")):
+            if _pf_f:
+                _clean_f = _clean_era_form(_pf_f.get("eras", []))
+                if _clean_f:
+                    _trend_f = _pf_f.get("trend", "")
+                    _era_seq = " → ".join(str(e) for e in _clean_f[-3:])
+                    _forma_blks.append(
+                        f"{_ic_f} {_pn_f}: {_trend_f}\n"
+                        f"  ERA por salida: {_era_seq}\n"
+                    )
+        if _forma_blks:
+            p1 += "\n📈 FORMA RECIENTE (últimas 3 salidas)\n\n"
+            p1 += "\n".join(_forma_blks) + "\n"
 
-        # Statcast
-        _sch = _statcast_alert_block(pn_h, sc_h, er_h)
-        if _sch: p1 += _sch
-        _sca = _statcast_alert_block(pn_a, sc_a, er_a)
-        if _sca: p1 += _sca
+        # Statcast — expanded per-pitcher blocks with section header
+        _sc_blks = []
+        for _pn_sc, _sc_sc, _er_sc, _ic_sc in (
+            (pn_h, sc_h, er_h, "🔵"), (pn_a, sc_a, er_a, "🔴")):
+            _blk = _statcast_alert_block(_pn_sc, _sc_sc, _er_sc, icon=_ic_sc)
+            if _blk:
+                _sc_blks.append(_blk)
+        if _sc_blks:
+            p1 += "🔬 STATCAST\n\n"
+            p1 += "\n".join(_sc_blks) + "\n"
 
-        # Bullpen ERA
+        # Bullpen ERA — per-team lines
         try:
             _bph, _ = fetch_bullpen_era(home)
             _bpa, _ = fetch_bullpen_era(away)
-            p1 += f"⚾ Bullpen ERA: {home_es} {_bph:.2f} | {away_es} {_bpa:.2f}\n"
+            p1 += f"⚾ Bullpen ERA:\n  {home_es}: {_bph:.2f}\n  {away_es}: {_bpa:.2f}\n"
         except Exception:
             pass
         for _cf in ctx.get("pitcher_conflicts", []):
