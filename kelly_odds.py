@@ -7713,24 +7713,27 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     f"   {away_es}: {pin_a_dec:+.0f} ({pin_imp_a}% implícita)\n"
                 )
 
-            # Runs scored / allowed (1 línea por equipo)
-            ctx_lines += (
-                f"⚾ {home_es}: anota {ctx['rs_home']} | recibe {ctx['ra_home']}/jgo\n"
-                f"⚾ {away_es}: anota {ctx['rs_away']} | recibe {ctx['ra_away']}/jgo\n"
-            )
-            # ── Batting metrics (1 línea por equipo) ─────────────────────
-            for tname, tname_es, bat in (
-                (home, home_es, ctx.get("bat_home")),
-                (away, away_es, ctx.get("bat_away")),
+            # ── Runs scored / allowed + batting — per-team blocks ────────
+            for _tn_r, _te_r, _rs_k, _ra_k, _bat_k, _ic_r in (
+                (home, home_es, "rs_home", "ra_home", "bat_home", "🔵"),
+                (away, away_es, "rs_away", "ra_away", "bat_away", "🔴"),
             ):
-                if not bat:
-                    continue
-                ops = bat.get("ops")
-                kp  = bat.get("k_pct")
-                parts = [f"AVG {bat['avg']:.3f}"]
-                if ops is not None: parts.append(f"OPS {ops:.3f} ({_ops_label(ops)})")
-                if kp  is not None: parts.append(f"K% {kp:.0f}%")
-                ctx_lines += f"🏏 {tname_es}: {' | '.join(parts)}\n"
+                _rs_r  = ctx.get(_rs_k)
+                _bat_r = ctx.get(_bat_k)
+                if _rs_r or _bat_r:
+                    ctx_lines += f"\n{_ic_r} {_te_r}\n"
+                    if _rs_r:
+                        ctx_lines += f"  Anota:  {ctx[_rs_k]}/jgo\n"
+                        ctx_lines += f"  Recibe: {ctx[_ra_k]}/jgo\n"
+                    if _bat_r:
+                        _ops_r = _bat_r.get("ops")
+                        _kp_r  = _bat_r.get("k_pct")
+                        ctx_lines += f"  AVG:    {_bat_r['avg']:.3f}\n"
+                        if _ops_r is not None:
+                            ctx_lines += f"  OPS:    {_ops_r:.3f} ({_ops_label(_ops_r)})\n"
+                        if _kp_r is not None:
+                            ctx_lines += f"  K%:     {_kp_r:.0f}%\n"
+            ctx_lines += "\n"
             # ──────────────────────────────────────────────────────────────
 
             # ── Confirmed lineup display (MLB A8) ─────────────────────────
@@ -7811,11 +7814,16 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                          if pn_h not in ("TBD", "", None) else None)
                 _fa_a = (_fr_n.forma_abridor(pn_a)
                          if pn_a not in ("TBD", "", None) else None)
-                ctx_lines += (
-                    f"📈 FORMA 14d\n"
-                    f"   {home_es}: {_ops_frag(_fo_h)} | bullpen ({_ffl(_fb_h)}) | abridor ({_ffl(_fa_h)})\n"
-                    f"   {away_es}: {_ops_frag(_fo_a)} | bullpen ({_ffl(_fb_a)}) | abridor ({_ffl(_fa_a)})\n"
-                )
+                ctx_lines += "📈 FORMA 14d\n"
+                for _te_n2, _fo_n2, _fb_n2, _fa_n2, _ic_n2 in (
+                    (home_es, _fo_h, _fb_h, _fa_h, "🔵"),
+                    (away_es, _fo_a, _fb_a, _fa_a, "🔴"),
+                ):
+                    ctx_lines += f"\n{_ic_n2} {_te_n2}\n"
+                    ctx_lines += f"  Ofensiva: {_ops_frag(_fo_n2)}\n"
+                    ctx_lines += f"  Bullpen:  {_ffl(_fb_n2)}\n"
+                    ctx_lines += f"  Abridor:  {_ffl(_fa_n2)}\n"
+                ctx_lines += "\n"
             except Exception as _fr_err:
                 print(f"[forma notify_game_analysis] {_fr_err}")
             # Umpire
@@ -8155,7 +8163,8 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             _ev_s  = f"+{_m['ev_pct']:.1f}%" if _m["ev_pct"] >= 0 else f"{_m['ev_pct']:.1f}%"
             _ppc   = round(_m["prob"] * 100)
             all_mkts_lines += (
-                f"  {_lbl}: {_ppc}% | {_ev_s} | {_m['odds']:.2f} @ {_m['book']}{_edge}\n"
+                f"  {_lbl}{_edge}\n"
+                f"    {_ev_s} | {_ppc}% | {_m['odds']:.2f} @ {_m['book']}\n\n"
             )
             if "⚡" in _lbl:
                 _has_k_n = True
@@ -8652,9 +8661,15 @@ def build_analizar_text(result: dict) -> list:
             _fb_a_tg = _fr_tg.bullpen_14d(away)
             _fa_h_tg = _fr_tg.forma_abridor(pn_h) if pn_h not in ("TBD","",None) else None
             _fa_a_tg = _fr_tg.forma_abridor(pn_a) if pn_a not in ("TBD","",None) else None
-            p1 += (f"📈 <b>FORMA 14d</b>\n"
-                   f"   {home_es}: {_ops_frag_tg(_fo_h_tg)} | bullpen ({_ffl_tg(_fb_h_tg)}) | abridor ({_ffl_tg(_fa_h_tg)})\n"
-                   f"   {away_es}: {_ops_frag_tg(_fo_a_tg)} | bullpen ({_ffl_tg(_fb_a_tg)}) | abridor ({_ffl_tg(_fa_a_tg)})\n")
+            p1 += "📈 <b>FORMA 14d</b>\n"
+            for _te_f, _fo_f, _fb_f, _fa_f, _ic_f in (
+                (home_es, _fo_h_tg, _fb_h_tg, _fa_h_tg, "🔵"),
+                (away_es, _fo_a_tg, _fb_a_tg, _fa_a_tg, "🔴"),
+            ):
+                p1 += f"\n{_ic_f} <b>{_te_f}</b>\n"
+                p1 += f"  Ofensiva: {_ops_frag_tg(_fo_f)}\n"
+                p1 += f"  Bullpen:  {_ffl_tg(_fb_f)}\n"
+                p1 += f"  Abridor:  {_ffl_tg(_fa_f)}\n"
             p1 += SEP
         except Exception as _fr_tg_err:
             print(f"[forma build_analizar_text] {_fr_tg_err}")
@@ -8706,7 +8721,51 @@ def build_analizar_text(result: dict) -> list:
         if ctx.get("line_moved") and ctx.get("line_note"): _kv.append(f"📉 {ctx['line_note']}")
 
     if _kv:
-        p1 += "📊 <b>CLAVES</b>\n" + "".join(f"   {l}\n" for l in _kv) + SEP
+        if is_mlb:
+            # ── Expanded MLB CLAVES — per-team blocks + global items ───────────
+            _cl = "📊 <b>CLAVES</b>\n"
+            for _te_c, _ic_c, _rs_k, _ra_k, _bat_k in (
+                (home_es, "🔵", "rs_home", "ra_home", "bat_home"),
+                (away_es, "🔴", "rs_away", "ra_away", "bat_away"),
+            ):
+                _rs_v  = ctx.get(_rs_k)
+                _bat_v = ctx.get(_bat_k)
+                if _rs_v or _bat_v:
+                    _cl += f"\n{_ic_c} <b>{_te_c}</b>\n"
+                    if _rs_v:
+                        _cl += f"  Anota:  {ctx[_rs_k]}/jgo\n"
+                        _cl += f"  Recibe: {ctx[_ra_k]}/jgo\n"
+                    if _bat_v:
+                        _cl += f"  AVG:    {_bat_v['avg']:.3f}\n"
+                        if _bat_v.get("ops"):
+                            _cl += f"  OPS:    {_bat_v['ops']:.3f} ({_ops_label(_bat_v['ops'])})\n"
+                        if _bat_v.get("k_pct"):
+                            _cl += f"  K%:     {_bat_v['k_pct']:.0f}%\n"
+            # Global (non-team-specific) items
+            _gl = []
+            _pin2 = ctx.get("pinnacle_odds")
+            if _pin2:
+                _rh2 = 1.0/max(_pin2["home"],1.001); _ra2 = 1.0/max(_pin2["away"],1.001); _tt2 = _rh2+_ra2
+                _gl.append(f"📌 Pinnacle: {home_es} {round(_rh2/_tt2*100,1)}% | {away_es} {round(_ra2/_tt2*100,1)}%")
+            if ctx.get("temp_label"): _gl.append(ctx["temp_label"].rstrip())
+            if ctx.get("wind_info"):  _gl.append(f"💨 {ctx['wind_info']}")
+            _ump2 = ctx.get("umpire")
+            if _ump2 and _ump2.get("name"):
+                _te3 = _ump2.get("tendency","NEUTRAL")
+                _ue2 = "zona cerrada → Over" if _te3=="OVER" else ("zona amplia → Under" if _te3=="UNDER" else "zona normal")
+                _gl.append(f"👨\u200d⚖️ {_ump2['name']} — {_ue2}")
+            _il2 = []
+            for _til2, _ils2 in ctx.get("il_data",{}).items():
+                if _ils2: _il2.append(f"  {_es(_til2)}: {', '.join(_ils2[:3])}")
+            if _il2: _gl.append("🤕 Lesionados:\n" + "\n".join(_il2))
+            if ctx.get("line_moved") and ctx.get("line_note"):
+                _gl.append(f"📉 {ctx['line_note']}")
+            if ctx.get("ttt_note"): _gl.append(ctx["ttt_note"].rstrip())
+            if _gl:
+                _cl += "\n" + "".join(f"{l}\n" for l in _gl)
+            p1 += _cl + SEP
+        else:
+            p1 += "📊 <b>CLAVES</b>\n" + "".join(f"   {l}\n" for l in _kv) + SEP
 
     # ─── 8. 💰 MERCADOS ───────────────────────────────────────────────────────
     p1 += "💰 <b>MERCADOS</b>\n"
@@ -8720,8 +8779,9 @@ def build_analizar_text(result: dict) -> list:
             _ip   = lb in cand_lbs
             ev_v  = m.get("ev_pct",0)
             icon  = "✅" if _ip else ("❌" if ev_v < 0 else "➖")
-            p1 += (f"{icon} <b>{lb}</b>  EV {ev_v:+.1f}%  Prob {round(m.get('prob',0)*100)}%"
-                   f"  @{m.get('odds',0):.2f} [{m.get('book','')}]\n")
+            p1 += (f"{icon} <b>{lb}</b>\n"
+                   f"  EV {ev_v:+.1f}% | Prob {round(m.get('prob',0)*100)}%"
+                   f" | @{m.get('odds',0):.2f} ({m.get('book','')})\n\n")
             if "⚡" in lb: _has_k = True
         if not _has_k and is_mlb:
             p1 += "⚡ Props K: sin K/9 >8.5 confirmado — preferir ML\n"
@@ -8802,6 +8862,12 @@ def build_analizar_text(result: dict) -> list:
         _idx_m = p1.find("💰 <b>MERCADOS</b>")
         if _idx_k != -1 and _idx_m != -1:
             p1 = p1[:_idx_k] + _sec_k_cut + p1[_idx_m:]
+    # If still > limit after CLAVES trim, move MERCADOS section to start of p2
+    if len(p1) > 3900 and "💰 <b>MERCADOS</b>" in p1:
+        _idx_m2 = p1.find("💰 <b>MERCADOS</b>")
+        if _idx_m2 != -1:
+            p2 = p1[_idx_m2:] + "\n" + p2
+            p1 = p1[:_idx_m2].rstrip() + "\n"
 
     return [p1, p2]
 
