@@ -1,0 +1,44 @@
+AUDITORÍA — Bug de datos duplicados en Statcast (fetch_statcast_pitcher_by_id)
+
+Detecté que dos pitchers distintos (Mitch Keller de Pittsburgh Pirates y 
+Merrill Kelly de Arizona Diamondbacks) mostraron EXACTAMENTE los mismos 
+4 valores de Statcast en un análisis en vivo:
+  - xERA: 4.51 (idéntico)
+  - Whiff%: 13.3% (idéntico)
+  - Hard hit%: 43.1% (idéntico)
+  - Barrel%: 6.9% (idéntico)
+
+Estos son dos pitchers diferentes con ERA de temporada distinta (4.83 vs 5.03)
+y forma reciente opuesta (uno mejorando, otro en declive) — es prácticamente
+imposible que compartan los 4 números de Statcast por coincidencia real.
+
+Por favor audita estas funciones y encuentra la causa raíz:
+
+1. fetch_statcast_pitcher_by_id(pitcher_id, pitcher_name) — revisar la clave 
+   de caché: 
+      ck = f"{pitcher_id}_{today}"
+   Confirmar que pitcher_id realmente es distinto para cada pitcher en el 
+   punto donde se llama esta función (buscar dónde se obtiene home_id/away_id 
+   en p_data — verificar que _lookup_pitcher_data() o el fetch de 
+   probable_pitchers_today() no esté devolviendo el mismo ID para ambos 
+   pitchers por error de mapeo home/away).
+
+2. Si los pitcher_id SÍ son distintos, revisar el disk cache:
+      disk_path = f"/tmp/statcast_pid_{pitcher_id}_{today}.json"
+   Confirmar que pitcher_id se está interpolando correctamente en el path 
+   (no hay overwrite entre archivos por un bug de formato de string).
+
+3. Revisar el fetch en vivo — la URL usa &player_id={pitcher_id}. Confirmar 
+   que pitcher_id no llega vacío/None en algún caso y cae a un fallback 
+   genérico compartido, o que el parsing del CSV de Baseball Savant no está 
+   leyendo la primera fila sin filtrar correctamente por ese player_id 
+   específico.
+
+4. Como diagnóstico rápido: agregar un print temporal justo antes de la 
+   llamada real (no la de cache-hit) que muestre pitcher_id y pitcher_name 
+   juntos, para el próximo scan en vivo, y confirmar en los logs de Railway 
+   si efectivamente se están pasando IDs distintos para Keller vs Kelly.
+
+No apliques ningún fix todavía — primero diagnostica y reporta qué está 
+pasando exactamente, con evidencia de logs o del código, antes de proponer 
+la corrección.
