@@ -1,0 +1,100 @@
+REDISEÑO DE FORMATO — Notificaciones más limpias y legibles en móvil
+
+OBJETIVO: Todas las notificaciones (ntfy y Telegram) deben verse más limpias, 
+con mejor espaciado, iconos consistentes, y razonamiento del panel cortado en 
+líneas cortas en vez de párrafos corridos. Esto NO cambia ninguna lógica de 
+cálculo, EV, stakes, ni decisiones — es puramente visual/formato.
+
+═══════════════════════════════════════════════
+REGLAS DE ESTILO A APLICAR EN TODO EL BOT
+═══════════════════════════════════════════════
+
+1. RAZONAMIENTO DEL PANEL — cortar en líneas con flecha (→), no párrafo corrido
+   
+   ANTES:
+   "Kirby xERA 3.74 vs Rocker xERA 4.60 — diferencia de 0.86 puntos que 
+   favorece Seattle pero no es dominante (necesitaría 1.5+). Los últimos 
+   3 juegos de Rocker muestran volatilidad extrema (ERA 6.59, 12.12, 0."
+   
+   DESPUÉS:
+   "Kirby xERA 3.74 vs Rocker xERA 4.60
+   → diferencia de 0.86 pts, favorece a Seattle
+   → no es dominante (necesitaría 1.5+)
+   → ⚠️ Rocker: volatilidad extrema últimos 3 juegos"
+   
+   Implementar una función helper _wrap_reasoning(text: str) -> str que:
+   - Detecta el primer dato numérico/comparación como línea de apertura
+   - Divide el resto del texto en oraciones (por ". " o " — ") 
+   - Antepone "→ " a cada oración subsiguiente
+   - Máximo 4 líneas — si hay más contenido, corta con "..."
+   Usarla en _claude_block() y en el rendering de _expertos_detalle 
+   (tanto en notify_game_analysis como en build_analizar_text).
+
+2. CADA EXPERTO EN SU PROPIO BLOQUE VISUAL, no todo pegado
+   
+   ANTES:
+   "El Estadístico ❌ 🟡 — [texto largo]"
+   
+   DESPUÉS:
+   "🎓 El Estadístico   ❌  🟡 MEDIA
+   [razonamiento con flechas, 2-4 líneas]
+   "
+   (línea en blanco entre cada experto)
+
+3. ESPACIADO GENEROSO ENTRE SECCIONES
+   Cada sección (PITCHEO, CLAVES, FORMA 14d, MERCADOS, PANEL, RECOMENDACIÓN) 
+   debe tener una línea en blanco antes y después del divisor, no solo el 
+   divisor pegado al texto.
+
+4. ICONOS CONSISTENTES POR TIPO DE DATO (no repetir 🔵🔴 para todo)
+   - 🎯 = pick/apuesta recomendada
+   - 📊 = estadística/dato numérico
+   - 🎓 = panel de expertos (ya se usa, mantener)
+   - ⚠️ = advertencia/contradicción
+   - ✅ / ❌ = confirmación/veto (mantener)
+   - 🔵 solo para "pitcher local", 🔴 solo para "pitcher visitante" — no 
+     reusar para otra cosa
+   - 💰 = mercados (mantener)
+   - 🔥 / 📈 / 📉 = forma reciente / tendencia (mantener)
+
+5. VEREDICTO FINAL — más visual, con separación clara
+   
+   ANTES (todo junto):
+   "RECOMENDACIÓN: ✅ APOSTAR
+   Pick: Seattle Mariners ML @ 1.72 Bovada | Stake $16
+   [razonamiento pegado]"
+   
+   DESPUÉS:
+   "━━━━━━━━━━━━━━━━━━━━
+   🎯 RECOMENDACIÓN: ✅ APOSTAR
+   ━━━━━━━━━━━━━━━━━━━━
+   
+   Pick:   Seattle Mariners ML
+   Cuota:  @1.72 (Bovada)
+   Stake:  $16
+   
+   [razonamiento con flechas]"
+
+═══════════════════════════════════════════════
+FUNCIONES A MODIFICAR (aplicar las 5 reglas de arriba)
+═══════════════════════════════════════════════
+
+1. _claude_block(claude) — usar _wrap_reasoning() en el campo "reason"
+2. build_analizar_text(result) — sección "PANEL" (donde itera 
+   ci.get("_expertos_detalle")) y sección "RECOMENDACIÓN" final
+3. notify_game_analysis() — mismo tratamiento en el bloque de picks y 
+   panel dentro del cuerpo del ntfy
+4. panel_expertos() — el campo merged["razonamiento"] de síntesis final 
+   también debe pasar por _wrap_reasoning() antes de insertarse en el 
+   mensaje final
+
+═══════════════════════════════════════════════
+IMPORTANTE
+═══════════════════════════════════════════════
+- NO tocar ninguna lógica de cálculo (EV, Kelly, probabilidades, umbrales)
+- NO cambiar los valores que se muestran, solo cómo se presentan
+- Mantener compatibilidad con el límite de caracteres de Telegram (4096) 
+  y el formato HTML donde ya se usa <b> y <i>
+- Después de aplicar, correr los tests existentes
+- Confirmar con un ejemplo de output real (print o mensaje de prueba) 
+  que el formato nuevo se ve como el ejemplo de la sección 5

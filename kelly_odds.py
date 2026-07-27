@@ -7944,7 +7944,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             _ap_n       = "✅ APOSTAR" if _ci_n.get("apostar") is True else (
                           "❌ PASAR" if _ci_n.get("apostar") is False else "⚠️ VERIFICAR")
             _cc_n       = _ci_n.get("confianza", "N/D")
-            _cr_n       = (_ci_n.get("razonamiento") or "")[:500]
+            _cr_n       = _wrap_reasoning((_ci_n.get("razonamiento") or "")[:500])
             _all_mkts_n = a.get("all_markets", {})
             _mkts_txt   = ""
             for _lbl, _m in _all_mkts_n.items():
@@ -8422,16 +8422,11 @@ def build_analizar_text(result: dict) -> list:
     p2 = SEP + "🎓 <b>PANEL</b>\n"
     if experts:
         for ex in experts:
-            ap  = "✅" if ex.get("apostar") is True else ("❌" if ex.get("apostar") is False else "⚪")
-            ec  = _ci_icons.get(ex.get("confianza",""),"⚪")
-            raz = (ex.get("razonamiento") or "").strip()
-            if len(raz) > 250:
-                cut = raz[:250]
-                for sp in (".", "!", "?", ";"):
-                    idx = cut.rfind(sp)
-                    if idx > 100: cut = cut[:idx+1]; break
-                raz = cut
-            p2 += f"<b>{ex['nombre']}</b> {ap} {ec} — <i>{raz}</i>\n"
+            ap       = "✅" if ex.get("apostar") is True else ("❌" if ex.get("apostar") is False else "⚪")
+            conf_lbl = ex.get("confianza", "") or ""
+            ec       = _ci_icons.get(conf_lbl, "⚪")
+            raz      = _wrap_reasoning((ex.get("razonamiento") or "").strip())
+            p2 += f"🎓 <b>{ex['nombre']}</b>   {ap}  {ec} {conf_lbl}\n<i>{raz}</i>\n\n"
     else:
         if not cands and all_mkts:
             pos = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
@@ -8444,28 +8439,29 @@ def build_analizar_text(result: dict) -> list:
         else:
             p2 += "ℹ️ Sin panel\n"
 
-    # Recomendación (máx 200 chars)
-    panel_razon = (ci.get("razonamiento") or "").strip()
-    if len(panel_razon) > 200:
-        cut = panel_razon[:200]
-        for sp in (".", "!", "?", ";"):
-            idx = cut.rfind(sp)
-            if idx > 80: cut = cut[:idx+1]; break
-        panel_razon = cut
+    # Recomendación — _wrap_reasoning da formato de flechas al razonamiento del panel
+    panel_razon = _wrap_reasoning((ci.get("razonamiento") or "").strip())
 
-    p2 += SEP
     if final_apostar is True and best_c:
         _blr = (best_c.get("label","?")
                 .replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ",""))
-        p2 += (f"📋 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
-               f"Pick: <b>{_blr}</b> @ {best_c.get('odds',0):.2f} {best_c.get('book','')} | Stake ${best_c.get('stake',0):.0f}\n")
-        if panel_razon: p2 += f"<i>{panel_razon}</i>\n"
+        p2 += (f"\n{_DIV2}\n"
+               f"🎯 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
+               f"{_DIV2}\n\n"
+               f"Pick:   <b>{_blr}</b>\n"
+               f"Cuota:  @{best_c.get('odds',0):.2f} ({best_c.get('book','')})\n"
+               f"Stake:  ${best_c.get('stake',0):.0f}\n")
+        if panel_razon: p2 += f"\n<i>{panel_razon}</i>\n"
     elif final_apostar is False:
-        p2 += "📋 <b>RECOMENDACIÓN: ❌ PASAR</b>\n"
-        if panel_razon: p2 += f"<i>{panel_razon}</i>\n"
+        p2 += (f"\n{_DIV2}\n"
+               f"🎯 <b>RECOMENDACIÓN: ❌ PASAR</b>\n"
+               f"{_DIV2}\n")
+        if panel_razon: p2 += f"\n<i>{panel_razon}</i>\n"
     else:
-        p2 += "📋 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
-        if panel_razon: p2 += f"<i>{panel_razon}</i>\n"
+        p2 += (f"\n{_DIV2}\n"
+               f"🎯 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
+               f"{_DIV2}\n")
+        if panel_razon: p2 += f"\n<i>{panel_razon}</i>\n"
 
     _pmw = result.get("pinnacle_mov_warn","")
     if _pmw: p2 += f"{SEP}{_pmw}\n"
@@ -12653,10 +12649,37 @@ def panel_expertos(game_data: dict, sport: str,
         _final_razon = (base.get("razonamiento", "") or "") + f" {_panel_tag}"
 
     # Hard limit: 500 caracteres máximo sin importar la fuente
-    merged["razonamiento"] = _final_razon[:500]
+    merged["razonamiento"] = _wrap_reasoning(_final_razon)[:500]
 
     merged["_votos_favor"] = votos_favor   # expuesto para bypass-veto guard en analyze_game_full
     return merged
+
+
+def _wrap_reasoning(text: str, max_lines: int = 4) -> str:
+    """
+    Format a long reasoning paragraph as short arrow-prefixed lines for mobile.
+
+    First clause stays as the opening line (the key stat/comparison).
+    Each subsequent clause gets '→ ' prefix.
+    Caps at max_lines total; any excess is replaced with '...'.
+    If the text is already short (≤ 1 clause), it is returned unchanged.
+    """
+    if not text or not text.strip():
+        return text
+    import re as _re_wr
+    raw = text.strip()
+    # Split on ". " or " — " or "; "
+    parts = _re_wr.split(r'\.\s+| — |;\s+', raw)
+    parts = [p.strip().rstrip('.') for p in parts if p.strip()]
+    if len(parts) <= 1:
+        return raw
+    lines = [parts[0]]
+    for p in parts[1:]:
+        if len(lines) >= max_lines:
+            lines.append("...")
+            break
+        lines.append(f"→ {p}")
+    return "\n".join(lines)
 
 
 def _claude_block(claude: "dict | None") -> str:
@@ -12674,7 +12697,7 @@ def _claude_block(claude: "dict | None") -> str:
     conf    = claude.get("confianza", "N/D")
     pick    = claude.get("pick", "N/D")
     apostar = claude.get("apostar", True)
-    reason  = claude.get("razonamiento", "")
+    reason  = _wrap_reasoning(claude.get("razonamiento", "") or "")
     pos     = claude.get("factores_positivos", [])
     neg     = claude.get("factores_negativos", [])
     issues  = claude.get("datos_inconsistentes") or []
