@@ -2590,6 +2590,8 @@ def fetch_probable_pitchers_today():
                             if abs(_era_reg - _era_orig) > 0.15:
                                 print(f"  📊 ERA regresada: {_era_orig:.2f} → {_era_reg:.2f} ({_ip_val:.0f} inn)")
                             result[key][_era_key] = _era_reg
+                            # Preserve official season ERA (pre-regression) for display
+                            result[key][_era_key + "_raw"] = _era_orig
                             # Avg IP per start — needed by _pitcher_adjusted_ra()
                             _gs_val = int(_ip_stat.get('gamesStarted', 1) or 1)
                             _ip_key = 'home_avg_ip' if _pid_r == 'home_id' else 'away_avg_ip'
@@ -5565,6 +5567,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
         p_data    = _lookup_pitcher_data(home, away, pitchers)
         h_era     = p_data.get("home_era", 4.50)
         a_era     = p_data.get("away_era", 4.50)
+        h_era_raw = p_data.get("home_era_raw")   # official ERA before regression (display only)
+        a_era_raw = p_data.get("away_era_raw")   # official ERA before regression (display only)
         h_pname   = p_data.get("home_name", "TBD")
         a_pname   = p_data.get("away_name", "TBD")
 
@@ -6646,8 +6650,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
             "stats_fallback":   _stats_fallback_note,  # set when 4.5 default used
             "pname_home":    h_pname,   # raw pitcher name
             "pname_away":    a_pname,   # raw pitcher name
-            "era_home":      h_era,     # raw ERA float
-            "era_away":      a_era,     # raw ERA float
+            "era_home":      h_era,     # regressed ERA (used in all calculations)
+            "era_away":      a_era,     # regressed ERA (used in all calculations)
+            "era_home_raw":  h_era_raw, # official season ERA (pre-regression, display only)
+            "era_away_raw":  a_era_raw, # official season ERA (pre-regression, display only)
             "fip_home":      h_fip,     # MLB A4
             "fip_away":      a_fip,     # MLB A4
             "hand_home":     h_hand,    # MLB A5
@@ -7512,6 +7518,8 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             pn_a = ctx.get("pname_away", "TBD")
             er_h = ctx.get("era_home", 4.50)
             er_a = ctx.get("era_away", 4.50)
+            er_h_raw = ctx.get("era_home_raw")   # official ERA pre-regression (display only)
+            er_a_raw = ctx.get("era_away_raw")   # official ERA pre-regression (display only)
             fip_h  = ctx.get("fip_home")
             fip_a  = ctx.get("fip_away")
             hnd_h  = ctx.get("hand_home")
@@ -7541,10 +7549,15 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     _k9_h_inline = f"  |  K/9: {float(_k9_h_v):.1f}"
             except Exception:
                 pass
+            _era_h_disp = (
+                f"ERA real: {er_h_raw:.2f} | ERA ajustado: {er_h:.2f}"
+                if er_h_raw is not None and abs(float(er_h) - er_h_raw) >= 0.03
+                else f"ERA {float(er_h):.2f}"
+            )
             ctx_lines  = (
                 f"🎯 PITCHEO\n"
                 f"🔵 Pitcher local: {pn_h}{h_hand_txt}\n"
-                f"   ERA: {er_h:.2f} — {_era_label(er_h)}{_k9_h_inline}\n"
+                f"   {_era_h_disp} — {_era_label(er_h)}{_k9_h_inline}\n"
             )
             if fip_h is not None:
                 ctx_lines += (
@@ -7574,9 +7587,14 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     _k9_a_inline = f"  |  K/9: {float(_k9_a_v):.1f}"
             except Exception:
                 pass
+            _era_a_disp = (
+                f"ERA real: {er_a_raw:.2f} | ERA ajustado: {er_a:.2f}"
+                if er_a_raw is not None and abs(float(er_a) - er_a_raw) >= 0.03
+                else f"ERA {float(er_a):.2f}"
+            )
             ctx_lines += (
                 f"🔴 Pitcher visita: {pn_a}{a_hand_txt}\n"
-                f"   ERA: {er_a:.2f} — {_era_label(er_a)}{_k9_a_inline}\n"
+                f"   {_era_a_disp} — {_era_label(er_a)}{_k9_a_inline}\n"
             )
             if fip_a is not None:
                 ctx_lines += (
@@ -8187,12 +8205,23 @@ def _clean_era_form(eras: list) -> list:
     return [e for e in (eras or []) if isinstance(e, (int, float)) and e > 0.0]
 
 
-def _pitcher_line(name: str, era: float, fip, hand: str, pform, side: str) -> str:
-    """Compact 1-line pitcher summary with optional form trend."""
+def _pitcher_line(name: str, era: float, fip, hand: str, pform, side: str,
+                  era_raw: "float | None" = None) -> str:
+    """Compact 1-line pitcher summary with optional form trend.
+
+    era      — regressed ERA (used in all calculations; passed here for labeling).
+    era_raw  — official MLB season ERA before regression.  When provided and the
+               difference vs era is ≥ 0.03, both values are shown with labels so
+               users can cross-reference against ESPN/MLB.com without confusion.
+    """
     hand_map = {"L": "zurdo", "R": "diestro", "S": "ambidiestro"}
     hand_txt = f" ({hand_map.get(hand, '')})" if hand else ""
     fip_txt  = f" | FIP {fip:.2f}" if fip is not None else ""
-    base     = f"{side} {name}{hand_txt}: ERA {era:.2f}{fip_txt} — {_era_label(era)}"
+    if era_raw is not None and abs(era - era_raw) >= 0.03:
+        era_display = f"ERA real: {era_raw:.2f} | ERA ajustado: {era:.2f}"
+    else:
+        era_display = f"ERA {era:.2f}"
+    base     = f"{side} {name}{hand_txt}: {era_display}{fip_txt} — {_era_label(era)}"
     if pform:
         clean = _clean_era_form(pform.get("eras", []))
         if clean:
@@ -8311,11 +8340,15 @@ def build_analizar_text(result: dict) -> list:
         sc_h  = ctx.get("statcast_home")
         sc_a  = ctx.get("statcast_away")
 
+        _er_h_raw = ctx.get("era_home_raw")
+        _er_a_raw = ctx.get("era_away_raw")
         p1 += f"🎯 <b>PITCHEO</b>\n"
-        p1 += _pitcher_line(pn_h, er_h, fip_h, hnd_h, pf_h, f"🔵 {home_es}") + "\n"
+        p1 += _pitcher_line(pn_h, er_h, fip_h, hnd_h, pf_h, f"🔵 {home_es}",
+                            era_raw=_er_h_raw) + "\n"
         _sch = _statcast_alert_block(pn_h, sc_h, er_h)
         if _sch: p1 += _sch
-        p1 += _pitcher_line(pn_a, er_a, fip_a, hnd_a, pf_a, f"🔴 {away_es}") + "\n"
+        p1 += _pitcher_line(pn_a, er_a, fip_a, hnd_a, pf_a, f"🔴 {away_es}",
+                            era_raw=_er_a_raw) + "\n"
         _sca = _statcast_alert_block(pn_a, sc_a, er_a)
         if _sca: p1 += _sca
         try:

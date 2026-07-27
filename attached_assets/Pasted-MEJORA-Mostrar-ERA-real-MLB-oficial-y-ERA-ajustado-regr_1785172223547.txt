@@ -1,0 +1,60 @@
+MEJORA — Mostrar ERA real (MLB oficial) y ERA ajustado (regresado) por separado
+
+CONTEXTO: El bot muestra actualmente solo el ERA regresado (_regressed_era()) en 
+los mensajes de PITCHEO, sin indicar que fue ajustado. Esto genera confusión al 
+comparar contra ESPN/MLB.com, donde el número no coincide exactamente (ej. 3.32 
+real vs 3.39 mostrado). El ajuste es correcto y debe seguir usándose para todos 
+los cálculos internos — el cambio es solo de visualización, para mostrar ambos 
+valores con etiqueta clara.
+
+═══════════════════════════════════════════════
+DÓNDE APLICAR
+═══════════════════════════════════════════════
+
+En build_analizar_text() y en notify_game_analysis(), sección PITCHEO 
+(donde se construye la línea con _pitcher_line() o el bloque equivalente 
+que muestra "ERA X.XX | FIP X.XX — [label]"):
+
+El código actual construye p_data con home_era/away_era ya regresados 
+(vía _regressed_era() llamado dentro de fetch_probable_pitchers_today()). 
+Necesitamos conservar también el ERA crudo de temporada (antes de la 
+regresión) para poder mostrar ambos.
+
+1. En fetch_probable_pitchers_today(), donde se llama _regressed_era():
+
+    _era_orig = result[key][_era_key]
+    _era_reg = _regressed_era(_era_orig, _ip_val)
+    ...
+    result[key][_era_key] = _era_reg
+
+   Agregar también el valor original sin modificar en el dict result, 
+   con una clave nueva (ej. 'home_era_raw' / 'away_era_raw'), de modo 
+   que quede disponible más adelante junto al regresado.
+
+2. En build_analizar_text() y en notify_game_analysis(), donde se arma 
+   la línea del pitcher (actualmente algo como):
+
+    f"{home_es} {ph_name}{h_hand_txt}: ERA {er_h:.2f}{fip_txt} — {_era_label(er_h)}"
+
+   Cambiar el formato para mostrar ambos valores cuando difieran en 
+   0.03 o más (para no mostrar redundancia cuando la diferencia es 
+   insignificante):
+
+    ERA real: {era_raw:.2f} | ERA ajustado: {era_regresado:.2f} — {_era_label(era_regresado)}
+
+   Si la diferencia es menor a 0.03, mostrar solo un valor como hasta 
+   ahora (no vale la pena duplicar cuando son prácticamente iguales).
+
+═══════════════════════════════════════════════
+IMPORTANTE
+═══════════════════════════════════════════════
+- Todos los cálculos internos (pitcher_run_adjustment, proyección de 
+  totales, EV, probabilidades) DEBEN seguir usando el ERA regresado — 
+  esto es puramente un cambio de qué se muestra en el mensaje, no de 
+  qué se calcula
+- Aplicar el mismo tratamiento en las dos funciones (build_analizar_text 
+  para /analizar y notify_game_analysis para las alertas automáticas) 
+  para que sea consistente en ambos canales
+- Después de aplicar, correr los tests existentes
+- Confirmar con un ejemplo real que un pitcher con ERA real 3.32 y 
+  ajustado 3.39 ahora muestra ambos valores etiquetados
