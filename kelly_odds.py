@@ -9973,6 +9973,23 @@ def check_results():
         resolved: dict = {}   # bkey → {result, profit_loss}
         _elo_updated: set = set()
 
+        # ── ELO update: todos los juegos terminados del día ───────────────────
+        # Corre independientemente de si el usuario confirmó una apuesta o no.
+        # Se ejecuta una sola vez por juego (deduplicado por _elo_updated).
+        for _score in scores:
+            _gk = f"{_score['home']}|{_score['away']}|{_score['home_score']}-{_score['away_score']}"
+            if _gk not in _elo_updated:
+                _elo_updated.add(_gk)
+                try:
+                    if _score["home_score"] != _score["away_score"]:
+                        _w = _score["home"] if _score["home_score"] > _score["away_score"] else _score["away"]
+                        _l = _score["away"] if _w == _score["home"] else _score["home"]
+                        update_elo(_w, _l)
+                    else:
+                        update_elo(_score["home"], _score["away"], draw=True)
+                except Exception as _ee:
+                    print(f"  ⚠️  update_elo error: {_ee}")
+
         for bet in pending:
             match  = bet.get("match", "")
             team   = bet.get("team", "")
@@ -9996,19 +10013,6 @@ def check_results():
             result      = None
             profit_loss = 0.0
             home_won    = score["home_score"] > score["away_score"]
-
-            _gk = f"{score['home']}|{score['away']}|{score['home_score']}-{score['away_score']}"
-            if _gk not in _elo_updated:
-                _elo_updated.add(_gk)
-                try:
-                    if score["home_score"] != score["away_score"]:
-                        _w = score["home"] if score["home_score"] > score["away_score"] else score["away"]
-                        _l = score["away"] if _w == score["home"] else score["home"]
-                        update_elo(_w, _l)
-                    else:
-                        update_elo(score["home"], score["away"], draw=True)
-                except Exception as _ee:
-                    print(f"  ⚠️  update_elo error: {_ee}")
 
             if mtype in ("h2h", "moneyline", ""):
                 is_home = (score["home"].lower() in team.lower()
@@ -16052,10 +16056,7 @@ def run_scan():
                     total_bets = total_bets + _tt_bets
             except Exception as _tte:
                 print(f"  ⚠️  analyze_team_totals error: {_tte}")
-            if not any(os.environ.get(k) for k in ["BETONLINE_KEY", "SECOND_BOOK"]):
-                arbs = []
-            else:
-                arbs = scan_arbitrage(games, sport_key)
+            arbs = scan_arbitrage(games, sport_key)
             for m in sharp_moves:
                 m["sport"] = sport_key
             short = sport_key.split("_", 1)[-1].upper()
