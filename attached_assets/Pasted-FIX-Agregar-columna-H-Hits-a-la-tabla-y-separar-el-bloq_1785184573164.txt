@@ -1,0 +1,90 @@
+FIX — Agregar columna H (Hits) a la tabla y separar el bloque "Forma/Statcast"
+
+═══════════════════════════════════════════════
+1. AGREGAR COLUMNA H (HITS) A LA TABLA DE PITCHEO
+═══════════════════════════════════════════════
+
+La tabla actual tiene: W-L, ERA, WHIP, IP, K, BB, HR — falta H (hits 
+permitidos), que sí estaba especificado en el prompt original de la tabla.
+
+fetch_pitcher_stats() (o la función que arma los datos para esta tabla) 
+ya debería tener acceso al campo "hits" del mismo endpoint de MLB Stats 
+API que trae los demás campos — si no está siendo extraído, agregarlo.
+
+Formato de tabla actualizado:
+
+              {Pitcher Local}      {Pitcher Visitante}
+W-L:          X-X                  X-X
+ERA:          R:X.XX/A:X.XX        R:X.XX/A:X.XX
+WHIP:         X.XX                 X.XX
+IP:           XXX.X                XXX.X
+H:            XX                   XX
+K:            XX                   XX
+BB:           XX                   XX
+HR:           XX                   XX
+
+(H va justo después de IP, antes de K — orden lógico de lectura de una 
+línea de box score)
+
+═══════════════════════════════════════════════
+2. SEPARAR VISUALMENTE EL BLOQUE "FORMA" Y "STATCAST" DE LA TABLA
+═══════════════════════════════════════════════
+
+ANTES (pegado justo debajo de la tabla, sin espacio):
+[TABLA]
+Forma Schultz: EN DECLIVE ⚠️ | 7.2 → 1.8 → 14.06
+Forma Fried: MEJORANDO 📈 | 7.5 → 9.0
+🔬 Statcast Noah Schultz:
+  xERA: 6.03 ⚠️ (peor que ERA — ha tenido suerte)
+  ...
+
+DESPUÉS (línea en blanco después de la tabla, y cada pitcher en su 
+propio bloque con sangría, igual que ya se hizo en otras secciones):
+
+[TABLA]
+
+📈 FORMA RECIENTE (últimas 3 salidas)
+
+🔵 Schultz: EN DECLIVE ⚠️
+  ERA por salida: 7.2 → 1.8 → 14.06
+
+🔴 Fried: MEJORANDO 📈
+  ERA por salida: 7.5 → 9.0
+
+🔬 STATCAST
+
+🔵 Noah Schultz
+  xERA: 6.03 ⚠️ (peor que ERA — ha tenido suerte)
+  Whiff%: 20.3% ⚠️ (bajo)
+  Hard hit%: 39.6% (normal)
+  Barrel%: 10.7%
+
+🔴 Max Fried
+  xERA: 2.48 ✅ (mejor que ERA — infravalorado)
+  Whiff%: 24.0% (sólido)
+  Hard hit%: 30.5% ✅ (controlado)
+  Barrel%: 1.7%
+
+⚾ Bullpen ERA:
+  Chicago White Sox: 4.10
+  New York Yankees: 3.41
+
+═══════════════════════════════════════════════
+DÓNDE APLICAR
+═══════════════════════════════════════════════
+build_analizar_text() y notify_game_analysis() — la función que arma la 
+tabla de PITCHEO y el contenido inmediatamente después (Forma + Statcast + 
+Bullpen ERA).
+
+═══════════════════════════════════════════════
+IMPORTANTE
+═══════════════════════════════════════════════
+- NO cambiar ningún valor ni cálculo, solo agregar el campo H y mejorar 
+  el espaciado
+- Después de aplicar, correr los tests existentes
+- Confirmar con un ejemplo real (Chicago White Sox vs New York Yankees, 
+  Schultz y Fried) que la tabla ahora incluye H y que Forma/Statcast 
+  quedan claramente separados de la tabla con espacio y sangría
+- Recordar hacer commit y PUSH a GitHub al terminar (ya tuvimos el 
+  problema de que los cambios se quedaban solo en Replit sin llegar a 
+  GitHub) — confirma explícitamente que hiciste el push esta vez
