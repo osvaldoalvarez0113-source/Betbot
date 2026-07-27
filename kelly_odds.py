@@ -7723,16 +7723,16 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                 if _rs_r or _bat_r:
                     ctx_lines += f"\n{_ic_r} {_te_r}\n"
                     if _rs_r:
-                        ctx_lines += f"  Anota:  {ctx[_rs_k]}/jgo\n"
-                        ctx_lines += f"  Recibe: {ctx[_ra_k]}/jgo\n"
+                        ctx_lines += f"  Anota: {ctx[_rs_k]}/jgo | Recibe: {ctx[_ra_k]}/jgo\n"
                     if _bat_r:
                         _ops_r = _bat_r.get("ops")
                         _kp_r  = _bat_r.get("k_pct")
-                        ctx_lines += f"  AVG:    {_bat_r['avg']:.3f}\n"
+                        _avg_ln = f"  AVG: {_bat_r['avg']:.3f}"
                         if _ops_r is not None:
-                            ctx_lines += f"  OPS:    {_ops_r:.3f} ({_ops_label(_ops_r)})\n"
+                            _avg_ln += f" | OPS: {_ops_r:.3f} ({_ops_label(_ops_r)})"
+                        ctx_lines += _avg_ln + "\n"
                         if _kp_r is not None:
-                            ctx_lines += f"  K%:     {_kp_r:.0f}%\n"
+                            ctx_lines += f"  K%: {_kp_r:.0f}%\n"
             ctx_lines += "\n"
             # ──────────────────────────────────────────────────────────────
 
@@ -7820,7 +7820,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     (away_es, _fo_a, _fb_a, _fa_a, "🔴"),
                 ):
                     ctx_lines += f"\n{_ic_n2} {_te_n2}\n"
-                    ctx_lines += f"  Ofensiva: {_ops_frag(_fo_n2)}\n"
+                    ctx_lines += f"  Ofensiva: {_ops_frag(_fo_n2).replace('OPS-14d ', '')}\n"
                     ctx_lines += f"  Bullpen:  {_ffl(_fb_n2)}\n"
                     ctx_lines += f"  Abridor:  {_ffl(_fa_n2)}\n"
                 ctx_lines += "\n"
@@ -8403,11 +8403,10 @@ def _supplementary_context_blocks(
     rec_a = ctx.get("team_record_away")
     if rec_h or rec_a:
         hdr = "🏆 RÉCORD" if is_notify else "🏆 <b>RÉCORD</b>"
-        line_h = f"{home_es}: {rec_h['wins']}-{rec_h['losses']}" if rec_h else ""
-        line_a = f"{away_es}: {rec_a['wins']}-{rec_a['losses']}" if rec_a else ""
-        both = " | ".join(x for x in [line_h, line_a] if x)
-        if both:
-            out += f"{hdr}  {both}\n"
+        out += f"{hdr}\n"
+        if rec_h: out += f"  🔵 {home_es}: {rec_h['wins']}-{rec_h['losses']}\n"
+        if rec_a: out += f"  🔴 {away_es}: {rec_a['wins']}-{rec_a['losses']}\n"
+        out += "\n"
 
     # ── 🏠 HOME/AWAY ───────────────────────────────────────────────────────
     sp_h = ctx.get("h_splits")
@@ -8416,13 +8415,12 @@ def _supplementary_context_blocks(
         hdr = "🏠 HOME/AWAY" if is_notify else "🏠 <b>HOME/AWAY</b>"
         out += f"{hdr}\n"
         if sp_h:
-            out += (f"   {home_es} en casa: "
-                    f"anota {sp_h['home_rs']} | recibe {sp_h['home_ra']} | "
-                    f"gana {round(sp_h['home_wpct'] * 100):.0f}%\n")
+            out += (f"  🔵 {home_es} (en casa)\n"
+                    f"    Anota: {sp_h['home_rs']} | Recibe: {sp_h['home_ra']} | Gana: {round(sp_h['home_wpct'] * 100):.0f}%\n")
         if sp_a:
-            out += (f"   {away_es} de visita: "
-                    f"anota {sp_a['away_rs']} | recibe {sp_a['away_ra']} | "
-                    f"gana {round(sp_a['away_wpct'] * 100):.0f}%\n")
+            out += (f"  🔴 {away_es} (de visita)\n"
+                    f"    Anota: {sp_a['away_rs']} | Recibe: {sp_a['away_ra']} | Gana: {round(sp_a['away_wpct'] * 100):.0f}%\n")
+        out += "\n"
 
     # ── ☀️ DÍA/NOCHE ──────────────────────────────────────────────────────
     dn_h = ctx.get("day_night_home")
@@ -8430,16 +8428,17 @@ def _supplementary_context_blocks(
     if dn_h or dn_a:
         hdr = "☀️ DÍA/NOCHE" if is_notify else "☀️ <b>DÍA/NOCHE</b>"
         out += f"{hdr}\n"
-        for team_es, dn in ((home_es, dn_h), (away_es, dn_a)):
-            if not dn:
+        for _te_dn, _dn, _ic_dn in ((home_es, dn_h, "🔵"), (away_es, dn_a, "🔴")):
+            if not _dn:
                 continue
-            parts = []
-            if dn.get("day_gp"):
-                parts.append(f"día {round(dn['day_wpct'] * 100):.0f}% W ({dn['day_wins']}-{dn['day_losses']})")
-            if dn.get("night_gp"):
-                parts.append(f"noche {round(dn['night_wpct'] * 100):.0f}% W ({dn['night_wins']}-{dn['night_losses']})")
-            if parts:
-                out += f"   {team_es}: {' | '.join(parts)}\n"
+            _parts_dn = []
+            if _dn.get("day_gp"):
+                _parts_dn.append(f"día {round(_dn['day_wpct'] * 100):.0f}% W ({_dn['day_wins']}-{_dn['day_losses']})")
+            if _dn.get("night_gp"):
+                _parts_dn.append(f"noche {round(_dn['night_wpct'] * 100):.0f}% W ({_dn['night_wins']}-{_dn['night_losses']})")
+            if _parts_dn:
+                out += f"  {_ic_dn} {_te_dn}: {' | '.join(_parts_dn)}\n"
+        out += "\n"
 
     # ── ⚔️ VS ZURDOS/DERECHOS ─────────────────────────────────────────────
     lr_notes = ctx.get("lr_notes", [])
@@ -8667,7 +8666,7 @@ def build_analizar_text(result: dict) -> list:
                 (away_es, _fo_a_tg, _fb_a_tg, _fa_a_tg, "🔴"),
             ):
                 p1 += f"\n{_ic_f} <b>{_te_f}</b>\n"
-                p1 += f"  Ofensiva: {_ops_frag_tg(_fo_f)}\n"
+                p1 += f"  Ofensiva: {_ops_frag_tg(_fo_f).replace('OPS-14d ', '')}\n"
                 p1 += f"  Bullpen:  {_ffl_tg(_fb_f)}\n"
                 p1 += f"  Abridor:  {_ffl_tg(_fa_f)}\n"
             p1 += SEP
@@ -8733,14 +8732,14 @@ def build_analizar_text(result: dict) -> list:
                 if _rs_v or _bat_v:
                     _cl += f"\n{_ic_c} <b>{_te_c}</b>\n"
                     if _rs_v:
-                        _cl += f"  Anota:  {ctx[_rs_k]}/jgo\n"
-                        _cl += f"  Recibe: {ctx[_ra_k]}/jgo\n"
+                        _cl += f"  Anota: {ctx[_rs_k]}/jgo | Recibe: {ctx[_ra_k]}/jgo\n"
                     if _bat_v:
-                        _cl += f"  AVG:    {_bat_v['avg']:.3f}\n"
+                        _avg_line = f"  AVG: {_bat_v['avg']:.3f}"
                         if _bat_v.get("ops"):
-                            _cl += f"  OPS:    {_bat_v['ops']:.3f} ({_ops_label(_bat_v['ops'])})\n"
+                            _avg_line += f" | OPS: {_bat_v['ops']:.3f} ({_ops_label(_bat_v['ops'])})"
+                        _cl += _avg_line + "\n"
                         if _bat_v.get("k_pct"):
-                            _cl += f"  K%:     {_bat_v['k_pct']:.0f}%\n"
+                            _cl += f"  K%: {_bat_v['k_pct']:.0f}%\n"
             # Global (non-team-specific) items
             _gl = []
             _pin2 = ctx.get("pinnacle_odds")
