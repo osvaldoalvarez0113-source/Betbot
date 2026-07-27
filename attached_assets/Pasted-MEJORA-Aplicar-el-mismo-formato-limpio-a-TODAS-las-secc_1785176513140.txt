@@ -1,0 +1,131 @@
+MEJORA — Aplicar el mismo formato limpio a TODAS las secciones restantes
+
+CONTEXTO: La sección PITCHEO ya quedó con tabla comparativa limpia (bien lograda). 
+Pero las siguientes secciones SIGUEN en formato apretado de una sola línea por 
+dato, sin separación: CLAVES, FORMA 14d, RÉCORD, HOME/AWAY, DÍA/NOCHE, MERCADOS.
+
+Aplicar el MISMO principio ya usado en PITCHEO: separar por equipo/dato con 
+saltos de línea propios, sangría de 2 espacios para sub-datos, línea en blanco 
+entre bloques.
+
+═══════════════════════════════════════════════
+CLAVES — reformatear así
+═══════════════════════════════════════════════
+ANTES:
+📊 CLAVES
+  Pittsburgh Pirates: anota 5.2 | recibe 4.8/jgo
+  Arizona Diamondbacks: anota 4.5 | recibe 4.5/jgo
+  Pittsburgh Pirates: AVG 0.260 | OPS 0.760 (bueno ✅) | K% 24%
+  Arizona Diamondbacks: AVG 0.242 | OPS 0.709 (promedio ⚪) | K% 19%
+  Calor (85°F): +0.3 carreras ajustadas
+  4mph cruzado (sin ajuste) [forecast]
+  Pittsburgh Pirates: Billy Cook, Brandon Lowe, Bryan Reynolds
+  Arizona Diamondbacks: Adrian Del Castillo, Corbin Carroll, Gabriel Moreno
+
+DESPUÉS:
+📊 CLAVES
+
+🔵 Pittsburgh Pirates
+  Anota: 5.2/jgo | Recibe: 4.8/jgo
+  AVG: 0.260 | OPS: 0.760 ✅ (bueno)
+  K%: 24%
+
+🔴 Arizona Diamondbacks
+  Anota: 4.5/jgo | Recibe: 4.5/jgo
+  AVG: 0.242 | OPS: 0.709 ⚪ (promedio)
+  K%: 19%
+
+🌡️ Clima: 85°F (+0.3 carreras ajustadas)
+💨 Viento: 4mph cruzado (sin ajuste)
+
+🤕 Lesionados:
+  Pittsburgh Pirates: Billy Cook, Brandon Lowe, Bryan Reynolds
+  Arizona Diamondbacks: Adrian Del Castillo, Corbin Carroll, Gabriel Moreno
+
+═══════════════════════════════════════════════
+RÉCORD + HOME/AWAY + DÍA/NOCHE — reformatear así
+═══════════════════════════════════════════════
+ANTES:
+🏆 RÉCORD  Pittsburgh Pirates: 54-52 | Arizona Diamondbacks: 55-51
+🏠 HOME/AWAY
+  Pittsburgh Pirates en casa: anota 5.56 | recibe 5.17 | gana 52%
+  Arizona Diamondbacks de visita: anota 4.26 | recibe 4.55 | gana 45%
+☀️ DÍA/NOCHE
+  Pittsburgh Pirates: noche 51% W (54-52)
+  Arizona Diamondbacks: noche 52% W (55-51)
+
+DESPUÉS:
+🏆 RÉCORD DE TEMPORADA
+  🔵 Pittsburgh Pirates: 54-52
+  🔴 Arizona Diamondbacks: 55-51
+
+🏠 HOME/AWAY
+  🔵 Pittsburgh Pirates (en casa)
+    Anota: 5.56 | Recibe: 5.17 | Gana: 52%
+  🔴 Arizona Diamondbacks (de visita)
+    Anota: 4.26 | Recibe: 4.55 | Gana: 45%
+
+☀️ DÍA/NOCHE
+  🔵 Pittsburgh Pirates: 51% W en noche (54-52)
+  🔴 Arizona Diamondbacks: 52% W en noche (55-51)
+
+═══════════════════════════════════════════════
+FORMA 14d — reformatear así
+═══════════════════════════════════════════════
+ANTES:
+📈 FORMA 14d
+  Pittsburgh Pirates: OPS-14d 0.669 (NORMAL) | bullpen (NORMAL) | abridor (NORMAL)
+  Arizona Diamondbacks: OPS-14d 0.866 (CALIENTE) | bullpen (QUEMADO) | abridor (EN RACHA)
+
+DESPUÉS:
+📈 FORMA 14d
+
+🔵 Pittsburgh Pirates
+  Ofensiva: 0.669 OPS (NORMAL)
+  Bullpen: NORMAL
+  Abridor: NORMAL
+
+🔴 Arizona Diamondbacks
+  Ofensiva: 0.866 OPS 🔥 (CALIENTE)
+  Bullpen: QUEMADO ⚠️
+  Abridor: EN RACHA 📈
+
+═══════════════════════════════════════════════
+MERCADOS — asegurar que el fix anterior de 2 líneas se aplicó a TODOS los mercados
+═══════════════════════════════════════════════
+En la captura reciente, esta sección sigue mostrando cada mercado en UNA línea 
+larga (ej. "✅ 🏃 Pittsburgh Pirates RL -1.5 EV +61.5% Prob 60% @2.70 [Bovada]" 
+todo junto). Confirmar que el fix de 2 líneas del prompt anterior (_mkt_row) 
+se aplicó realmente a build_analizar_text() Y a notify_game_analysis() — 
+parece que solo se aplicó parcialmente o no llegó a esta sección. Revisar y 
+aplicar el formato de 2 líneas + línea en blanco entre mercados, igual que 
+se especificó antes:
+
+✅ 🏃 Pittsburgh Pirates RL -1.5
+  EV +61.5% | Prob 60% | @2.70 (Bovada)
+
+✅ 📈 OVER 9.5 carreras
+  EV +14.7% | Prob 57% | @2.00 (Bovada)
+
+➖ 🔵 Pittsburgh Pirates ML
+  EV +2.7% | Prob 56% | @1.84 (Bovada)
+
+(y así con cada mercado restante)
+
+═══════════════════════════════════════════════
+DÓNDE APLICAR
+═══════════════════════════════════════════════
+build_analizar_text() y notify_game_analysis() — todas las secciones 
+mencionadas arriba, en ambas funciones para mantener consistencia entre 
+Telegram y ntfy.
+
+═══════════════════════════════════════════════
+IMPORTANTE
+═══════════════════════════════════════════════
+- NO cambiar ningún valor, cálculo, EV, ni probabilidad
+- Si el mensaje total crece demasiado por el espaciado extra, usar el 
+  mecanismo ya existente de partes [p1, p2] para Telegram, priorizando 
+  que PITCHEO y MERCADOS (lo más importante para decidir) queden en p1
+- Después de aplicar, correr los tests existentes
+- Confirmar con un ejemplo real (Pittsburgh Pirates vs Arizona Diamondbacks) 
+  que TODAS las secciones —no solo PITCHEO— se ven con el espaciado nuevo
