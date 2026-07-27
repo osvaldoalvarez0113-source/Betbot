@@ -8674,9 +8674,7 @@ def build_analizar_text(result: dict) -> list:
     # ─── 7. 📊 CLAVES ─────────────────────────────────────────────────────────
     _kv = []
     if is_mlb:
-        if ctx.get("rs_home"):
-            _kv.append(f"📊 {home_es}: anota {ctx['rs_home']} | recibe {ctx['ra_home']}/jgo")
-            _kv.append(f"📊 {away_es}: anota {ctx['rs_away']} | recibe {ctx['ra_away']}/jgo")
+        # anota/recibe removed — covered by HOME/AWAY section
         for _te, _bk in ((home_es, "bat_home"), (away_es, "bat_away")):
             bat = ctx.get(_bk)
             if bat:
