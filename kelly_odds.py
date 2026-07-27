@@ -2858,7 +2858,9 @@ def _fetch_statcast_all(player_type: str = "pitcher") -> dict:
     import csv, io
 
     if player_type == "pitcher":
-        selections = "p_era,xera,whiff_percent,hard_hit_percent,barrel_batted_rate,oz_swing_percent"
+        # player_id included so fetch_statcast_pitcher_by_id can filter by MLBAM ID
+        # instead of relying on the broken &player_id= URL parameter (server ignores it)
+        selections = "player_id,p_era,xera,whiff_percent,hard_hit_percent,barrel_batted_rate,oz_swing_percent"
     else:
         selections = "xba,xslg,hard_hit_percent,barrel_batted_rate"
 
@@ -2894,6 +2896,7 @@ def _fetch_statcast_all(player_type: str = "pitcher") -> dict:
 
             if player_type == "pitcher":
                 result[key] = {
+                    "player_id":    row.get("player_id", ""),   # MLBAM ID for by-id lookup
                     "xera":         _safe_float(row.get("xera")),
                     "whiff_pct":    _safe_float(row.get("whiff_percent")),
                     "hard_hit_pct": _safe_float(row.get("hard_hit_percent")),
@@ -2950,78 +2953,73 @@ def fetch_statcast_pitcher_by_id(pitcher_id, pitcher_name: str = "") -> "dict | 
     if not pitcher_id:
         return None
 
-    import csv as _csv, io as _io, json as _jj
+    import json as _jj
 
     today = datetime.now(ET).strftime("%Y-%m-%d")
     ck    = f"{pitcher_id}_{today}"
     if ck in _statcast_pid_cache:
         return _statcast_pid_cache[ck]
 
-    # ── Disk cache (survives Railway restarts) ───────────────────────────────
+    # ── Per-pitcher disk cache (survives Railway restarts) ───────────────────
+    # Written by this function after a successful lookup; avoids scanning 541
+    # entries on every call when the result is already known.
     disk_path = f"/tmp/statcast_pid_{pitcher_id}_{today}.json"
     try:
         with open(disk_path) as _df:
             result = _jj.load(_df)
         _statcast_pid_cache[ck] = result
-        print(f"  🔬 Statcast disk-hit: {pitcher_name or pitcher_id} → "
+        print(f"  🔬 Statcast disk-hit: {pitcher_name or pitcher_id} (pid={pitcher_id}) → "
               f"xERA={result.get('xera') if result else 'N/A'}")
         return result
     except (FileNotFoundError, Exception):
         pass
 
-    # ── Live fetch — only this one pitcher ───────────────────────────────────
-    url = (
-        f"https://baseballsavant.mlb.com/leaderboard/custom"
-        f"?year={MLB_YEAR}&type=pitcher&min=1"
-        f"&player_id={pitcher_id}"
-        f"&selections=p_era,xera,whiff_percent,hard_hit_percent,"
-        f"barrel_batted_rate,oz_swing_percent"
-        f"&csv=true"
-    )
-    try:
-        r = requests.get(url, timeout=20,
-                         headers={"User-Agent": "Mozilla/5.0 (compatible; BetBot/1.0)"})
-        if r.status_code != 200:
-            print(f"  ⚠️  Statcast pid={pitcher_id} ({pitcher_name}): HTTP {r.status_code}")
-            _statcast_pid_cache[ck] = None
-            return None
-
-        reader = _csv.DictReader(_io.StringIO(r.text.lstrip('\ufeff')))
-        result = None
-        for row in reader:
+    # ── Lookup in full Statcast CSV (already disk-cached by _fetch_statcast_all) ──
+    # Previously this made a per-pitcher HTTP call using &player_id= in the URL,
+    # but Baseball Savant's custom leaderboard endpoint ignores that parameter and
+    # returns ALL pitchers — so both the home and away pitcher always got the same
+    # values (row #0 of the full leaderboard, whichever pitcher sorts first).
+    # Now we reuse the full CSV that _fetch_statcast_all already downloaded and
+    # cached, filtering in Python by the player_id column stored in each entry.
+    all_pitchers = _fetch_statcast_all("pitcher")
+    pid_str = str(pitcher_id)
+    result  = None
+    for _metrics in all_pitchers.values():
+        if str(_metrics.get("player_id", "")) == pid_str:
             result = {
-                "xera":         _safe_float(row.get("xera")),
-                "whiff_pct":    _safe_float(row.get("whiff_percent")),
-                "hard_hit_pct": _safe_float(row.get("hard_hit_percent")),
-                "barrel_pct":   _safe_float(row.get("barrel_batted_rate")),
-                "chase_pct":    _safe_float(row.get("oz_swing_percent")),
+                "xera":         _metrics.get("xera"),
+                "whiff_pct":    _metrics.get("whiff_pct"),
+                "hard_hit_pct": _metrics.get("hard_hit_pct"),
+                "barrel_pct":   _metrics.get("barrel_pct"),
+                "chase_pct":    _metrics.get("chase_pct"),
             }
-            break  # only 1 row expected per player_id
+            break
 
-        if result is None:
-            # player_id not found (e.g. pitcher has < 1 BF this season)
-            print(f"  ⚠️  Statcast pid={pitcher_id} ({pitcher_name}): 0 rows returned")
-            _statcast_pid_cache[ck] = None
-            return None
-
-        print(f"  🔬 Statcast {pitcher_name or pitcher_id} → "
-              f"xERA={result.get('xera')} whiff={result.get('whiff_pct')} "
-              f"[1 pitcher, not 541]")
-        _statcast_pid_cache[ck] = result
-
-        # Persist to disk
-        try:
-            with open(disk_path, "w") as _df:
-                _jj.dump(result, _df)
-        except Exception:
-            pass
-
-        return result
-
-    except Exception as _se:
-        print(f"  ⚠️  Statcast pid={pitcher_id} ({pitcher_name}) error: {_se}")
+    if result is None:
+        print(f"  ⚠️  Statcast pid={pitcher_id} ({pitcher_name}): "
+              f"no encontrado en leaderboard completo ({len(all_pitchers)} pitchers)")
         _statcast_pid_cache[ck] = None
         return None
+
+    # Diagnostic print — shows pitcher_id + name + values so Railway logs
+    # confirm that Keller and Kelly receive DIFFERENT values
+    print(f"  🔬 [DIAG] Statcast {pitcher_name} (pid={pitcher_id}) → "
+          f"xERA={result.get('xera')} "
+          f"whiff={result.get('whiff_pct')}% "
+          f"HH={result.get('hard_hit_pct')}% "
+          f"barrel={result.get('barrel_pct')}% "
+          f"[full CSV, filtered by player_id]")
+
+    _statcast_pid_cache[ck] = result
+
+    # Persist to per-pitcher disk cache for fast lookup on next call
+    try:
+        with open(disk_path, "w") as _df:
+            _jj.dump(result, _df)
+    except Exception:
+        pass
+
+    return result
 
 
 def fetch_statcast_pitcher(pitcher_name: str) -> "dict | None":
