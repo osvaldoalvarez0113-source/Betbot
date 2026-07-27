@@ -1654,9 +1654,9 @@ def run_health_check():
         results.append(("The Odds API",   "❌ fallando"))
         _track_module("The Odds API", False, str(e))
 
-    # 7 ── Claude API
+    # 7 ── Claude API  (una sola llamada con Haiku — no desperdiciar 4 llamadas de panel)
     try:
-        probe = panel_expertos(
+        probe = analyze_with_claude(
             {
                 "match": "Test A vs Test B", "sport": "baseball_mlb",
                 "top_pick": "Test A",        "ev_pct": 5.0,
@@ -1666,6 +1666,7 @@ def run_health_check():
                 "pitcher_away": "Test Pitcher (ERA 4.00)",
             },
             "MLB",
+            _model=CLAUDE_PANEL_MODEL,
         )
         if probe is not None:
             results.append(("Claude API",     "✅ funcionando"))
