@@ -7361,7 +7361,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
     _votos_panel = (_claude_result_g.get("_votos_favor", 0)
                     if _claude_result_g else 0)
     _top_prob = top3[0]["true_prob"] if top3 else 1.0
-    _bypass_veto = (_top_ev_pct > 8.0 and not _pin_div_alerts and _votos_panel >= 1)
+    _bypass_veto = (_top_ev_pct > 15.0 and not _pin_div_alerts and _votos_panel >= 1)
     if _claude_result_g and not force_panel:
         _apostar_c   = _claude_result_g.get("apostar", True)
         _confianza_c = _claude_result_g.get("confianza", "MEDIA")
