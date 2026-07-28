@@ -1173,6 +1173,7 @@ def fetch_pitcher_stats(name):
         "era": "N/A", "whip": "N/A", "k9": "N/A",
         "wins": None, "losses": None, "ip": None,
         "k": None, "hits": None, "bb": None, "hr": None,
+        "babip": None,
     }
     if not name or name == "TBD":
         return empty
@@ -1209,6 +1210,7 @@ def fetch_pitcher_stats(name):
             "hits":   stats.get("hits"),
             "bb":     stats.get("baseOnBalls"),
             "hr":     stats.get("homeRuns"),
+            "babip":  stats.get("babip"),
         }
     except Exception:
         return empty
@@ -3136,6 +3138,31 @@ def _statcast_alert_block(name: str, sc: "dict | None", era: float,
     return f"🔬 Statcast {name}:\n" + "\n".join(lines) + "\n"
 
 
+
+def _babip_flag(name: str, babip, era, xera_or_fip, ip) -> str:
+    """
+    Return a one-line confidence note when BABIP diverges from ERA/peripherals.
+    Empty string when: no flag warranted, data missing, or IP < 30 (small sample).
+    • BABIP < .270 AND ERA < xERA/FIP  → "posible suerte, confianza reducida"
+    • BABIP > .310 AND ERA > xERA/FIP  → "posible mala suerte, mejor de lo que parece"
+    """
+    try:
+        b = float(babip)
+        e = float(era)
+        p = float(xera_or_fip)
+        i = float(ip) if ip is not None else 0.0
+    except (TypeError, ValueError):
+        return ""
+    if i < 30.0:
+        return ""  # muestra insuficiente
+    last = name.split()[-1] if name and " " in name else (name or "?")
+    if b < 0.270 and e < p:
+        return (f"   🎲 {last} BABIP {b:.3f} (bajo) + ERA<xERA"
+                f" — posible suerte, confianza reducida ⚠️\n")
+    if b > 0.310 and e > p:
+        return (f"   🍀 {last} BABIP {b:.3f} (alto) + ERA>xERA"
+                f" — posible mala suerte, mejor de lo que parece 📈\n")
+    return ""
 # ═══════════════════════════════════════════════════════════════════════════════
 # ELITE SOURCE 2 — PINNACLE MARKET REFERENCE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -6821,6 +6848,8 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
             "pitcher_hr_away":    _safe_num(_ps_a_ext, "hr"),
             "pitcher_h_home":     _safe_num(_ps_h_ext, "hits"),
             "pitcher_h_away":     _safe_num(_ps_a_ext, "hits"),
+            "pitcher_babip_home": _safe_num(_ps_h_ext, "babip"),
+            "pitcher_babip_away": _safe_num(_ps_a_ext, "babip"),
         }
         context["data_quality_score"] = _data_completeness_score(
             context, sport_key, home, away)
@@ -7699,6 +7728,13 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     if _pace_ctx.get("flag"):
                         ctx_lines += f" {_pace_ctx['flag']}"
                     ctx_lines += "\n"
+            # BABIP confidence flags
+            for _pn_b, _er_b, _sc_b, _fip_b, _babip_b, _ip_b in (
+                (pn_h, float(er_h), sc_h, fip_h, ctx.get("pitcher_babip_home"), ctx.get("pitcher_ip_home")),
+                (pn_a, float(er_a), sc_a, fip_a, ctx.get("pitcher_babip_away"), ctx.get("pitcher_ip_away")),
+            ):
+                _xera_b = (_sc_b.get("xera") if _sc_b and _sc_b.get("xera") is not None else _fip_b)
+                ctx_lines += _babip_flag(_pn_b, _babip_b, _er_b, _xera_b, _ip_b)
             # Statcast alerts — expanded per-pitcher blocks with section header
             _sc_h_n = _statcast_alert_block(pn_h, sc_h, er_h, icon="🔵")
             _sc_a_n = _statcast_alert_block(pn_a, sc_a, er_a, icon="🔴")
@@ -8625,6 +8661,14 @@ def build_analizar_text(result: dict) -> list:
             return ""
         p1 += _fip_luck_line(pn_h, er_h, fip_h)
         p1 += _fip_luck_line(pn_a, er_a, fip_a)
+
+        # BABIP confidence flags
+        for _pn_b, _er_b, _sc_b, _fip_b, _babip_b, _ip_b in (
+            (pn_h, er_h, sc_h, fip_h, ctx.get("pitcher_babip_home"), ctx.get("pitcher_ip_home")),
+            (pn_a, er_a, sc_a, fip_a, ctx.get("pitcher_babip_away"), ctx.get("pitcher_ip_away")),
+        ):
+            _xera_b = (_sc_b.get("xera") if _sc_b and _sc_b.get("xera") is not None else _fip_b)
+            p1 += _babip_flag(_pn_b, _babip_b, _er_b, _xera_b, _ip_b)
 
         # Pitcher form trend (last 3 starts) — expanded per-pitcher blocks
         _forma_blks = []
