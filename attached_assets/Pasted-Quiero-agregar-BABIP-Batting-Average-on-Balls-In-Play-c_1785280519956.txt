@@ -1,0 +1,16 @@
+Quiero agregar BABIP (Batting Average on Balls In Play) como ajuste de confianza sobre el ERA de los abridores confirmados del día — NO como variable nueva independiente con su propio peso en el Kelly, sino como una bandera/multiplicador de ajuste sobre la confianza que ya le damos a xERA en contexto_juego.py o forma_reciente.py (donde corresponda según la estructura actual).
+
+Contexto: ya detectamos casos reales donde un pitcher tiene ERA bueno pero peripherals (xFIP/xERA) mucho peor — sospechamos que BABIP anormalmente bajo explica parte de esa suerte. Queremos que el bot lo detecte automáticamente en vez de que yo lo note manualmente juego por juego.
+
+Requisitos:
+1. Obtener BABIP del abridor confirmado del día vía MLB Stats API (statsapi.mlb.com) — mismo endpoint/fuente que ya usamos para el resto de pitcher data, no agregar dependencia nueva.
+2. Lógica de ajuste:
+   - Si BABIP del pitcher < .270 Y su ERA está por debajo de su xERA/xFIP (es decir, luce mejor de lo que sus peripherals dicen) → marcar como "posible suerte, confianza reducida" en el output del análisis.
+   - Si BABIP del pitcher > .310 Y su ERA está por encima de su xERA/xFIP → marcar como "posible mala suerte, mejor de lo que parece" en el output.
+   - Fuera de esos rangos, no mostrar ninguna bandera (evitar ruido).
+3. Esto es un AJUSTE DE CONFIANZA, no debe alterar el cálculo de EV ni el stake de Kelly directamente. Solo debe aparecer como una nota visible en la tarjeta de análisis (`/analizar` y notificación diaria), similar a como ya mostramos "EN RACHA" o "QUEMADO" para bullpen/ofensiva.
+4. Manejar el caso de muestra chica: si el pitcher tiene menos de 30 IP en la temporada, no mostrar la bandera de BABIP (la muestra es insuficiente para ser confiable).
+5. Entregar como cambio quirúrgico — no reescribir contexto_juego.py ni forma_reciente.py completos, solo agregar la función nueva y el punto de integración mínimo necesario.
+6. Incluir manejo de errores (que si la API no devuelve BABIP por lo que sea, el bot no se caiga — simplemente omite la bandera para ese pitcher).
+
+Dame el diff/código específico a agregar, no el archivo completo.
