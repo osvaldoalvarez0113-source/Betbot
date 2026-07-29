@@ -7905,7 +7905,7 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                 if il_list:
                     ctx_lines += (
                         f"🤕 Jugadores lesionados ({_es(tname_il)}):\n"
-                        f"   {', '.join(il_list[:4])}\n"
+                        f"   {', '.join(il_list)}\n"
                     )
             # Home/away splits — only show when real data available
             hs  = ctx.get("h_splits") or {}
@@ -8769,7 +8769,7 @@ def build_analizar_text(result: dict) -> list:
             _ue  = "zona cerrada → Over" if _te2=="OVER" else ("zona amplia → Under" if _te2=="UNDER" else "zona normal")
             _kv.append(f"👨\u200d⚖️ {ump['name']} — {_ue}")
         for til, ils in ctx.get("il_data",{}).items():
-            if ils: _kv.append(f"🤕 {_es(til)}: {', '.join(ils[:3])}")
+            if ils: _kv.append(f"🤕 {_es(til)}: {', '.join(ils)}")
         if ctx.get("line_moved") and ctx.get("line_note"):
             _kv.append(f"📉 {ctx['line_note']}")
         if ctx.get("ttt_note"): _kv.append(ctx["ttt_note"].rstrip())
@@ -8824,7 +8824,7 @@ def build_analizar_text(result: dict) -> list:
                 _gl.append(f"👨\u200d⚖️ {_ump2['name']} — {_ue2}")
             _il2 = []
             for _til2, _ils2 in ctx.get("il_data",{}).items():
-                if _ils2: _il2.append(f"  {_es(_til2)}: {', '.join(_ils2[:3])}")
+                if _ils2: _il2.append(f"  {_es(_til2)}: {', '.join(_ils2)}")
             if _il2: _gl.append("🤕 Lesionados:\n" + "\n".join(_il2))
             if ctx.get("line_moved") and ctx.get("line_note"):
                 _gl.append(f"📉 {ctx['line_note']}")
