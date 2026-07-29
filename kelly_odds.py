@@ -3454,7 +3454,7 @@ def _build_pinnacle_panel_signal(
     Compare the pick direction against Pinnacle's current market position.
 
     Returns a plain-text signal to inject into _claude_data_g["pinnacle_panel_signal"]
-    so all three experts (Marco, Víctor, Elena) receive it before giving their verdict.
+    so the unified analysis receives it before giving its verdict.
 
     Logic:
     - Totals picks (OVER/UNDER): compare against Pinnacle's implied totals probability.
@@ -7537,9 +7537,9 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
     # Pinnacle opera cerca del 50% por balanceo de libro — 8–20pp de divergencia
     # es normal. Solo >25pp (_pin_div_alerts no vacío) justifica veto por mercado.
     _top_ev_pct = top3[0]["ev_pct"] if top3 else 0.0
-    # Bypass solo si: EV>15% + divergencia Pinnacle aceptable + al menos 1 experto votó sí.
-    # Con 0/3 votos el veto es ABSOLUTO sin importar el EV — unanimidad en contra
-    # indica un riesgo que el modelo de valor no captura.
+    # Bypass solo si: EV>15% + divergencia Pinnacle aceptable + análisis dijo apostar=True.
+    # Si el análisis vetó (apostar=False), _votos_favor=0 → bypass desactivado →
+    # veto ABSOLUTO: indica un riesgo que el modelo de valor no captura.
     _votos_panel = (_claude_result_g.get("_votos_favor", 0)
                     if _claude_result_g else 0)
     _top_prob = top3[0]["true_prob"] if top3 else 1.0
@@ -8993,9 +8993,12 @@ def build_analizar_text(result: dict) -> list:
         elif _rlm.get("square_note"):
             p1 += f"\n{_rlm['square_note']}\n"
 
-    # ─── 10. ✅ VEREDICTO (p2) — una sola caja <pre> con Panel + Recomendación ──
-    experts   = ci.get("_expertos_detalle") or []
-    _ci_icons = {"ALTA":"🟢","MEDIA":"🟡","BAJA":"🔴"}
+    # ─── 10. ✅ VEREDICTO (p2) — una sola caja <pre> con Análisis + Recomendación ──
+    _ci_icons   = {"ALTA":"🟢","MEDIA":"🟡","BAJA":"🔴"}
+    _ci_conf    = (ci.get("confianza") or "")
+    _ci_icon    = _ci_icons.get(_ci_conf, "⚪")
+    _ci_apostar = ci.get("apostar")
+    _ci_ap_icon = "✅" if _ci_apostar is True else ("❌" if _ci_apostar is False else "⚪")
     panel_razon = _wrap_reasoning((ci.get("razonamiento") or "").strip())
 
     # Pre-compute most-probable pick so it's available inside the pre block
@@ -9018,31 +9021,25 @@ def build_analizar_text(result: dict) -> list:
     # Build all veredicto content as plain-text lines → single <pre> block
     _vl = []
 
-    # ── Panel ──────────────────────────────────────────────────────────────────
-    _vl.append("🎓 PANEL")
+    # ── Análisis ───────────────────────────────────────────────────────────────
+    _vl.append("🔍 ANÁLISIS")
     _vl.append("─" * 22)
-    if experts:
-        for ex in experts:
-            ap       = "✅" if ex.get("apostar") is True else ("❌" if ex.get("apostar") is False else "⚪")
-            conf_lbl = ex.get("confianza", "") or ""
-            ec       = _ci_icons.get(conf_lbl, "⚪")
-            nombre   = _strip_html(ex.get("nombre") or "?")
-            raz      = _strip_html(_wrap_reasoning((ex.get("razonamiento") or "").strip()))
-            _vl.append(f"{nombre}  {ap} {ec} {conf_lbl}")
-            for _rl in raz.splitlines():
-                _vl.append(f"  {_rl}")
-            _vl.append("")
-    else:
-        if not cands and all_mkts:
-            pos = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
-            if pos:
-                bl,bm = max(pos, key=lambda x: x[1]["ev_pct"])
-                blc = bl.replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
-                _vl.append(f"Sin panel — mejor: {blc} EV +{bm['ev_pct']:.1f}%")
-            else:
-                _vl.append("Sin panel — todos los mercados con EV negativo")
+    if panel_razon:
+        _vl.append(f"{_ci_ap_icon} {_ci_icon} {_ci_conf}")
+        for _rl in panel_razon.splitlines():
+            _vl.append(f"  {_rl}")
+        _vl.append("")
+    elif not cands and all_mkts:
+        pos = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
+        if pos:
+            bl,bm = max(pos, key=lambda x: x[1]["ev_pct"])
+            blc = bl.replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
+            _vl.append(f"Sin análisis — mejor: {blc} EV +{bm['ev_pct']:.1f}%")
         else:
-            _vl.append("Sin panel")
+            _vl.append("Sin análisis — todos los mercados con EV negativo")
+        _vl.append("")
+    else:
+        _vl.append("Sin análisis")
         _vl.append("")
 
     # ── Recomendación ──────────────────────────────────────────────────────────
@@ -9062,22 +9059,10 @@ def build_analizar_text(result: dict) -> list:
             _vl.append(f"Pick:   {_blr}")
             _vl.append(f"Cuota:  @{best_c.get('odds',0):.2f} ({best_c.get('book','')})")
             _vl.append(f"Stake:  ${best_c.get('stake',0):.0f}")
-        if panel_razon:
-            _vl.append("")
-            for _prl in panel_razon.splitlines():
-                _vl.append(f"  {_prl}")
     elif final_apostar is False:
         _vl.append("RECOMENDACIÓN: ❌ PASAR")
-        if panel_razon:
-            _vl.append("")
-            for _prl in panel_razon.splitlines():
-                _vl.append(f"  {_prl}")
     else:
         _vl.append("RECOMENDACIÓN: ⛔ SIN APUESTA")
-        if panel_razon:
-            _vl.append("")
-            for _prl in panel_razon.splitlines():
-                _vl.append(f"  {_prl}")
 
     p2 += "<pre>" + "\n".join(_vl) + "</pre>\n"
 
@@ -13038,10 +13023,9 @@ def _build_correlacion_mercados(candidates: list, current_label: str,
 
 def _build_elena_situational_addendum(game_data: dict) -> str:
     """
-    Build a dynamic system-prompt addendum for Elena (El Abogado del Diablo)
-    when situational fatigue flags are present in game_data.
-    Returns empty string when no flags are active — Elena's base prompt is
-    unchanged in that case (she should NOT mention this topic at all).
+    Build a situational fatigue addendum injected into the unified analysis prompt
+    when calendar fatigue flags are present in game_data.
+    Returns empty string when no flags are active.
     """
     flags_txt = game_data.get("sit_flags_txt", "")
     if not flags_txt:
@@ -13052,12 +13036,11 @@ def _build_elena_situational_addendum(game_data: dict) -> str:
         "de fatiga real de calendario — NO son narrativa ni opinión, son datos "
         "medibles del schedule de MLB:\n\n"
         f"{flags_txt}\n\n"
-        "INSTRUCCIÓN CRÍTICA PARA ELENA:\n"
+        "INSTRUCCIÓN CRÍTICA — RIESGOS OPERACIONALES:\n"
         "Si alguna de estas banderas aplica al EQUIPO FAVORITO del pick en análisis, "
         "trátala como evidencia concreta de un factor oculto negativo. "
-        "Nómbrala explícitamente en tu oración 1 y explica por qué es relevante HOY. "
-        "Tu veto (apostar=false) o duda (confianza=BAJA) se mantiene aunque Marco y "
-        "Víctor voten a favor — estos datos del calendario pesan más que el consenso. "
+        "Nómbrala explícitamente en el campo razonamiento y explica por qué es relevante HOY. "
+        "Esta bandera tiene prioridad sobre señales positivas de statcast o mercado sharp. "
         "Si la bandera aplica al EQUIPO DESFAVORITO, ignórala."
     )
 
@@ -13177,15 +13160,16 @@ def detectar_patrones_getaway() -> list:
 def panel_expertos(game_data: dict, sport: str,
                    _no_elite: bool = False, _force_elite: bool = False) -> "dict | None":
     """
-    Panel of 3 expert personas — each calls analyze_with_claude with its own
-    system-prompt persona appended to _CLAUDE_SYSTEM.
+    Single unified analysis call that integrates all three analytical dimensions
+    (statcast metrics, sharp market signals, operational risks) into one voice.
 
-    Consensus rule: 2 of 3 must return apostar=True AND no hard veto
-    (apostar=False + confianza=BAJA from any expert) → final apostar=True.
-    Otherwise apostar=False.
+    Replaces the old 3-expert + synthesis (4 calls) with a single analyze_with_claude()
+    call using a combined system prompt.  Same JSON output contract:
+      {apostar, confianza, razonamiento, factores_positivos,
+       factores_negativos, datos_inconsistentes, _votos_favor}
 
-    Returns a merged dict compatible with the standard analyze_with_claude response,
-    or None if no expert could be reached.
+    _votos_favor is set to 1 (apostar=True) or 0 (apostar=False) for compatibility
+    with the bypass-veto guard in analyze_game_full().
     """
     _PATRONES_MLB_2026 = (
         "\n\n=== PATRONES SITUACIONALES MLB 2026 (CAPA DE META-ANÁLISIS) ===\n"
@@ -13262,111 +13246,23 @@ def panel_expertos(game_data: dict, sport: str,
     )
     _is_mlb = "baseball" in sport.lower()
 
-    _EXPERTOS = [
-        (
-            "El Estadístico",
-            "Eres Marco, El Estadístico. Tu análisis se basa EXCLUSIVAMENTE en métricas "
-            "Statcast predictivas. Nada de narrativa ni opinión cualitativa.\n\n"
-            "MÉTRICAS PERMITIDAS (las únicas que puedes usar):\n"
-            "• xERA — ERA esperada por calidad de contacto (supera a ERA real en predicción)\n"
-            "• Barrel% — contacto élite (ángulo 8-32° + velocidad ≥98 mph)\n"
-            "• Hard-Hit% — % de bateos a ≥95 mph (potencia ofensiva real)\n"
-            "• Whiff% — % de swings fallados (dominancia del pitcher)\n\n"
-            "PROTOCOLO SIN DATOS:\n"
-            "Si no tienes datos concretos de al menos 2 de estas 4 métricas para el partido, "
-            "debes escribir exactamente: 'Sin data Statcast suficiente para este partido.' "
-            "y votar apostar=false. Nunca rellenes con opinión cualitativa.\n\n"
-            "PROHIBICIONES ABSOLUTAS:\n"
-            "• NUNCA mencionar ERA cruda, K/9, FIP, WHIP — son métricas lagging, no predictivas\n"
-            "• NUNCA opinar sobre: rachas, momentum, motivación, narrativa del equipo, "
-            "'el equipo viene de...', 'el pitcher está caliente' u otras frases de tendencia\n"
-            "• NUNCA mencionar: EV%, probabilidad implícita, Kelly, divergencia Pinnacle\n\n"
-            "CÓMO ESCRIBIR:\n"
-            "• 2 oraciones máximo\n"
-            "• Oración 1: métrica Statcast más relevante con diferencia concreta entre pitchers\n"
-            "• Oración 2: lo que ese número significa para el pick de HOY\n"
-            "• Ejemplo: 'Glasnow xERA 2.81 vs Keller xERA 4.62, Whiff% 31% vs 18% — "
-            "diferencia real de dominancia de pitcheo. Favorece Under si el lineup contrario "
-            "tiene Barrel% bajo.'\n\n"
-            "VOTO:\n"
-            "Datos Statcast respaldan el pick → apostar=true, confianza ALTA o MEDIA\n"
-            "Datos Statcast contradicen el pick → apostar=false con razón en 1 línea\n"
-            "Sin data suficiente → apostar=false, confianza BAJA",
-        ),
-        (
-            "El Sharp",
-            "Eres Víctor. Solo hablas de lo que dice el mercado sharp — Pinnacle y movimiento "
-            "de línea. Nada de estadísticas de pitcher, nada de riesgos operacionales.\n\n"
-            "REGLAS DE SALIDA (obligatorias):\n"
-            "• Tu razonamiento debe ser EXACTAMENTE 2 oraciones.\n"
-            "• Oración 1: qué dice Pinnacle (probabilidad implícita) y/o el movimiento de línea.\n"
-            "• Oración 2: tu voto basado únicamente en esa señal de mercado.\n"
-            "• PROHIBIDO mencionar ERA, K/9, lesiones o clima — eso es territorio de Marco y Elena.\n\n"
-            "CRITERIO DE VOTO:\n"
-            "Pinnacle ≥ 52% en el lado del pick = confirmación sharp → voto Sí, confianza ALTA. "
-            "Pinnacle 48–52% = neutral, no es señal en contra → voto Sí si EV > 15%, confianza MEDIA. "
-            "Divergencia modelo/Pinnacle ≤ 25pp = ruido normal, no vetes por esto. "
-            "Solo veta si línea se movió > 0.5 pts en contra Y divergencia > 25pp — con datos exactos.",
-        ),
-        (
-            "El Abogado del Diablo",
-            "Eres Elena. Tu único trabajo es nombrar UN riesgo operacional concreto de hoy, "
-            "o declarar que no existe ninguno. Nada de estadísticas de pitcher, nada de mercado.\n\n"
-            "MODO CAZA DE FACTORES OCULTOS (crítico):\n"
-            "Cuando Marco y Víctor coincidan en ir con el favorito, tu rol se intensifica: "
-            "DEBES buscar activamente factores negativos ocultos antes de dar tu voto. "
-            "Los analistas comunes ignoran estos — tú no:\n"
-            "  → ¿Es el 3er juego consecutivo de una serie con viaje nocturno entre ciudades?\n"
-            "    (fatiga acumulada invisible en los números actuales)\n"
-            "  → ¿El bullpen del equipo favorito lanzó >4 innings en CADA uno de los 2 días previos?\n"
-            "    (brazos agotados que no aparecen en las estadísticas de ERA)\n"
-            "  → ¿El lineup del favorito tiene bateadores clave descansando hoy? "
-            "(platoon, day off programado, jugador que entró tarde en el juego anterior)\n"
-            "Si encuentras evidencia sólida de UNO de estos factores: "
-            "tu veto (apostar=false) o duda (confianza=BAJA) debe mantenerse con firmeza. "
-            "La presión del consenso de los otros dos NO cambia tu voto si tienes datos reales.\n\n"
-            "REGLAS DE SALIDA (obligatorias):\n"
-            "• Tu razonamiento debe ser EXACTAMENTE 2 oraciones.\n"
-            "• Oración 1: el único riesgo real que encontraste (o 'Sin red flags confirmadas hoy.').\n"
-            "• Oración 2: tu voto directo.\n"
-            "• PROHIBIDO mencionar EV, ERA, Pinnacle, odds — eso es territorio de Marco y Víctor.\n"
-            "• Si no hay red flag real NI factor oculto: voto Sí obligatorio. No inventes.\n\n"
-            "CHECKLIST (evalúa en orden, para en el primero que active):\n"
-            "a) LESIÓN confirmada del pitcher titular o bateador clave HOY → red flag real.\n"
-            "b) CLIMA: viento > 20 mph hacia afuera O temperatura < 40°F → red flag real.\n"
-            "c) BULLPEN: > 15 innings lanzados en últimos 3 días → red flag real.\n"
-            "d) FATIGA: pitcher lanzó > 100 pitches hace < 4 días → red flag real.\n"
-            "e) 3er juego de serie + viaje nocturno intercity la noche anterior → red flag real.\n"
-            "f) Bullpen favorito agotado (>4 inn/día × 2 días consecutivos) → red flag real.\n"
-            "g) H2H con pitchers IDÉNTICOS a hoy que contradiga el pick → red flag real.\n"
-            "ERA alta del rival NO es red flag — es ventaja para el pick.",
-        ),
-    ]
-
-    votos_favor   = 0
-    veto_absoluto = False
-    resultados    = []
-    factores_pos  = []
-    factores_neg  = []
-    inconsistencias = []
-
-    # ── Selección de modelo: elite vs haiku panel ─────────────────────────────
+    # ── Selección de modelo: elite vs haiku ───────────────────────────────────
     global _elite_count_today, _elite_count_date
     _ev_pct_g      = float(game_data.get("ev_pct", 0) or 0)
     _use_elite     = False
     _elite_mtokens = 1024
     if _force_elite:
-        _modelo_panel_iter = MODELO_ELITE
-        _use_elite         = True
-        _elite_mtokens     = MAX_TOKENS_ELITE
+        _panel_model = MODELO_ELITE
+        _use_elite   = True
+        _elite_mtokens = MAX_TOKENS_ELITE
     elif (not _no_elite
           and _ev_pct_g >= UMBRAL_ELITE * 100
           and _elite_count_today < MAX_ELITE_DIARIO):
-        _modelo_panel_iter = MODELO_ELITE
-        _use_elite         = True
-        _elite_mtokens     = MAX_TOKENS_ELITE
+        _panel_model = MODELO_ELITE
+        _use_elite   = True
+        _elite_mtokens = MAX_TOKENS_ELITE
     else:
-        _modelo_panel_iter = CLAUDE_PANEL_MODEL
+        _panel_model = CLAUDE_PANEL_MODEL
 
     _ELITE_ADDENDUM = (
         "\n\nEste es un pick de alto edge. Analiza con profundidad extra: estado del "
@@ -13375,169 +13271,133 @@ def panel_expertos(game_data: dict, sport: str,
         "que el edge podría ser falso."
     ) if _use_elite else ""
 
-    import gc as _gc, time as _ptime
+    # ── Combined system-prompt: integra los tres enfoques en una sola voz ─────
+    _COMBINED_PERSONA = (
+        "Eres un analista de apuestas deportivas con tres lentes de evaluación integrados. "
+        "Tu análisis es directo, en español, y cubre los tres ejes en una sola voz:\n\n"
 
-    def _panel_rss_mb() -> float:
-        try:
-            import resource as _pr
-            return round(_pr.getrusage(_pr.RUSAGE_SELF).ru_maxrss / 1024, 1)
-        except Exception:
-            try:
-                with open("/proc/self/status") as _pf:
-                    for _pl in _pf:
-                        if _pl.startswith("VmRSS:"):
-                            return round(int(_pl.split()[1]) / 1024, 1)
-            except Exception:
-                pass
-            return -1.0
+        "1. DATOS DUROS (statcast predictivo):\n"
+        "   Usa xERA, Barrel%, Hard-Hit%, Whiff% cuando estén disponibles. "
+        "   Si tienes menos de 2 de estas métricas, indícalo en razonamiento. "
+        "   No uses ERA cruda, K/9, FIP ni WHIP como señales principales — son lagging.\n\n"
 
-    for i, (nombre, extra) in enumerate(_EXPERTOS):
-        _panel_model = _modelo_panel_iter
-        _extra_full  = extra + (_PATRONES_MLB_2026 if _is_mlb else "") + PANEL_DIVERSITY_ADDENDUM
-        if _use_elite:
-            _extra_full += _ELITE_ADDENDUM
-        # Elena (index 2): inject situational fatigue flags when present
-        if i == 2 and _is_mlb:
-            _elena_sit = _build_elena_situational_addendum(game_data)
-            if _elena_sit:
-                _extra_full += _elena_sit
-                _n_flags = len(game_data.get("sit_flags_txt", "").splitlines())
-                print(f"   🚩 Elena: {_n_flags} bandera(s) situacional(es) inyectada(s)")
-            # Inject contexto_juego resumen (park, clima, regulares, bullpen)
-            _ctx_jg_txt = game_data.get("ctx_juego_resumen", "")
-            if _ctx_jg_txt:
-                _extra_full += (
-                    f"\n\nCONTEXTO DEL JUEGO (datos objetivos para evaluación):\n"
-                    f"{_ctx_jg_txt}\n"
-                    "Usa estos datos si aplican directamente al pick que estás evaluando "
-                    "(e.g. bullpen del favorito quemado, regulares descansando)."
-                )
-            # Inject market correlation context — only Elena receives this
-            _corr_ctx = game_data.get("correlacion_mercados", "")
-            if _corr_ctx:
-                _extra_full += (
-                    "\n\nCORRELACIÓN DE MERCADOS EN ESTE PARTIDO:\n"
-                    + _corr_ctx
-                    + "\n\nSi detectas que varios mercados de este análisis dependen de la misma "
-                    "causa raíz (mismo pitcher, mismo supuesto), menciónalo explícitamente "
-                    "en tu oración de riesgo — esto es evidencia real de concentración de "
-                    "riesgo, no especulación."
-                )
-                print(f"   🔗 Elena: contexto de correlación de mercados inyectado")
+        "2. SEÑAL DE MERCADO SHARP:\n"
+        "   Lee lo que dice Pinnacle (probabilidad implícita) y el movimiento de línea. "
+        "   Pinnacle ≥52% en el lado del pick = confirmación. "
+        "   Divergencia ≤25pp entre modelo y Pinnacle = ruido normal, no vetes. "
+        "   Solo veta por mercado si línea se movió >0.5 pts en contra Y divergencia >25pp.\n\n"
 
-            # Inject slate-wide getaway-day / bullpen pattern alerts when active
-            if _patrones_activos:
-                _slate_txt  = "\n".join(f"• {a}" for a in _patrones_activos)
-                _extra_full += (
-                    "\n\n━━━ ALERTAS DE PATRONES DEL SLATE (HOY) ━━━\n"
-                    "El sistema detectó los siguientes patrones activos en el slate de hoy. "
-                    "Úsalos como contexto de mercado general al evaluar este partido:\n\n"
-                    f"{_slate_txt}\n\n"
-                    "Si alguno de estos patrones aplica directamente al equipo favorito "
-                    "de este pick, menciónalo explícitamente en tu análisis."
-                )
-                print(f"   🗓️  Elena: {len(_patrones_activos)} patrón(es) de slate inyectado(s)")
+        "3. RIESGOS OPERACIONALES (checklist):\n"
+        "   Evalúa en orden, detente en el primero que active:\n"
+        "   a) Lesión confirmada del pitcher titular o bateador clave HOY → red flag real.\n"
+        "   b) Clima: viento >20 mph hacia afuera O temp <40°F → red flag real.\n"
+        "   c) Bullpen: >15 innings lanzados en últimos 3 días → red flag real.\n"
+        "   d) Fatiga: pitcher lanzó >100 pitches hace <4 días → red flag real.\n"
+        "   e) 3er juego de serie + viaje nocturno intercity la noche anterior → red flag real.\n"
+        "   f) Bullpen favorito: >4 inn/día × 2 días consecutivos → red flag real.\n"
+        "   g) H2H con pitchers idénticos a hoy que contradiga el pick → red flag real.\n"
+        "   Si no hay red flag confirmada: no inventes una.\n\n"
 
-        _rss_pre = _panel_rss_mb()
-        print(f"   📊 {nombre} ({i+1}/3): RSS antes={_rss_pre}MB — iniciando llamada Claude…")
+        "DECISIÓN FINAL:\n"
+        "• apostar=true si los tres ejes (datos, mercado, riesgos) apuntan en la misma "
+        "  dirección, o si dos apuntan a favor y el tercero es neutro.\n"
+        "• apostar=false si cualquier red flag operacional REAL existe, o si mercado sharp "
+        "  contradice fuertemente el pick (divergencia >25pp + movimiento adverso).\n"
+        "• confianza=ALTA: señal clara y consistente en los tres ejes.\n"
+        "• confianza=MEDIA: señal mayoritaria pero con alguna incertidumbre.\n"
+        "• confianza=BAJA: contradicción real o datos insuficientes — recomienda no apostar.\n\n"
 
-        res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
-                                  _model=_panel_model, _max_tokens=_elite_mtokens)
+        "RAZONAMIENTO (campo 'razonamiento' del JSON):\n"
+        "• Máximo 4 oraciones completas. Habla como un amigo con contexto.\n"
+        "• Menciona el dato Statcast más relevante si existe.\n"
+        "• Menciona lo que dice el mercado sharp si tiene señal clara.\n"
+        "• Menciona el único riesgo operacional más relevante (o confirmación de que no hay).\n"
+        "• PROHIBIDO: EV, Kelly, divergencia, parámetro, umbral, porcentaje de valor, "
+        "'el modelo dice', 'la regla X'. Habla de hechos, no del sistema.\n\n"
 
-        # Liberar el prompt del experto inmediatamente — ya no se necesita
-        del _extra_full
+        "⚠️ FORMATO OBLIGATORIO: Responde EXCLUSIVAMENTE con el JSON exacto "
+        "indicado en el mensaje del usuario. NUNCA respondas en texto libre. SOLO JSON válido."
+    )
 
-        _rss_post = _panel_rss_mb()
-        print(f"   📊 {nombre} ({i+1}/3): RSS después={_rss_post}MB "
-              f"(delta={_rss_post - _rss_pre:.1f}MB)")
+    # Build extra system addendum
+    _extra_full = _COMBINED_PERSONA
+    if _is_mlb:
+        _extra_full += _PATRONES_MLB_2026
+    _extra_full += PANEL_DIVERSITY_ADDENDUM
+    if _use_elite:
+        _extra_full += _ELITE_ADDENDUM
 
-        if res is None:
-            print(f"   🎓 {nombre}: no disponible")
-            resultados.append(None)
-            # Pausa y GC entre expertos incluso en caso de error
-            if i < 2:
-                _gc.collect()
-                _ptime.sleep(1)
-            continue
+    # Inject situational fatigue flags, game context, market correlation, slate patterns
+    if _is_mlb:
+        _sit = _build_elena_situational_addendum(game_data)
+        if _sit:
+            _extra_full += _sit
+            _n_flags = len(game_data.get("sit_flags_txt", "").splitlines())
+            print(f"   🚩 Panel: {_n_flags} bandera(s) situacional(es) inyectada(s)")
 
-        apostar = res.get("apostar", True)
-        conf    = res.get("confianza", "N/D")
-        razon   = (res.get("razonamiento", "") or "")[:500]
-        icon    = "✅" if apostar else "❌"
-        c_icon  = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
-        print(f"   🎓 {nombre}: {c_icon}{conf} apostar={icon} | \"{razon}\"")
+        _ctx_jg_txt = game_data.get("ctx_juego_resumen", "")
+        if _ctx_jg_txt:
+            _extra_full += (
+                f"\n\nCONTEXTO DEL JUEGO (datos objetivos para evaluación):\n"
+                f"{_ctx_jg_txt}\n"
+                "Usa estos datos si aplican directamente al pick que estás evaluando "
+                "(e.g. bullpen del favorito quemado, regulares descansando)."
+            )
 
-        if apostar:
-            votos_favor += 1
-        if not apostar and conf == "BAJA":
-            veto_absoluto = True  # hard veto: kills consensus regardless of other votes
+        _corr_ctx = game_data.get("correlacion_mercados", "")
+        if _corr_ctx:
+            _extra_full += (
+                "\n\nCORRELACIÓN DE MERCADOS EN ESTE PARTIDO:\n"
+                + _corr_ctx
+                + "\n\nSi detectas que varios mercados de este análisis dependen de la misma "
+                "causa raíz (mismo pitcher, mismo supuesto), menciónalo en razonamiento — "
+                "es evidencia real de concentración de riesgo."
+            )
+            print(f"   🔗 Panel: contexto de correlación de mercados inyectado")
 
-        # Guardar SOLO los campos mínimos necesarios — no el objeto completo de la API
-        # Esto evita acumular 3 dicts pesados simultáneamente en resultados[]
-        _minimal = {
-            "apostar":              apostar,
-            "confianza":            conf,
-            "razonamiento":         razon,
-            "factores_positivos":   list(res.get("factores_positivos") or []),
-            "factores_negativos":   list(res.get("factores_negativos") or []),
-            "datos_inconsistentes": list(res.get("datos_inconsistentes") or []),
-            "pick":                 res.get("pick", ""),
-            "line":                 res.get("line", ""),
-        }
-        # Liberar el objeto completo de respuesta de la API inmediatamente
-        del res
+        if _patrones_activos:
+            _slate_txt = "\n".join(f"• {a}" for a in _patrones_activos)
+            _extra_full += (
+                "\n\n━━━ ALERTAS DE PATRONES DEL SLATE (HOY) ━━━\n"
+                "El sistema detectó los siguientes patrones activos en el slate de hoy:\n\n"
+                f"{_slate_txt}\n\n"
+                "Si alguno aplica directamente al equipo favorito de este pick, "
+                "menciónalo en tu razonamiento."
+            )
+            print(f"   🗓️  Panel: {len(_patrones_activos)} patrón(es) de slate inyectado(s)")
 
-        resultados.append(_minimal)
-        factores_pos.extend(_minimal.get("factores_positivos") or [])
-        factores_neg.extend(_minimal.get("factores_negativos") or [])
-        inconsistencias.extend(_minimal.get("datos_inconsistentes") or [])
+    # ── Única llamada Claude ───────────────────────────────────────────────────
+    print(f"   📊 Análisis unificado (1/1): modelo={_panel_model} elite={_use_elite}")
+    res = analyze_with_claude(game_data, sport, _extra_system=_extra_full,
+                              _model=_panel_model, _max_tokens=_elite_mtokens)
+    del _extra_full
 
-        # Entre expertos: liberar memoria y hacer pausa para que GC actúe
-        # ANTES de iniciar la siguiente llamada — evita picos acumulativos
-        if i < 2:
-            _gc.collect()
-            _ptime.sleep(1)
-            print(f"   📊 RSS post-GC (antes de {_EXPERTOS[i+1][0]}): {_panel_rss_mb()}MB")
-
-    disponibles = sum(1 for r in resultados if r is not None)
-    if disponibles == 0:
+    if res is None:
         ev_f = float(game_data.get("ev_pct", 0) or 0)
         if ev_f >= 8.0:
             print(f"   🤖 Panel fallback: EV +{ev_f:.1f}% — auto-aprobado (API no disponible)")
             return {
                 "apostar":              True,
                 "confianza":            "MEDIA",
-                "razonamiento":         f"Panel no disponible. Pick aprobado automáticamente por EV +{ev_f:.1f}%. Verifica pitcher y clima antes de apostar.",
+                "razonamiento":         f"Análisis no disponible. Pick aprobado automáticamente por EV +{ev_f:.1f}%. Verifica pitcher y clima antes de apostar.",
                 "factores_positivos":   [f"EV +{ev_f:.1f}% positivo"],
-                "factores_negativos":   ["Panel de expertos no disponible — verifica manualmente"],
+                "factores_negativos":   ["Análisis no disponible — verifica manualmente"],
                 "datos_inconsistentes": [],
-                "_expertos_detalle":    [],
                 "_votos_favor":         1,
             }
         return None
 
-    consenso = (votos_favor >= 2) and not veto_absoluto
+    apostar = res.get("apostar", True)
+    conf    = res.get("confianza", "N/D")
+    razon   = (res.get("razonamiento", "") or "")[:500]
+    icon    = "✅" if apostar else "❌"
+    c_icon  = {"ALTA": "🟢", "MEDIA": "🟡", "BAJA": "🔴"}.get(conf, "⚪")
+    decision = "✅ APOSTAR" if apostar else "❌ RECHAZADO"
+    print(f"   🎓 Análisis: {c_icon}{conf} apostar={icon} → {decision}")
+    print(f"      \"{razon[:200]}\"")
 
-    # Use highest-confidence result as the structural base for the merged response
-    base = next(
-        (r for r in resultados if r and r.get("confianza") == "ALTA"),
-        next(
-            (r for r in resultados if r and r.get("confianza") == "MEDIA"),
-            next((r for r in resultados if r), None),
-        ),
-    )
-    if base is None:
-        return None
-
-    veto_txt = "SÍ 🚨" if veto_absoluto else "NO"
-    decision = "✅ APOSTAR" if consenso else "❌ RECHAZADO"
-    print(
-        f"   🗳️  Panel [{sport}]: {votos_favor}/{disponibles} votos a favor | "
-        f"veto={veto_txt} → {decision}"
-    )
-
-    merged = dict(base)
-    merged["apostar"] = consenso
+    # ── Counters & elite tracking ─────────────────────────────────────────────
+    merged = dict(res)
     merged["_elite_analisis"] = _use_elite
     merged["_modelo_usado"]   = "fable" if _use_elite else "haiku"
     if _use_elite and not _force_elite:
@@ -13547,141 +13407,13 @@ def panel_expertos(game_data: dict, sport: str,
         _save_elite_counter()
     elif _force_elite:
         print(f"  🧠 Elite forzado por /elite — contador sin incrementar")
-    merged["confianza"] = (
-        "ALTA" if (votos_favor == 3 and not veto_absoluto)
-        else ("MEDIA" if consenso else "BAJA")
-    )
-    merged["factores_positivos"]   = list(dict.fromkeys(factores_pos))[:6]
-    merged["factores_negativos"]   = list(dict.fromkeys(factores_neg))[:4]
-    merged["datos_inconsistentes"] = list(dict.fromkeys(inconsistencias))
-    merged["_expertos_detalle"] = [
-        {
-            "nombre":        _EXPERTOS[i][0],
-            "apostar":       r.get("apostar")                          if r else None,
-            "confianza":     r.get("confianza", "N/D")                 if r else "N/D",
-            "razonamiento":  (r.get("razonamiento", "") or "")[:500]   if r else "no disponible",
-        }
-        for i, r in enumerate(resultados)
-    ]
-    # ── Síntesis final: Sonnet recibe los 3 votos y escribe recomendación conversacional ──
-    _panel_tag = f"[Panel {votos_favor}/3 a favor{'  — veto absoluto' if veto_absoluto else ''}]"
-    _expert_lines = []
-    for i, (exp_nombre, _) in enumerate(_EXPERTOS):
-        r = resultados[i] if i < len(resultados) else None
-        if r is None:
-            continue
-        _voto_txt = "SÍ ✅" if r.get("apostar") else "NO ❌"
-        _razon    = (r.get("razonamiento", "") or "").strip()[:500]
-        _expert_lines.append(f"• {exp_nombre} → {_voto_txt}: {_razon}")
 
-    if _expert_lines:
-        _all_agree = (votos_favor == len([r for r in resultados if r is not None]))
-        _agree_note = " Los tres coinciden — sintetiza en una sola línea." if _all_agree else ""
-        _pick_raw        = base.get("pick", "N/D")
-        _match_str       = game_data.get("match", "")
-        _top_pick_label  = game_data.get("top_pick", _pick_raw)
-        _top_pick_odds   = game_data.get("odds", "")
-        _odds_str        = f" a {_top_pick_odds}" if _top_pick_odds else ""
-        _is_rl_plus = "+1.5" in _top_pick_label
-        _rl_note = (
-            "IMPORTANTE: Este es un pick RL +1.5. Ese equipo puede PERDER el partido "
-            "y el pick igual gana si pierde por solo 1 carrera. "
-            "NO sugieras ML — son mercados diferentes.\n"
-        ) if _is_rl_plus else ""
-        _synthesis_prompt = (
-            f"El pick formal es: {_top_pick_label}{_odds_str}.\n"
-            + _rl_note
-            + "TU TRABAJO es explicar en 2 oraciones POR QUÉ ese pick tiene valor o no.\n"
-            "NO recomiendes un pick diferente. NO menciones otros mercados.\n"
-            "Si el panel votó a favor de ese pick, explica por qué tiene sentido.\n"
-            "Si votaron en contra, explica el riesgo.\n\n"
-            "INSTRUCCIÓN ESPECIAL — SÍNTESIS FINAL DEL PANEL:\n"
-            "Eres un amigo que apostó béisbol toda su vida. Acabas de escuchar a tres expertos "
-            "y ahora le explicas a otro amigo, en voz alta, qué harías y por qué. "
-            "Habla como si estuvieras en una conversación — no escribas un informe.\n\n"
-            "VOTOS RECIBIDOS:\n"
-            + "\n".join(_expert_lines) + "\n\n"
-            "CÓMO ESCRIBIR (obligatorio):\n"
-            "• Máximo 5 oraciones. Completas y directas.\n"
-            f"{'• Los tres coinciden — una sola oración basta.' if _all_agree else ''}\n"
-            "• Si recomiendas apostar: menciona el equipo, dónde apostar y cuánto. Nada más.\n"
-            "• Si no recomiendas: di por qué en una oración y sugiere esperar.\n"
-            "• PROHIBIDO usar estas palabras: EV, umbral, Regla, fórmula, porcentaje de valor, "
-            "valor esperado, modelo, parámetro, métrica, implícita, divergencia, pp.\n"
-            "• PROHIBIDO escribir números excepto el stake sugerido en dólares.\n"
-            "• PROHIBIDO repetir lo que dijo cada experto por separado.\n\n"
-            "EJEMPLOS DEL TONO CORRECTO:\n"
-            "Sin apuesta: 'King viene mejorando pero sus últimas salidas fueron malas. "
-            "Singer también mejora. Sin señal clara del mercado sharp. "
-            "No hay ventaja hoy — mejor esperar otro partido.'\n"
-            "Con apuesta: 'Cole domina y Pinnacle lo respalda fuerte. "
-            "Yankees en casa contra un bullpen cansado. Apuesta Yankees ML en FanDuel, no más de $20.'\n\n"
-            "Responde en máximo 5 oraciones completas."
-        )
-        # GC explícito antes de la 4ª llamada Claude (síntesis) — los 3 res objects ya se liberaron,
-        # pero las estructuras intermedias del loop pueden seguir en memoria.
-        _gc.collect()
-        _rss_syn = _panel_rss_mb()
-        print(f"   📊 Síntesis (4/4): RSS pre-síntesis={_rss_syn}MB — iniciando llamada Claude…")
-        try:
-            _syn_client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
-            _syn_msg = _syn_client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=350,
-                system="Eres un experto en apuestas deportivas. Responde SOLO en español conversacional. NUNCA uses JSON, NUNCA uses bloques de código, NUNCA uses comillas. Habla como un amigo directo. Máximo 4 oraciones.",
-                messages=[{"role": "user", "content": _synthesis_prompt if _expert_lines else json.dumps(game_data, default=str, ensure_ascii=False)[:1000]}],
-            )
-            _syn_tb  = next((b for b in _syn_msg.content if hasattr(b, "text")), None)
-            _syn_raw = _syn_tb.text.strip() if _syn_tb else ""
-            # Release synthesis API objects immediately after extracting text
-            del _syn_msg, _syn_client, _syn_tb
-            print(f"   📊 Síntesis (4/4): RSS post={_panel_rss_mb()}MB")
-            import re as _re_syn
-            _syn_raw = _re_syn.sub(r'```[\w]*', '', _syn_raw)
-            _syn_raw = _re_syn.sub(r'[{}\[\]]', '', _syn_raw)
-            _syn_raw = _re_syn.sub(r'"(apostar|confianza|razonamiento|pick|line)"\s*:\s*', '', _syn_raw)
-            _syn_raw = _re_syn.sub(r'(true|false|null)', '', _syn_raw)
-            _syn_raw = _syn_raw.strip().strip('"').strip()
-            if _syn_raw.startswith('{') or len(_syn_raw) > 400:
-                _sentences = [s.strip() for s in _syn_raw.split('.') if s.strip()]
-                _syn_raw = '. '.join(_sentences[:2]) + ('.' if _sentences else '')
-            _syn = {"razonamiento": _syn_raw}
-        except Exception as _syne:
-            print(f"  ⚠️  Synthesis error: {_syne}")
-            _syn = None
-        _syn_text = (_syn.get("razonamiento", "") or "").strip() if _syn else ""
-    else:
-        _syn_text = ""
-
-    if _syn_text:
-        # Sanity-check: si la síntesis recomienda el equipo contrario al pick formal,
-        # descartarla y usar el razonamiento del experto con mayor confianza.
-        import re as _re_sc
-        _formal_pick = game_data.get("top_pick", "")
-        if _formal_pick:
-            _pm = _re_sc.match(r'^(.+?)\s+(ml|rl|moneyline|run line)', _formal_pick, _re_sc.IGNORECASE)
-            if _pm:
-                _pick_words  = set(_pm.group(1).lower().split())
-                _match_parts = game_data.get("match", "").lower().replace(" vs ", "|").split("|")
-                if len(_match_parts) == 2:
-                    _home_w  = set(_match_parts[0].strip().split())
-                    _away_w  = set(_match_parts[1].strip().split())
-                    _other_w = (_away_w if _pick_words & _home_w else _home_w) - {"de", "los", "las", "el", "la", "the"}
-                    _st_low  = _syn_text.lower()
-                    _has_other = sum(1 for w in _other_w if w in _st_low)
-                    _has_pick  = sum(1 for w in _pick_words if w in _st_low)
-                    if _has_other >= 2 and _has_pick == 0:
-                        print(f"   ⚠️  Síntesis contradictoria (mencionó equipo contrario) — usando razonamiento base")
-                        _syn_text = (base.get("razonamiento", "") or "")[:500]
-        _final_razon = f"{_syn_text} {_panel_tag}"
-    else:
-        # Fallback: usar el razonamiento del experto base si Sonnet falla
-        _final_razon = (base.get("razonamiento", "") or "") + f" {_panel_tag}"
-
-    # Hard limit: 500 caracteres máximo sin importar la fuente
-    merged["razonamiento"] = _wrap_reasoning(_final_razon)[:500]
-
-    merged["_votos_favor"] = votos_favor   # expuesto para bypass-veto guard en analyze_game_full
+    merged["razonamiento"]        = _wrap_reasoning(razon)[:500]
+    merged["factores_positivos"]  = list(dict.fromkeys(res.get("factores_positivos") or []))[:6]
+    merged["factores_negativos"]  = list(dict.fromkeys(res.get("factores_negativos") or []))[:4]
+    merged["datos_inconsistentes"]= list(dict.fromkeys(res.get("datos_inconsistentes") or []))
+    # _votos_favor: 1 = apostar, 0 = no apostar — backward-compatible with bypass-veto guard
+    merged["_votos_favor"] = 1 if apostar else 0
     return merged
 
 
