@@ -9022,7 +9022,7 @@ def build_analizar_text(result: dict) -> list:
         if _most_prob_pick:
             _mp_lbc2, _mp_mc = _most_prob_pick
             _vl.append(f"🎯 Mejor EV:     {_blr}")
-            _vl.append(f"   EV +{best_c.get('ev_pct',0):.1f}%  Prob {round(best_c.get('prob',0)*100)}%"
+            _vl.append(f"   EV +{best_c.get('ev_pct',0):.1f}%  Prob {round(best_c.get('true_prob',0)*100)}%"
                        f"  @{best_c.get('odds',0):.2f} {best_c.get('book','')}  Stake ${best_c.get('stake',0):.0f}")
             _vl.append(f"📊 Más probable: {_mp_lbc2}")
             _vl.append(f"   EV {_mp_mc.get('ev_pct',0):+.1f}%  Prob {round(_mp_mc.get('prob',0)*100)}%"
