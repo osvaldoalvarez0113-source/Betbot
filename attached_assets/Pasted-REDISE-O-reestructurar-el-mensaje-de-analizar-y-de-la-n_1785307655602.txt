@@ -1,0 +1,25 @@
+REDISEÑO: reestructurar el mensaje de /analizar y de la notificación diaria en bloques temáticos, y agregar RLM + umpire tendency que ya existen en el código pero nunca se muestran en la tarjeta.
+
+1. Reestructurar build_analizar_text() y notify_game_analysis() para que el mensaje siga este orden y formato de bloques, cada uno con encabezado y línea divisora (━━━ o similar):
+
+   🎯 PITCHEO — tabla actual (W-L/ERA/WHIP/IP/H/K/BB/HR lado a lado) + debajo, en el mismo bloque: la línea de FIP luck y la de BABIP flag (_babip_flag()) — ahora mismo quedan sueltas fuera de este bloque, muévelas aquí.
+
+   📈 STATCAST — convertir el bloque actual (un párrafo por pitcher) en tabla lado a lado igual que PITCHEO: xERA, Whiff%, Hard Hit%, Barrel%, cada pitcher en su columna.
+
+   🌤️ CONTEXTO — clima, viento, lesionados, todo agrupado en este bloque (ya está casi junto, solo formalizarlo como sección propia).
+
+   ⚾ OFENSIVA — fusionar en una sola tabla por equipo (columnas lado a lado): AVG/OPS, K%, Forma 14d, Bullpen ERA, Récord, Home/Away (anota/recibe/gana%), Día/Noche. Hoy esto está repartido en FORMA 14d, CLAVES, RÉCORD, HOME/AWAY, DÍA/NOCHE como secciones separadas — combínalas en una tabla.
+
+   💰 MERCADOS — dejar como está (ya funciona bien).
+
+   ✅ VEREDICTO — Panel + Recomendación + Pick/Cuota/Stake + nota de verificación + hora límite de apuesta, como cierre.
+
+2. Agregar RLM (reverse line movement, de rlm_detector.py) como línea nueva dentro del bloque 💰 MERCADOS — mostrar solo si hay movimiento detectado en contra del dinero público, con un ícono de alerta.
+
+3. Agregar umpire tendency (de umpire_tendency.py) como línea nueva dentro del bloque 🌤️ CONTEXTO — mostrar el nombre del umpire asignado y su tendencia (zona amplia/apretada, o su efecto histórico en el total de carreras).
+
+4. IMPORTANTE: verifica el conteo de caracteres del mensaje final con estos dos agregados. Si se acerca al límite de 4096 de Telegram, avísame antes de aplicar — no quiero volver a toparme con el bug de mensaje partido en dos.
+
+5. No toques la lógica de cálculo de EV/Kelly/panel — esto es solo reestructuración de presentación + exponer dos módulos que ya existen.
+
+6. Confirma con push a GitHub y commit hash, y que Railway hizo el redeploy correspondiente, antes de darlo por terminado.
