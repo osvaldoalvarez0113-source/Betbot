@@ -11772,8 +11772,12 @@ def _pre_validate_for_claude(game_data: dict, sport: str) -> "tuple[dict, list]"
             keys_to_remove.append(k)
         elif isinstance(v, float) and v in PLACEHOLDER_FLOATS and k in RS_RA_KEYS:
             keys_to_remove.append(k)               # 4.5 placeholder
-        elif isinstance(v, str) and v.startswith("4.5") and k in RS_RA_KEYS:
-            keys_to_remove.append(k)               # "4.5" string placeholder
+        elif isinstance(v, str) and k in RS_RA_KEYS:
+            try:
+                if float(v) in PLACEHOLDER_FLOATS:
+                    keys_to_remove.append(k)       # exact 4.5 / 4.50 string placeholder
+            except (ValueError, TypeError):
+                pass
     for k in keys_to_remove:
         clean.pop(k, None)
         if not k.startswith("_"):
