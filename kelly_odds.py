@@ -8161,11 +8161,17 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
             if all_mkts_lines else ""
         )
 
+        # Build encabezado <pre> block (action + timing + más probable)
+        _hdr_rows = [action_line.rstrip()]
+        if _tw_n:
+            _hdr_rows.append(_tw_n.rstrip())
+        if _mpl_n:
+            _hdr_rows.append(_mpl_n.rstrip())
+        _hdr_pre = "<pre>" + "\n".join(_hdr_rows) + "</pre>"
+
         body = (
             f"{emoji} {match_es} — ⏰ {gt}\n"
-            f"{action_line}\n"
-            f"{_tw_n}"
-            f"{_mpl_n}"
+            f"{_hdr_pre}\n"
             f"{_DIV}\n"
             f"{ctx_lines}"
             f"{_DIV}\n"
@@ -8723,34 +8729,37 @@ def build_analizar_text(result: dict) -> list:
     best_c = cands[0] if cands else {}
     SEP    = f"{'─'*22}\n"
 
-    # ─── 1. ENCABEZADO ────────────────────────────────────────────────────────
+    # ─── 1. ENCABEZADO (título fuera del recuadro, visual) ───────────────────
     p1 = f"{emoji} <b>{home_es} vs {away_es}</b>  ⏰ {gt}\n"
 
-    # ─── 2. VEREDICTO rápido ──────────────────────────────────────────────────
+    # ─── 2–4. VEREDICTO rápido + VENTANA + MÁS PROBABLE → <pre> ─────────────
+    _hv = []   # plain-text lines for the <pre> block
+
+    # 2. Apuesta / Sin apuesta
     if final_apostar is True and best_c:
         _bl = (best_c.get("label", "?")
                .replace("🔵 ","").replace("🔴 ","")
                .replace("📈 ","").replace("📉 ","")
                .replace("🏃 ","").replace("🤝 ",""))
-        p1 += (f"🚦 <b>APUESTA: {_bl}</b>\n"
-               f"   EV +{best_c.get('ev_pct',0):.1f}% | {best_c.get('odds',0):.2f} "
-               f"{best_c.get('book','')} | Stake ${best_c.get('stake',0):.0f}\n")
+        _hv.append(f"🚦 APUESTA: {_bl}")
+        _hv.append(f"   EV +{best_c.get('ev_pct',0):.1f}% | {best_c.get('odds',0):.2f} "
+                   f"{best_c.get('book','')} | Stake ${best_c.get('stake',0):.0f}")
     elif final_apostar is False:
-        p1 += f"🚦 <b>SIN APUESTA</b> — panel vetó el pick\n"
+        _hv.append("🚦 SIN APUESTA — panel vetó el pick")
     elif cands:
-        p1 += f"🚦 <b>SIN APUESTA</b> — EV +{cands[0].get('ev_pct',0):.1f}% sin prob. mínima\n"
+        _hv.append(f"🚦 SIN APUESTA — EV +{cands[0].get('ev_pct',0):.1f}% sin prob. mínima")
     elif all_mkts:
         _pos_v = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
         if _pos_v:
             _bl_v, _bm_v = max(_pos_v, key=lambda x: x[1]["ev_pct"])
             _bl_vc = _bl_v.replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
-            p1 += f"🚦 <b>SIN APUESTA</b> — mejor: {_bl_vc} EV +{_bm_v['ev_pct']:.1f}%\n"
+            _hv.append(f"🚦 SIN APUESTA — mejor: {_bl_vc} EV +{_bm_v['ev_pct']:.1f}%")
         else:
-            p1 += "🚦 <b>SIN APUESTA</b> — sin ventaja detectada\n"
+            _hv.append("🚦 SIN APUESTA — sin ventaja detectada")
     else:
-        p1 += "🚦 <b>SIN APUESTA</b> — sin odds disponibles\n"
+        _hv.append("🚦 SIN APUESTA — sin odds disponibles")
 
-    # ─── 3. VENTANA (1 línea, solo si hay pick) ───────────────────────────────
+    # 3. Ventana de apuesta (solo si hay pick)
     if cands:
         try:
             _tw = _bet_timing_advice(
@@ -8758,14 +8767,14 @@ def build_analizar_text(result: dict) -> list:
                 result.get("time","")
             )
             if _tw:
-                p1 += f"⏰ {_tw.splitlines()[0].lstrip('⏰').strip()}\n"
+                _hv.append(f"⏰ {_tw.splitlines()[0].lstrip('⏰').strip()}")
         except Exception:
             pass
 
-    # ─── 4. MÁS PROBABLE (1 línea) ───────────────────────────────────────────
+    # 4. Más probable
     _mp = result.get("most_prob_pick") or {}
     if _mp.get("team"):
-        p1 += f"💡 Más probable: {_es(_mp['team'])} ({_mp.get('prob','?')}%)\n"
+        _hv.append(f"💡 Más probable: {_es(_mp['team'])} ({_mp.get('prob','?')}%)")
     elif all_mkts:
         _hml = next((m.get("prob",0) for lb,m in all_mkts.items()
                      if "🔵" in lb and "ML" in lb.upper()), None)
@@ -8773,11 +8782,11 @@ def build_analizar_text(result: dict) -> list:
                      if "🔴" in lb and "ML" in lb.upper()), None)
         if _hml is not None and _aml is not None:
             if _hml >= _aml:
-                p1 += f"💡 Más probable: {home_es} ({round(_hml*100)}%)\n"
+                _hv.append(f"💡 Más probable: {home_es} ({round(_hml*100)}%)")
             else:
-                p1 += f"💡 Más probable: {away_es} ({round(_aml*100)}%)\n"
+                _hv.append(f"💡 Más probable: {away_es} ({round(_aml*100)}%)")
 
-    p1 += SEP
+    p1 += "<pre>" + "\n".join(_hv) + "</pre>\n" + SEP
 
     if is_mlb:
         pn_h = ctx.get("pname_home","TBD") if ctx else "TBD"
