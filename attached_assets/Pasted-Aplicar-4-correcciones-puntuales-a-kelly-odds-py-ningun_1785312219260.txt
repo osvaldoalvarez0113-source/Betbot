@@ -1,0 +1,22 @@
+Aplicar 4 correcciones puntuales a kelly_odds.py — ninguna toca lógica de negocio, solo claridad y robustez:
+
+1. En fetch_probable_pitchers_today(), reescribir este bloque para no reusar "a_era" como variable temporal del ERA local:
+
+   ACTUAL:
+   h_era = _fetch_pitcher_era_by_id(home_p['id']) if home_p.get('id') else 4.50
+   a_era = home_p.get('era', 4.50) if home_p.get('_fallback') else h_era
+   h_era = a_era if home_p.get('_fallback') else h_era
+   a_era = _fetch_pitcher_era_by_id(away_p['id']) if away_p.get('id') else 4.50
+   if away_p.get('_fallback'):
+       a_era = away_p.get('era', 4.50)
+
+   NUEVO: usar una variable temporal con nombre claro (ej. _home_fallback_era) en vez de reusar a_era, para que la lógica sea legible sin tener que rastrear el orden de las líneas. El comportamiento final debe ser idéntico — solo cambia la claridad del código.
+
+2. Corregir el comentario desactualizado en la constante PROB_MIN_ML:
+   Busca "Improvement 2: ML requires ≥62% probability (checked after cap)" y actualízalo a "ML requires ≥50% probability (PROB_MIN_ML, checked after cap)" para que coincida con el valor real de la constante (0.50).
+
+3. Reemplazar todos los usos de datetime.utcnow() por datetime.now(timezone.utc) en todo el archivo (aparece en game_starts_soon, _game_already_started, _days_until, y cualquier otro lugar donde se use). Asegúrate de que "timezone" esté importado desde el módulo datetime si no lo está ya. Verifica que las comparaciones con estos datetimes sigan funcionando igual (algunos lugares comparan contra datetimes naive — ajusta esas comparaciones para que sigan siendo consistentes, ya sea haciendo ambos aware o ambos naive).
+
+4. Agregar poda por fecha a los cachés en memoria que no la tienen, siguiendo el mismo patrón que ya usa _stats_disk_cache (filtrar entradas que no sean del día actual). Aplica esto a los cachés más grandes y de mayor uso: _pitcher_cache, _splits_cache, _umpire_cache, _enh_ctx_cache, _bullpen_era_cache, _team_run_cache. Cada uno debe limpiar entradas de fechas anteriores una vez por día (puedes usar el mismo checkeo de "today" que ya usan al escribir, agregando una poda simple al inicio de cada función o en un solo punto centralizado si es más limpio).
+
+Para cada uno de los 4 puntos, confirma qué líneas cambiaste. Push a GitHub con commit hash al final, y confirma que Railway hizo el redeploy.
