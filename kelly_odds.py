@@ -8,6 +8,11 @@ from zoneinfo import ZoneInfo
 import pytz
 from contexto_juego import obtener_contexto, ajustar_total, ajustar_ml
 try:
+    import racha_detector as _racha
+    HAS_RACHA = True
+except ImportError:
+    HAS_RACHA = False
+try:
     from paquete_avanzado import registrar_pick, clv_tracker, run_modulos_avanzados
     HAS_PAQUETE_AVANZADO = True
 except ImportError:
@@ -7817,6 +7822,13 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                 _lr_lines_n.append(_ln)
             if _lr_lines_n:
                 ctx_lines += "⚔️ VS MANOS\n" + "\n".join(_lr_lines_n) + "\n"
+            # Racha reciente (informational — does not alter EV/Kelly)
+            if HAS_RACHA:
+                _racha_line_n = _racha.get_racha_line(home, home_es, away, away_es)
+                if _racha_line_n:
+                    ctx_lines += f"{_racha_line_n}\n"
+                for _rn_n in _racha.get_regression_notes(home, home_es, away, away_es):
+                    ctx_lines += f"{_rn_n}\n"
             # Park factor, last 5 games, bullpen load, H2H as supplements
             ctx_lines += f"{_park_label(ctx['park_factor'])}\n"
             for tname, tname_es in ((home, home_es), (away, away_es)):
@@ -8888,6 +8900,13 @@ def build_analizar_text(result: dict) -> list:
                 _lr_lines.append(_ln)
             if _lr_lines:
                 p1 += "⚔️ <b>VS MANOS</b>\n" + "\n".join(_lr_lines) + "\n"
+            # Racha reciente (informational — does not alter EV/Kelly)
+            if HAS_RACHA:
+                _racha_line = _racha.get_racha_line(home, home_es, away, away_es)
+                if _racha_line:
+                    p1 += f"{_racha_line}\n"
+                for _rn in _racha.get_regression_notes(home, home_es, away, away_es):
+                    p1 += f"{_rn}\n"
             p1 += SEP
 
     else:
@@ -8968,12 +8987,35 @@ def build_analizar_text(result: dict) -> list:
     if final_apostar is True and best_c:
         _blr = (best_c.get("label","?")
                 .replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ",""))
-        p2 += (f"\n{_DIV2}\n"
-               f"🎯 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
-               f"{_DIV2}\n\n"
-               f"Pick:   <b>{_blr}</b>\n"
-               f"Cuota:  @{best_c.get('odds',0):.2f} ({best_c.get('book','')})\n"
-               f"Stake:  ${best_c.get('stake',0):.0f}\n")
+        # Find most-probable pick (may differ from best-EV pick)
+        _most_prob_pick = None
+        if all_mkts:
+            _mp_items = [(lb, m) for lb, m in all_mkts.items() if m.get("prob", 0) > 0]
+            if _mp_items:
+                _mp_lb, _mp_m = max(_mp_items, key=lambda x: x[1].get("prob", 0))
+                _mp_lbc = (_mp_lb.replace("🔵 ","").replace("🔴 ","")
+                                  .replace("📈 ","").replace("📉 ",""))
+                if _mp_lbc != _blr:
+                    _most_prob_pick = (_mp_lbc, _mp_m)
+        if _most_prob_pick:
+            _mp_lbc2, _mp_mc = _most_prob_pick
+            p2 += (f"\n{_DIV2}\n"
+                   f"🎯 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
+                   f"{_DIV2}\n\n"
+                   f"🎯 Mejor EV:     <b>{_blr}</b>\n"
+                   f"   EV +{best_c.get('ev_pct',0):.1f}% | Prob {round(best_c.get('prob',0)*100)}%"
+                   f" @{best_c.get('odds',0):.2f} ({best_c.get('book','')})"
+                   f" | Stake ${best_c.get('stake',0):.0f}\n"
+                   f"📊 Más probable: <b>{_mp_lbc2}</b>\n"
+                   f"   EV {_mp_mc.get('ev_pct',0):+.1f}% | Prob {round(_mp_mc.get('prob',0)*100)}%"
+                   f" @{_mp_mc.get('odds',0):.2f} ({_mp_mc.get('book','')})\n")
+        else:
+            p2 += (f"\n{_DIV2}\n"
+                   f"🎯 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
+                   f"{_DIV2}\n\n"
+                   f"Pick:   <b>{_blr}</b>\n"
+                   f"Cuota:  @{best_c.get('odds',0):.2f} ({best_c.get('book','')})\n"
+                   f"Stake:  ${best_c.get('stake',0):.0f}\n")
         if panel_razon: p2 += f"\n<i>{panel_razon}</i>\n"
     elif final_apostar is False:
         p2 += (f"\n{_DIV2}\n"
