@@ -10685,20 +10685,29 @@ def check_results():
 # ── Module 4: MLB IL / injuries ───────────────────────────────────────────────
 _injury_cache: dict = {}
 
-# Key positions to show on IL — starters and ace pitchers only; skip relievers/utility
-_KEY_IL_POSITIONS = {"SP", "C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH"}
+# Real IL status codes from the MLB Stats API 40Man roster endpoint.
+# rosterType=injured is a broken alias for the active 26-man roster — do NOT use it.
+# D7/D10/D15/D60 are the actual Injured List designations.
+_IL_STATUS_CODES = {"D7", "D10", "D15", "D60"}
+
+# Position players shown first (impact offense directly); SP second; relievers skipped.
+_IL_POS_PLAYERS   = {"C", "1B", "2B", "3B", "SS", "LF", "CF", "RF", "DH"}
+_IL_POS_PITCHERS  = {"SP"}
+_IL_MAX_PER_TEAM  = 4   # max names shown per team in CONTEXTO
+
 
 def _fetch_espn_injuries(team_name: str) -> list:
     """
     Secondary IL source: ESPN injuries API.
-    Returns list of player name strings for KEY positions only.
+    Returns list of (name, pos_abbr) tuples for players with an Injured List status only.
+    An empty list means ESPN returned nothing or the call failed — not an error.
     """
     try:
         tid = _fetch_espn_mlb_team_id(team_name)
         if not tid:
             return []
         r = requests.get(
-            f"http://site.api.espn.com/apis/site/v2/sports/baseball/mlb"
+            f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb"
             f"/teams/{tid}/injuries",
             timeout=8,
         )
@@ -10706,34 +10715,49 @@ def _fetch_espn_injuries(team_name: str) -> list:
             return []
         players = []
         for inj in r.json().get("injuries", []):
-            athlete = inj.get("athlete", {})
-            name    = athlete.get("displayName", "")
-            pos_ab  = athlete.get("position", {}).get("abbreviation", "")
-            if name and pos_ab in _KEY_IL_POSITIONS:
-                players.append(name)
+            athlete  = inj.get("athlete", {})
+            name     = athlete.get("displayName", "")
+            pos_ab   = athlete.get("position", {}).get("abbreviation", "")
+            # ESPN uses type.description = "Injured List" or severity = "Out" for IL entries
+            inj_type = inj.get("type", {}).get("description", "")
+            severity = inj.get("severity", "")
+            on_il    = ("Injured List" in inj_type
+                        or "IL" in inj_type.upper()
+                        or severity.upper() in {"OUT", "IL"})
+            if name and pos_ab in (_IL_POS_PLAYERS | _IL_POS_PITCHERS) and on_il:
+                players.append((name, pos_ab))
         return players
     except Exception:
         return []
 
+
 def fetch_mlb_il(home, away):
     """
-    Return {team_name: [player_names]} for KEY IL players on both teams.
-    KEY = SP (starting pitchers) + regular lineup positions (C/1B/2B/3B/SS/LF/CF/RF/DH).
-    Relievers (RP/CL/MR) and utility bench players are silently skipped.
+    Return {team_name: [player_names]} for KEY players on the real MLB Injured List.
 
-    Primary  : MLB Stats API /teams/{tid}/roster?rosterType=injured (with position filter)
-    Secondary: ESPN injuries API (merged + deduplicated)
-    Cache    : per team pair per day.
-    If both sources fail → returns {} (show nothing, not wrong data).
+    Source: MLB Stats API /teams/{tid}/roster?rosterType=40Man
+      — The only endpoint that exposes real IL status codes (D7/D10/D15/D60).
+      — rosterType=injured is a broken alias for the 26-man active roster; never use it.
+
+    Relevance filter (applied after confirming real IL status):
+      1. Position players (C/1B/2B/3B/SS/LF/CF/RF/DH) — listed first
+      2. Starting pitchers (SP) — listed second
+      3. Relievers / bench utility — silently skipped
+      4. Max _IL_MAX_PER_TEAM names per team
+
+    Secondary: ESPN injuries API (merged + deduplicated), gated on IL-type status.
+    Cache: per team pair per calendar day.
+    If both sources fail → returns {} (show nothing rather than wrong data).
     """
     today_str = datetime.now(ET).strftime("%Y-%m-%d")
     cache_key = f"{home}|{away}|{today_str}"
     if cache_key in _injury_cache:
         return _injury_cache[cache_key]
+
     result = {}
     for tname in (home, away):
         try:
-            # ── Primary: MLB Stats API ─────────────────────────────────────
+            # ── Primary: MLB Stats API 40Man roster ───────────────────────
             tid = None
             if HAS_STATSAPI:
                 teams = statsapi.lookup_team(tname)
@@ -10743,33 +10767,52 @@ def fetch_mlb_il(home, away):
                 teams = data.get("teams", [])
                 tid   = teams[0]["id"] if teams else None
 
-            mlb_players = []
+            pos_players  = []   # position players on real IL
+            sp_players   = []   # starting pitchers on real IL
+
             if tid is not None:
                 roster = _mlb_rest(f"/teams/{tid}/roster",
-                                   {"rosterType": "injured", "season": MLB_YEAR})
+                                   {"rosterType": "40Man", "season": MLB_YEAR})
                 for p in roster.get("roster", []):
+                    status_code = p.get("status", {}).get("code", "")
+                    if status_code not in _IL_STATUS_CODES:
+                        continue   # Active, RM, or other — not on IL
                     name   = p.get("person", {}).get("fullName", "")
                     pos_ab = p.get("position", {}).get("abbreviation", "")
-                    if name and pos_ab in _KEY_IL_POSITIONS:
-                        mlb_players.append(name)
+                    if not name:
+                        continue
+                    if pos_ab in _IL_POS_PLAYERS:
+                        pos_players.append(name)
+                    elif pos_ab in _IL_POS_PITCHERS:
+                        sp_players.append(name)
+                    # else: reliever / other — skip
 
-            # ── Secondary: ESPN injuries API ───────────────────────────────
-            espn_players = _fetch_espn_injuries(tname)
+            # ── Secondary: ESPN injuries API ──────────────────────────────
+            espn_raw = _fetch_espn_injuries(tname)
+            seen = {n.lower() for n in pos_players + sp_players}
+            for ep_name, ep_pos in espn_raw:
+                if ep_name.lower() in seen:
+                    continue
+                seen.add(ep_name.lower())
+                if ep_pos in _IL_POS_PLAYERS:
+                    pos_players.append(ep_name)
+                elif ep_pos in _IL_POS_PITCHERS:
+                    sp_players.append(ep_name)
 
-            # Merge + deduplicate (case-insensitive; MLB Stats names take priority)
-            seen   = {n.lower() for n in mlb_players}
-            merged = list(mlb_players)
-            for ep in espn_players:
-                if ep.lower() not in seen:
-                    merged.append(ep)
-                    seen.add(ep.lower())
+            # ── Merge: position players first, then SP, cap at max ────────
+            merged = (pos_players + sp_players)[:_IL_MAX_PER_TEAM]
 
             if merged:
                 result[tname] = merged
-                print(f"  🤕 IL [{tname}]: {', '.join(merged[:5])}"
-                      f"{'...' if len(merged) > 5 else ''}")
+                all_count = len(pos_players) + len(sp_players)
+                print(f"  🤕 IL [{tname}] ({all_count} total, showing {len(merged)}): "
+                      f"{', '.join(merged)}")
+            else:
+                print(f"  ✅ IL [{tname}]: no key players on IL today")
+
         except Exception as _e:
             print(f"  ⚠️  fetch_mlb_il [{tname}]: {_e}")
+
     _injury_cache[cache_key] = result
     return result
 
