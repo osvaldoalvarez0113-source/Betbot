@@ -8440,6 +8440,12 @@ def _supplementary_context_blocks(
     return out
 
 
+def _strip_html(s: str) -> str:
+    """Remove HTML tags — used when embedding text inside <pre> blocks."""
+    import re as _re_sh
+    return _re_sh.sub(r'<[^>]+>', '', s)
+
+
 def _mkt_row(lbl: str, m: dict, is_pick: bool) -> str:
     """Single clean market row with icon."""
     ev   = m.get("ev_pct", 0)
@@ -8841,8 +8847,8 @@ def build_analizar_text(result: dict) -> list:
                         f"  ERA por salida: {_era_seq}\n"
                     )
         if _forma_blks:
-            p1 += "\n📊 Forma reciente (últimas 3 salidas)\n\n"
-            p1 += "\n".join(_forma_blks) + "\n"
+            _forma_pre = "\n".join(b.rstrip("\n") for b in _forma_blks)
+            p1 += "📊 <b>Forma reciente</b> (últimas 3 salidas)\n<pre>" + _forma_pre + "</pre>\n"
 
         # Pitcher conflicts (within PITCHEO)
         for _cf in ctx.get("pitcher_conflicts", []):
@@ -8878,7 +8884,7 @@ def build_analizar_text(result: dict) -> list:
         if ctx.get("ttt_note"):
             _ctx_items.append(ctx["ttt_note"].rstrip())
         if _ctx_items:
-            p1 += "🌤️ <b>CONTEXTO</b>\n" + "".join(f"{l}\n" for l in _ctx_items) + SEP
+            p1 += "🌤️ <b>CONTEXTO</b>\n<pre>" + "\n".join(_ctx_items) + "</pre>\n" + SEP
 
         # ─── 8. ⚾ OFENSIVA ───────────────────────────────────────────────────
         _of_blk = _ofensiva_unified_block(
@@ -8937,18 +8943,16 @@ def build_analizar_text(result: dict) -> list:
         _mkt_others = [(lb,m) for lb,m in all_mkts.items() if lb not in cand_lbs]
         _mkt_picks.sort( key=lambda x: x[1].get("ev_pct",0), reverse=True)
         _mkt_others.sort(key=lambda x: x[1].get("ev_pct",0), reverse=True)
+        _mkt_pre_rows = []
         for lb, m in (_mkt_picks + _mkt_others):
-            _ip  = lb in cand_lbs
-            ev_v = m.get("ev_pct",0)
-            icon = "✅" if _ip else ("❌" if ev_v < 0 else "➖")
-            p1 += (f"{icon} <b>{lb}</b>\n"
-                   f"  EV {ev_v:+.1f}% | Prob {round(m.get('prob',0)*100)}%"
-                   f" | @{m.get('odds',0):.2f} ({m.get('book','')})\n\n")
+            _ip = lb in cand_lbs
+            _mkt_pre_rows.append(_mkt_row(lb, m, _ip))
             if "⚡" in lb: _has_k = True
+        p1 += "<pre>" + "\n".join(_mkt_pre_rows) + "</pre>\n"
         if not _has_k and is_mlb:
             p1 += "⚡ Props K: sin K/9 >8.5 confirmado — preferir ML\n"
     else:
-        p1 += "Sin odds disponibles\n"
+        p1 += "<pre>Sin odds disponibles</pre>\n"
 
     # RLM — within MERCADOS, only shown when sharp money detected
     if is_mlb:
@@ -8958,37 +8962,17 @@ def build_analizar_text(result: dict) -> list:
         elif _rlm.get("square_note"):
             p1 += f"\n{_rlm['square_note']}\n"
 
-    # ─── 10. ✅ VEREDICTO (p2) — Panel + Recomendación + cierre ──────────────
+    # ─── 10. ✅ VEREDICTO (p2) — una sola caja <pre> con Panel + Recomendación ──
     experts   = ci.get("_expertos_detalle") or []
     _ci_icons = {"ALTA":"🟢","MEDIA":"🟡","BAJA":"🔴"}
-
-    p2 = SEP + "✅ <b>VEREDICTO</b>\n" + SEP + "🎓 <b>PANEL</b>\n"
-    if experts:
-        for ex in experts:
-            ap       = "✅" if ex.get("apostar") is True else ("❌" if ex.get("apostar") is False else "⚪")
-            conf_lbl = ex.get("confianza", "") or ""
-            ec       = _ci_icons.get(conf_lbl, "⚪")
-            raz      = _wrap_reasoning((ex.get("razonamiento") or "").strip())
-            p2 += f"🎓 <b>{ex['nombre']}</b>   {ap}  {ec} {conf_lbl}\n<i>{raz}</i>\n\n"
-    else:
-        if not cands and all_mkts:
-            pos = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
-            if pos:
-                bl,bm = max(pos, key=lambda x: x[1]["ev_pct"])
-                blc = bl.replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
-                p2 += f"ℹ️ Sin panel — mejor: {blc} EV +{bm['ev_pct']:.1f}%\n"
-            else:
-                p2 += "ℹ️ Sin panel — todos los mercados con EV negativo\n"
-        else:
-            p2 += "ℹ️ Sin panel\n"
-
     panel_razon = _wrap_reasoning((ci.get("razonamiento") or "").strip())
 
+    # Pre-compute most-probable pick so it's available inside the pre block
+    _blr = ""
+    _most_prob_pick = None
     if final_apostar is True and best_c:
         _blr = (best_c.get("label","?")
                 .replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ",""))
-        # Find most-probable pick (may differ from best-EV pick)
-        _most_prob_pick = None
         if all_mkts:
             _mp_items = [(lb, m) for lb, m in all_mkts.items() if m.get("prob", 0) > 0]
             if _mp_items:
@@ -8997,36 +8981,74 @@ def build_analizar_text(result: dict) -> list:
                                   .replace("📈 ","").replace("📉 ",""))
                 if _mp_lbc != _blr:
                     _most_prob_pick = (_mp_lbc, _mp_m)
+
+    p2 = SEP + "✅ <b>VEREDICTO</b>\n" + SEP
+
+    # Build all veredicto content as plain-text lines → single <pre> block
+    _vl = []
+
+    # ── Panel ──────────────────────────────────────────────────────────────────
+    _vl.append("🎓 PANEL")
+    _vl.append("─" * 22)
+    if experts:
+        for ex in experts:
+            ap       = "✅" if ex.get("apostar") is True else ("❌" if ex.get("apostar") is False else "⚪")
+            conf_lbl = ex.get("confianza", "") or ""
+            ec       = _ci_icons.get(conf_lbl, "⚪")
+            nombre   = _strip_html(ex.get("nombre") or "?")
+            raz      = _strip_html(_wrap_reasoning((ex.get("razonamiento") or "").strip()))
+            _vl.append(f"{nombre}  {ap} {ec} {conf_lbl}")
+            for _rl in raz.splitlines():
+                _vl.append(f"  {_rl}")
+            _vl.append("")
+    else:
+        if not cands and all_mkts:
+            pos = [(l,m) for l,m in all_mkts.items() if m.get("ev_pct",0)>0]
+            if pos:
+                bl,bm = max(pos, key=lambda x: x[1]["ev_pct"])
+                blc = bl.replace("🔵 ","").replace("🔴 ","").replace("📈 ","").replace("📉 ","")
+                _vl.append(f"Sin panel — mejor: {blc} EV +{bm['ev_pct']:.1f}%")
+            else:
+                _vl.append("Sin panel — todos los mercados con EV negativo")
+        else:
+            _vl.append("Sin panel")
+        _vl.append("")
+
+    # ── Recomendación ──────────────────────────────────────────────────────────
+    _vl.append("═" * 22)
+    if final_apostar is True and best_c:
+        _vl.append("RECOMENDACIÓN: ✅ APOSTAR")
+        _vl.append("")
         if _most_prob_pick:
             _mp_lbc2, _mp_mc = _most_prob_pick
-            p2 += (f"\n{_DIV2}\n"
-                   f"🎯 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
-                   f"{_DIV2}\n\n"
-                   f"🎯 Mejor EV:     <b>{_blr}</b>\n"
-                   f"   EV +{best_c.get('ev_pct',0):.1f}% | Prob {round(best_c.get('prob',0)*100)}%"
-                   f" @{best_c.get('odds',0):.2f} ({best_c.get('book','')})"
-                   f" | Stake ${best_c.get('stake',0):.0f}\n"
-                   f"📊 Más probable: <b>{_mp_lbc2}</b>\n"
-                   f"   EV {_mp_mc.get('ev_pct',0):+.1f}% | Prob {round(_mp_mc.get('prob',0)*100)}%"
-                   f" @{_mp_mc.get('odds',0):.2f} ({_mp_mc.get('book','')})\n")
+            _vl.append(f"🎯 Mejor EV:     {_blr}")
+            _vl.append(f"   EV +{best_c.get('ev_pct',0):.1f}%  Prob {round(best_c.get('prob',0)*100)}%"
+                       f"  @{best_c.get('odds',0):.2f} {best_c.get('book','')}  Stake ${best_c.get('stake',0):.0f}")
+            _vl.append(f"📊 Más probable: {_mp_lbc2}")
+            _vl.append(f"   EV {_mp_mc.get('ev_pct',0):+.1f}%  Prob {round(_mp_mc.get('prob',0)*100)}%"
+                       f"  @{_mp_mc.get('odds',0):.2f} {_mp_mc.get('book','')}")
         else:
-            p2 += (f"\n{_DIV2}\n"
-                   f"🎯 <b>RECOMENDACIÓN: ✅ APOSTAR</b>\n"
-                   f"{_DIV2}\n\n"
-                   f"Pick:   <b>{_blr}</b>\n"
-                   f"Cuota:  @{best_c.get('odds',0):.2f} ({best_c.get('book','')})\n"
-                   f"Stake:  ${best_c.get('stake',0):.0f}\n")
-        if panel_razon: p2 += f"\n<i>{panel_razon}</i>\n"
+            _vl.append(f"Pick:   {_blr}")
+            _vl.append(f"Cuota:  @{best_c.get('odds',0):.2f} ({best_c.get('book','')})")
+            _vl.append(f"Stake:  ${best_c.get('stake',0):.0f}")
+        if panel_razon:
+            _vl.append("")
+            for _prl in panel_razon.splitlines():
+                _vl.append(f"  {_prl}")
     elif final_apostar is False:
-        p2 += (f"\n{_DIV2}\n"
-               f"🎯 <b>RECOMENDACIÓN: ❌ PASAR</b>\n"
-               f"{_DIV2}\n")
-        if panel_razon: p2 += f"\n<i>{panel_razon}</i>\n"
+        _vl.append("RECOMENDACIÓN: ❌ PASAR")
+        if panel_razon:
+            _vl.append("")
+            for _prl in panel_razon.splitlines():
+                _vl.append(f"  {_prl}")
     else:
-        p2 += (f"\n{_DIV2}\n"
-               f"🎯 <b>RECOMENDACIÓN: ⛔ SIN APUESTA</b>\n"
-               f"{_DIV2}\n")
-        if panel_razon: p2 += f"\n<i>{panel_razon}</i>\n"
+        _vl.append("RECOMENDACIÓN: ⛔ SIN APUESTA")
+        if panel_razon:
+            _vl.append("")
+            for _prl in panel_razon.splitlines():
+                _vl.append(f"  {_prl}")
+
+    p2 += "<pre>" + "\n".join(_vl) + "</pre>\n"
 
     _pmw = result.get("pinnacle_mov_warn","")
     if _pmw: p2 += f"{SEP}{_pmw}\n"
