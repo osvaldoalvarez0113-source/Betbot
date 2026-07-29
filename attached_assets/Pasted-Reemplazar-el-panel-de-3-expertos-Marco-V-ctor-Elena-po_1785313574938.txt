@@ -1,0 +1,22 @@
+Reemplazar el panel de 3 expertos (Marco/Víctor/Elena) por una sola llamada de análisis directo — reduce de 4 llamadas Claude por pick (3 expertos + síntesis) a 1-2 llamadas.
+
+1. En panel_expertos(), eliminar el loop sobre _EXPERTOS (las 3 personas) y la llamada de síntesis posterior. Reemplazar con una sola llamada a analyze_with_claude() usando un system prompt combinado que integre los tres enfoques en una sola voz de análisis:
+   - Lectura de datos duros (ERA, xERA, Whiff%, Barrel%, BABIP, FIP) — lo que hacía Marco
+   - Lectura de mercado sharp (Pinnacle, movimiento de línea, RLM) — lo que hacía Víctor
+   - Chequeo de riesgos operacionales (lesiones, clima, fatiga de bullpen, viaje, getaway day) — lo que hacía Elena
+
+2. El nuevo system prompt debe mantener las mismas reglas de ponderación que ya existían (REGLA 0 tipo de pick, ponderación de abridor con ERA diff, red flags reales, patrones situacionales MLB 2026) — no perder ese conocimiento acumulado, solo consolidarlo en una sola voz en vez de repartirlo en 3 personas.
+
+3. El formato de salida debe seguir siendo el mismo JSON (apostar, confianza, razonamiento, factores_positivos, factores_negativos, datos_inconsistentes) para no romper build_analizar_text ni notify_game_analysis que ya parsean ese formato.
+
+4. Eliminar el campo _expertos_detalle (ya no aplica al no haber 3 expertos separados) y ajustar el bloque de VEREDICTO en build_analizar_text para mostrar un solo bloque de razonamiento en vez de 3 bloques por experto — mantener el mismo estilo visual de <pre> que ya tiene esa sección.
+
+5. Mantener intacta la lógica de selección de modelo elite vs Haiku (MODELO_ELITE cuando EV≥8%, límite diario MAX_ELITE_DIARIO) — solo aplica ahora a esta única llamada en vez de a 3+1.
+
+6. Mantener el bypass de veto por EV alto + divergencia Pinnacle aceptable — pero ajustar la condición ya que no hay "_votos_favor" de 3 expertos; usar directamente el campo "apostar" de esta única respuesta.
+
+7. Verificar que el conteo de caracteres del mensaje final se mantenga o mejore (menos texto porque ya no hay 3 bloques de expertos por separado).
+
+Prueba con un /analizar real y confírmame que el bloque de VEREDICTO se ve limpio con una sola voz de análisis en vez de 3 nombres.
+
+Push a GitHub con commit hash, confirma que Railway hizo el redeploy.
