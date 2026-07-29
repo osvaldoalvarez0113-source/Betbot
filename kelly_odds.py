@@ -6708,6 +6708,17 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
         except Exception:
             pass
 
+        # Bullpen unavailability (back-to-back relievers / closer unavailable today)
+        _bp_unavail_h = _bp_unavail_a = None
+        try:
+            _bp_unavail_h = fetch_bullpen_unavailable(home)
+        except Exception:
+            pass
+        try:
+            _bp_unavail_a = fetch_bullpen_unavailable(away)
+        except Exception:
+            pass
+
         # MLB A3: temperature adjustment
         temp_f     = (wind.get("temp_f") if wind else None)
         t_adj, t_label = _temp_run_adj(temp_f)
@@ -6832,8 +6843,10 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
                 (6.0 if a_era_eff < 3.00 else 5.5 if a_era_eff < 4.00 else 5.0) / 9.0, 1),
             "pitcher_pace_home":  _h_pace,
             "pitcher_pace_away":  _a_pace,
-            "bullpen_load_home":  _bp_load_h,
-            "bullpen_load_away":  _bp_load_a,
+            "bullpen_load_home":    _bp_load_h,
+            "bullpen_load_away":    _bp_load_a,
+            "bullpen_unavail_home": _bp_unavail_h,
+            "bullpen_unavail_away": _bp_unavail_a,
             "ttt_note":           _ttt_note,
             # Module 7: team season W-L records
             "team_record_home":   _rec_home,
@@ -7859,6 +7872,9 @@ def notify_game_analysis(analyses, sport_key, alerted=None):
                     if _bp_load_a_n.get("flag"):
                         ctx_lines += f" {_bp_load_a_n['flag']}"
                     ctx_lines += "\n"
+            for _bpu_n in [ctx.get("bullpen_unavail_home"), ctx.get("bullpen_unavail_away")]:
+                if _bpu_n and _bpu_n.get("nota"):
+                    ctx_lines += f"{_bpu_n['nota']}\n"
             h2h = ctx.get("h2h_data")
             if h2h and h2h.get("games_found", 0) >= 2:
                 _bl_h2h = ctx.get("h2h_book_line")
@@ -8895,6 +8911,9 @@ def build_analizar_text(result: dict) -> list:
             _ctx_items.append(f"📉 {ctx['line_note']}")
         if ctx.get("ttt_note"):
             _ctx_items.append(ctx["ttt_note"].rstrip())
+        for _bpu in [ctx.get("bullpen_unavail_home"), ctx.get("bullpen_unavail_away")]:
+            if _bpu and _bpu.get("nota"):
+                _ctx_items.append(_bpu["nota"])
         if _ctx_items:
             p1 += "🌤️ <b>CONTEXTO</b>\n<pre>" + "\n".join(_ctx_items) + "</pre>\n" + SEP
 
@@ -11392,6 +11411,178 @@ def fetch_bullpen_load(team_name: str) -> "dict | None":
         return None
 
 
+# ── Bullpen unavailability: back-to-back relievers / closer unavailable today ──
+_bullpen_unavail_cache: dict = {}
+
+def fetch_bullpen_unavailable(team_name: str) -> dict:
+    """
+    Identify relief pitchers who CANNOT pitch today because they worked on
+    back-to-back days (yesterday + day before), or 3+ consecutive days.
+
+    Method:
+      1. Resolve team ID.
+      2. Active roster → collect pitcher IDs.
+      3. Season stats batch → filter to relievers (gamesStarted/gamesPlayed < 0.30)
+         and find the closer (reliever with most saves this season).
+      4. Schedule for last 3 days → boxscore per game → collect relief pitcher IDs
+         who actually appeared (IP > 0, skipping slot 0 = starter).
+      5. Unavailable = appeared BOTH yesterday AND day-before-yesterday.
+      6. Flag separately if the closer is among the unavailable.
+
+    Returns {"no_disponibles": [names], "cerrador_afectado": bool, "nota": str}.
+    On any error returns an empty dict (nota = "") — never raises, never breaks the bot.
+    Cache: per team per calendar day (CDT).
+    """
+    _EMPTY: dict = {"no_disponibles": [], "cerrador_afectado": False, "nota": ""}
+    today_dt  = datetime.now(CDT)
+    today_str = today_dt.strftime("%Y-%m-%d")
+    ck = f"bpu_{team_name}_{today_str}"
+    if ck in _bullpen_unavail_cache:
+        return _bullpen_unavail_cache[ck]
+
+    try:
+        # ── 1. Resolve team ID (same pattern as fetch_bullpen_load) ───────────
+        tid = None
+        if HAS_STATSAPI:
+            tms = statsapi.lookup_team(team_name)
+            if tms:
+                tid = int(tms[0]["id"])
+        if not tid:
+            teams_data = _mlb_rest("/teams", {"sportId": 1, "season": MLB_YEAR})
+            for t in teams_data.get("teams", []):
+                nm = t.get("name", "") or t.get("teamName", "")
+                if team_name.lower() in nm.lower():
+                    tid = int(t["id"])
+                    break
+        if not tid:
+            _bullpen_unavail_cache[ck] = _EMPTY
+            return _EMPTY
+
+        # ── 2. Active roster — collect pitcher IDs → names ────────────────────
+        roster_data = _mlb_rest(f"/teams/{tid}/roster",
+                                {"rosterType": "active", "season": MLB_YEAR})
+        pitcher_ids: dict = {
+            p["person"]["id"]: p.get("person", {}).get("fullName", "?")
+            for p in roster_data.get("roster", [])
+            if p.get("position", {}).get("code") == "P"
+        }
+        if not pitcher_ids:
+            _bullpen_unavail_cache[ck] = _EMPTY
+            return _EMPTY
+
+        # ── 3. Season stats batch → filter relievers, find closer ─────────────
+        ids_str    = ",".join(str(pid) for pid in pitcher_ids)
+        season_raw = _mlb_rest(
+            "/people",
+            {"personIds": ids_str,
+             "hydrate": f"stats(group=pitching,type=season,season={MLB_YEAR})"},
+        )
+        relievers: dict = {}   # pid → {"name": str, "saves": int}
+        for person in season_raw.get("people", []):
+            pid  = person.get("id")
+            name = person.get("fullName", pitcher_ids.get(pid, "?"))
+            for sg in person.get("stats", []):
+                if sg.get("group", {}).get("displayName", "") != "pitching":
+                    continue
+                for split in sg.get("splits", []):
+                    s  = split.get("stat", {})
+                    gp = int(s.get("gamesPlayed")  or 0)
+                    gs = int(s.get("gamesStarted") or 0)
+                    if gp < 3:
+                        continue
+                    if gp > 0 and (gs / gp) > 0.30:
+                        continue   # starter — skip
+                    relievers[pid] = {"name": name,
+                                      "saves": int(s.get("saves") or 0)}
+
+        if not relievers:
+            _bullpen_unavail_cache[ck] = _EMPTY
+            return _EMPTY
+
+        closer_pid       = max(relievers, key=lambda p: relievers[p]["saves"])
+        closer_has_saves = relievers[closer_pid]["saves"] > 0
+
+        # ── 4. Game PKs for last 3 completed days ─────────────────────────────
+        d_yday = (today_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        d_2ago = (today_dt - timedelta(days=2)).strftime("%Y-%m-%d")
+        d_3ago = (today_dt - timedelta(days=3)).strftime("%Y-%m-%d")
+
+        sched = _mlb_rest("/schedule", {
+            "sportId": 1, "teamId": tid,
+            "startDate": d_3ago, "endDate": d_yday,
+        })
+        date_to_pk: dict = {}
+        for de in sched.get("dates", []):
+            d = de.get("date", "")
+            for g in de.get("games", []):
+                if ((g.get("status", {}).get("abstractGameState") or "") == "Final"
+                        and g.get("gamePk")):
+                    date_to_pk[d] = g["gamePk"]
+
+        # ── 5. Collect relief pitcher IDs who appeared in each day's game ─────
+        def _relief_pids(gk: int) -> set:
+            pids: set = set()
+            try:
+                bs = _mlb_rest(f"/game/{gk}/boxscore", {})
+                for side in ("home", "away"):
+                    t_data = bs.get("teams", {}).get(side, {})
+                    if int(t_data.get("team", {}).get("id") or 0) != tid:
+                        continue
+                    pitchers = t_data.get("pitchers", [])
+                    players  = t_data.get("players", {})
+                    for i, p_id in enumerate(pitchers):
+                        if i == 0:
+                            continue   # skip starter
+                        key    = f"ID{p_id}"
+                        pstats = players.get(key, {}).get("stats", {}).get("pitching", {})
+                        if _parse_ip(str(pstats.get("inningsPitched") or "0")) > 0:
+                            pids.add(p_id)
+                    break
+            except Exception:
+                pass
+            return pids
+
+        pids_yday = _relief_pids(date_to_pk[d_yday]) if d_yday in date_to_pk else set()
+        pids_2ago = _relief_pids(date_to_pk[d_2ago]) if d_2ago in date_to_pk else set()
+        # Back-to-back into today: pitched both yesterday AND day before
+        unavail_pids = pids_yday & pids_2ago
+
+        # ── 6. Build result ───────────────────────────────────────────────────
+        unavailable: list = []
+        closer_affected   = False
+        for pid in unavail_pids:
+            if pid not in relievers:
+                continue   # not a reliever by season stats
+            unavailable.append(relievers[pid]["name"])
+            if pid == closer_pid and closer_has_saves:
+                closer_affected = True
+
+        nota = ""
+        if unavailable:
+            team_es = _es(team_name)
+            if closer_affected:
+                nota = (f"⚠️ Cerrador {team_es} no disponible hoy — "
+                        f"lanzó días consecutivos ({relievers[closer_pid]['name']})")
+            elif len(unavailable) >= 2:
+                nota = f"⚠️ {len(unavailable)} relevistas no disponibles hoy ({team_es})"
+            else:
+                nota = (f"⚠️ {unavailable[0]} ({team_es}) "
+                        f"no disponible hoy — días consecutivos")
+
+        result = {"no_disponibles": unavailable,
+                  "cerrador_afectado": closer_affected,
+                  "nota": nota}
+        _bullpen_unavail_cache[ck] = result
+        print(f"  🔴 Bullpen unavail [{team_name}]: "
+              f"{unavailable if unavailable else 'ninguno'}")
+        return result
+
+    except Exception as _be:
+        print(f"  ⚠️  fetch_bullpen_unavailable [{team_name}]: {_be}")
+        _bullpen_unavail_cache[ck] = _EMPTY
+        return _EMPTY
+
+
 # ── MLB A2: Home plate umpire ──────────────────────────────────────────────────
 _umpire_cache: dict = {}
 
@@ -12042,10 +12233,12 @@ def _prune_memory_caches() -> None:
         del _umpire_cache[_k]
     for _k in [k for k in _enh_ctx_cache     if today_str not in k]:
         del _enh_ctx_cache[_k]
-    for _k in [k for k in _bullpen_era_cache if today_str not in k]:
+    for _k in [k for k in _bullpen_era_cache    if today_str not in k]:
         del _bullpen_era_cache[_k]
-    for _k in [k for k in _team_run_cache    if today_str not in k]:
+    for _k in [k for k in _team_run_cache       if today_str not in k]:
         del _team_run_cache[_k]
+    for _k in [k for k in _bullpen_unavail_cache if today_str not in k]:
+        del _bullpen_unavail_cache[_k]
     print(f"  🧹 Memory cache pruned for {today_str}")
 
 def adjust_probability_for_pitcher_form(
