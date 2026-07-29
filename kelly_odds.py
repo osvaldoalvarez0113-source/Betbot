@@ -3,7 +3,7 @@ BetBot Pro — Professional Multi-Module Sports Betting System
 Modules: Morning Report | Lineup Monitor | Math Models | Sharp Radar | Arb Scanner
 """
 import requests, time, csv, os, json, math
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from zoneinfo import ZoneInfo
 import pytz
 from contexto_juego import obtener_contexto, ajustar_total, ajustar_ml
@@ -463,7 +463,7 @@ def game_starts_soon(commence_str, minutes=60):
         ts_clean = (commence_str or "").replace("Z", "").replace("+00:00", "")[:19]
         if len(ts_clean) == 16: ts_clean += ":00"
         ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
-        diff     = (ct_utc - datetime.utcnow()).total_seconds() / 60
+        diff     = (ct_utc - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds() / 60
         return diff < minutes
     except Exception:
         return False
@@ -482,7 +482,7 @@ def _game_already_started(time_str: str, grace_min: int = 5) -> bool:
         ts_clean = ts.replace("Z", "").replace("+00:00", "")[:19]
         if len(ts_clean) == 16: ts_clean += ":00"
         ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
-        now_utc  = datetime.utcnow()
+        now_utc  = datetime.now(timezone.utc).replace(tzinfo=None)
         elapsed  = (now_utc - ct_utc).total_seconds() / 60
         return elapsed > grace_min
     except Exception as _e:
@@ -494,7 +494,7 @@ def _days_until(commence_str: str) -> float:
         ts_clean = (commence_str or "").replace("Z", "").replace("+00:00", "")[:19]
         if len(ts_clean) == 16: ts_clean += ":00"
         ct_utc   = datetime.strptime(ts_clean, "%Y-%m-%dT%H:%M:%S")
-        return (ct_utc - datetime.utcnow()).total_seconds() / 86400
+        return (ct_utc - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds() / 86400
     except Exception:
         return 999.0
 
@@ -2401,6 +2401,7 @@ def _load_stats_disk_cache():
     except Exception as _e:
         print(f"  ⚠️  Stats disk cache load error: {_e}")
         _stats_disk_cache = {}
+    _prune_memory_caches()   # evict previous-day entries from in-memory caches
 
 def _save_stats_disk_cache():
     """Flush in-memory stats cache to disk (fast, called after each successful fetch)."""
@@ -2620,12 +2621,14 @@ def fetch_probable_pitchers_today():
                     if _fb_a:
                         away_p = _fb_a
 
-                h_era   = _fetch_pitcher_era_by_id(home_p['id']) if home_p.get('id') else 4.50
-                a_era   = home_p.get('era', 4.50) if home_p.get('_fallback') else h_era
-                h_era   = a_era if home_p.get('_fallback') else h_era
-                a_era   = _fetch_pitcher_era_by_id(away_p['id']) if away_p.get('id') else 4.50
+                if home_p.get('_fallback'):
+                    h_era = home_p.get('era', 4.50)
+                else:
+                    h_era = _fetch_pitcher_era_by_id(home_p['id']) if home_p.get('id') else 4.50
                 if away_p.get('_fallback'):
                     a_era = away_p.get('era', 4.50)
+                else:
+                    a_era = _fetch_pitcher_era_by_id(away_p['id']) if away_p.get('id') else 4.50
                 key     = f"{home_tn.lower()}|{away_tn.lower()}"
                 result[key] = {
                     'home_era':  round(h_era, 2),
@@ -5988,7 +5991,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
                 )
             except Exception as _ece:
                 import datetime as _dt_enh
-                _ts_enh = _dt_enh.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                _ts_enh = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
                 _game_name_enh = f"{home} vs {away}"
                 _err_type = type(_ece).__name__
                 print(f"  ⚠️ _enh_ctx falló ({type(_ece).__name__}: {_ece}) — continuando sin contexto enriquecido")
@@ -6075,7 +6078,7 @@ def analyze_game_full(game, sport_key, prev_map=None, force_panel: bool = False,
                                "odds": odds, "book": book}
             _ev_min_ml = EV_MIN_PCT
             if ev >= _ev_min_ml and r["stake"] > 0:
-                # Improvement 2: ML requires ≥62% probability (checked after cap)
+                # ML requires ≥50% probability (PROB_MIN_ML, checked after cap)
                 if true_p_capped < PROB_MIN_ML:
                     print(f"   ⏭️  {_tag}: {lbl} prob {true_p_capped:.0%} < {PROB_MIN_ML:.0%} mín ML — omitido")
                     continue
@@ -12010,6 +12013,37 @@ def analyze_with_claude(game_data: dict, sport: str,
 
 _enh_ctx_cache: dict = {}
 
+# ── Daily in-memory cache pruner ─────────────────────────────────────────────
+_cache_prune_date: str = ""   # guards against pruning more than once per day
+
+def _prune_memory_caches() -> None:
+    """
+    Evict stale entries from the six largest in-memory caches.
+    Runs at most once per calendar day (ET).  Called from _load_stats_disk_cache
+    (startup) so Railway restarts always start clean; also callable mid-run if
+    the process crosses midnight.
+    Caches covered: _pitcher_cache, _splits_cache, _umpire_cache,
+                    _enh_ctx_cache, _bullpen_era_cache, _team_run_cache.
+    """
+    global _cache_prune_date
+    today_str = datetime.now(ET).strftime("%Y-%m-%d")
+    if _cache_prune_date == today_str:
+        return
+    _cache_prune_date = today_str
+    for _k in [k for k in _pitcher_cache     if k != today_str]:
+        del _pitcher_cache[_k]
+    for _k in [k for k in _splits_cache      if today_str not in k]:
+        del _splits_cache[_k]
+    for _k in [k for k in _umpire_cache      if today_str not in k]:
+        del _umpire_cache[_k]
+    for _k in [k for k in _enh_ctx_cache     if today_str not in k]:
+        del _enh_ctx_cache[_k]
+    for _k in [k for k in _bullpen_era_cache if today_str not in k]:
+        del _bullpen_era_cache[_k]
+    for _k in [k for k in _team_run_cache    if today_str not in k]:
+        del _team_run_cache[_k]
+    print(f"  🧹 Memory cache pruned for {today_str}")
+
 def adjust_probability_for_pitcher_form(
     base_prob_home: float,
     home_era_season: float,
@@ -12295,7 +12329,7 @@ def _fetch_situational_flags(
         # ── Flag 2: Timezone fatigue (away team traveled 2+ hrs east) ────
         if away_tz_str and home_tz_str and away_tz_str != home_tz_str:
             try:
-                _ref     = _dt.utcnow().replace(tzinfo=_pytz.utc)
+                _ref     = datetime.now(timezone.utc).replace(tzinfo=_pytz.utc)
                 _atz     = _pytz.timezone(away_tz_str)
                 _htz     = _pytz.timezone(home_tz_str)
                 _a_off   = _atz.utcoffset(_ref).total_seconds() / 3600
@@ -16818,7 +16852,7 @@ def run_scan():
             # ──────────────────────────────────────────────────────────────
 
             # ── Filter out games that already started (5-min grace) ─────────
-            _now_utc_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S UTC")
+            _now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
             print(f"  🕐 Hora actual UTC: {_now_utc_str} — evaluando {len(games)} juego(s)")
             _kept = []
             for _g in games:
