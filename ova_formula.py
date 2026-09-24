@@ -137,15 +137,18 @@ def era_temporada_pitcher(pitcher_id, season):
     try:
         stat = data["stats"][0]["splits"][0]["stat"]
     except (KeyError, IndexError):
-        return {"era": None, "ip": 0, "fip": None}
+        return {"era": None, "ip": 0, "fip": None, "so": 0, "gs": 0, "ipx": None, "k9": None}
     ip = outs_a_ip(ip_a_outs(stat.get("inningsPitched", "0.0")))
     era = float(stat["era"]) if stat.get("era") not in (None, "-.--") else None
     hr = float(stat.get("homeRuns", 0))
     bb = float(stat.get("baseOnBalls", 0))
     hbp = float(stat.get("hitByPitch", 0))
     so = float(stat.get("strikeOuts", 0))
+    gs = int(stat.get("gamesStarted", 0) or 0)
     fip = (13 * hr + 3 * (bb + hbp) - 2 * so) / ip + 3.15 if ip >= 10 else None
-    return {"era": era, "ip": ip, "fip": fip}
+    ipx = (ip / gs) if gs > 0 else None
+    k9 = (so * 9 / ip) if ip > 0 else None
+    return {"era": era, "ip": ip, "fip": fip, "so": so, "gs": gs, "ipx": ipx, "k9": k9}
 
 
 def ultimas_5_salidas(pitcher_id, season):
@@ -201,11 +204,60 @@ def ofensiva_temporada(team_id, season):
     try:
         st = r.json()["stats"][0]["splits"][0]["stat"]
     except (KeyError, IndexError):
-        return {"rg": None, "ops": None}
+        return {"rg": None, "ops": None, "kpct": None}
     g = float(st.get("gamesPlayed", 0))
     runs = float(st.get("runs", 0))
     ops = float(st["ops"]) if st.get("ops") is not None else None
-    return {"rg": (runs / g if g > 0 else None), "ops": ops}
+    pa = float(st.get("plateAppearances", 0))
+    so = float(st.get("strikeOuts", 0))
+    kpct = (so / pa) if pa > 0 else None
+    return {"rg": (runs / g if g > 0 else None), "ops": ops, "kpct": kpct}
+
+
+_LIGA_KPCT_CACHE = {}
+
+
+def liga_kpct(season):
+    """% de turnos ponchados promedio de toda la liga — denominador del ajuste de ponches."""
+    if season in _LIGA_KPCT_CACHE:
+        return _LIGA_KPCT_CACHE[season]
+    url = f"{MLB_API}/teams/stats?stats=season&group=hitting&season={season}&sportIds=1&gameType=R"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    splits = r.json().get("stats", [{}])[0].get("splits", [])
+    pa = so = 0.0
+    for s in splits:
+        st = s["stat"]
+        pa += float(st.get("plateAppearances", 0))
+        so += float(st.get("strikeOuts", 0))
+    val = (so / pa) if pa > 0 else 0.225
+    _LIGA_KPCT_CACHE[season] = val
+    return val
+
+
+def pitcher_starts_stats(pitcher_id, season):
+    """IP y K promedio POR APERTURA en toda la temporada (solo juegos donde
+    fue abridor, no relevo) — mas preciso que el promedio de temporada
+    completa si el pitcher tambien ha salido de relevo."""
+    url = f"{MLB_API}/people/{pitcher_id}/stats?stats=gameLog&group=pitching&season={season}"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    try:
+        splits = r.json()["stats"][0]["splits"]
+    except (KeyError, IndexError):
+        return {"ipx": None, "k9": None}
+    ip = k = n = 0.0
+    for s in splits:
+        st = s["stat"]
+        if int(st.get("gamesStarted", 0) or 0) != 1:
+            continue
+        ip += outs_a_ip(ip_a_outs(st.get("inningsPitched", "0.0")))
+        k += float(st.get("strikeOuts", 0))
+        n += 1
+    return {
+        "ipx": (ip / n) if n > 0 else None,
+        "k9": (k * 9 / ip) if ip > 0 else None,
+    }
 
 
 def ofensiva_14dias(team_id, fecha_dt, season):
@@ -489,6 +541,27 @@ def analizar_juego(juego, season):
         "nota": "sin ajuste de clima todavia (pendiente)",
     }
 
+    # ---------- ponches del abridor ----------
+    liga_k = liga_kpct(season)
+    ap_h = pitcher_starts_stats(home_pid, season)
+    ap_a = pitcher_starts_stats(away_pid, season)
+
+    def k_esperados(ap, temp, kpct_rival):
+        ipx = ap["ipx"] if ap["ipx"] is not None else temp["ipx"]
+        k9 = ap["k9"] if ap["k9"] is not None else temp["k9"]
+        if ipx is None or k9 is None or temp["gs"] < 3:
+            return None
+        adj = (kpct_rival / liga_k) if kpct_rival is not None else 1.0
+        return (k9 / 9) * ipx * adj
+
+    k_h = k_esperados(ap_h, temp_h, off_a.get("kpct"))  # abridor local enfrenta bateo visitante
+    k_a = k_esperados(ap_a, temp_a, off_h.get("kpct"))  # abridor visita enfrenta bateo local
+
+    ponches_obj = {
+        "home": round(k_h, 2) if k_h is not None else None,
+        "away": round(k_a, 2) if k_a is not None else None,
+    }
+
     return {
         "gamePk": juego["gamePk"],
         "estado": "listo",
@@ -522,4 +595,5 @@ def analizar_juego(juego, season):
         },
         "f5_frac": F5_FRAC,
         "total": total_obj,
+        "ponches": ponches_obj,
     }
