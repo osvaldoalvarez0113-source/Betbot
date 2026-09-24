@@ -3,3 +3,7 @@ pytz
 MLB-statsapi
 anthropic
 pybaseball
+flask
+flask-cors
+apscheduler
+requests
