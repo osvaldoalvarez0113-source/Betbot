@@ -18,6 +18,84 @@ KELLY_FRACCION = 0.25
 PRIOR_ERA = 40
 PEN_FUERTE = 0.15  # 2+ relevistas lanzaron 2 dias seguidos
 PEN_LEVE = 0.08    # 1 relevista 2 dias seguidos, o 3+ lanzaron ayer
+DISP = 2.3          # razon varianza/media medida en backtestforma.html
+EXTRAS = 0.18       # carreras extra por innings de mas (empates que van a extras)
+ENCOGE = 0.45       # el total se encoge hacia el promedio de liga (medido)
+SUAVE = 0.6         # amortiguacion del ajuste de parque/clima
+
+# venue_id -> (nombre, factor de carreras, tipo de techo). Sin clima todavia
+# (pendiente: Open-Meteo + orientacion del jardin central por parque).
+PARK = {
+ 19: ('Coors Field', 1.28, 'abierto'), 3313: ('Yankee Stadium', 1.05, 'abierto'),
+ 3: ('Fenway Park', 1.08, 'abierto'), 17: ('Wrigley Field', 1.02, 'abierto'),
+ 31: ('PNC Park', 0.95, 'abierto'), 2680: ('Petco Park', 0.93, 'abierto'),
+ 2395: ('Oracle Park', 0.90, 'abierto'), 22: ('Dodger Stadium', 0.97, 'abierto'),
+ 2602: ('Great American Ball Park', 1.10, 'abierto'), 4169: ('loanDepot park', 0.94, 'retractil'),
+ 3289: ('Citi Field', 0.96, 'abierto'), 2681: ('Citizens Bank Park', 1.06, 'abierto'),
+ 3312: ('Target Field', 1.00, 'abierto'), 1: ('Angel Stadium', 0.98, 'abierto'),
+ 2392: ('Daikin Park', 1.03, 'retractil'), 680: ('T-Mobile Park', 0.92, 'retractil'),
+ 14: ('Rogers Centre', 1.02, 'retractil'), 15: ('Chase Field', 1.04, 'retractil'),
+ 2394: ('Comerica Park', 0.97, 'abierto'), 7: ('Kauffman Stadium', 1.01, 'abierto'),
+ 3309: ('Nationals Park', 1.00, 'abierto'), 2: ('Oriole Park at Camden Yards', 1.02, 'abierto'),
+ 5325: ('Globe Life Field', 0.99, 'retractil'), 4705: ('Truist Park', 1.02, 'abierto'),
+ 2889: ('Busch Stadium', 0.97, 'abierto'), 32: ('American Family Field', 1.01, 'retractil'),
+ 4: ('Rate Field', 1.04, 'abierto'), 5: ('Progressive Field', 0.99, 'abierto'),
+ 2529: ('Sutter Health Park', 0.96, 'abierto'), 12: ('Tropicana Field', 0.96, 'techo'),
+}
+
+_LIGA_RG_CACHE = {}
+
+
+def liga_rg(season):
+    """Carreras por juego promedio de toda la liga — denominador del total."""
+    if season in _LIGA_RG_CACHE:
+        return _LIGA_RG_CACHE[season]
+    url = f"{MLB_API}/teams/stats?stats=season&group=hitting&season={season}&sportIds=1&gameType=R"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    splits = r.json().get("stats", [{}])[0].get("splits", [])
+    runs = games = 0.0
+    for s in splits:
+        st = s["stat"]
+        runs += float(st.get("runs", 0))
+        games += float(st.get("gamesPlayed", 0))
+    val = (runs / games) if games > 0 else 4.30
+    _LIGA_RG_CACHE[season] = val
+    return val
+
+
+def pmf(k, l):
+    """Binomial negativa con media l y razon varianza/media DISP (en vez de
+    Poisson puro, que subestima blanqueadas y palizas — medido en OVA)."""
+    if l <= 0:
+        return 1.0 if k == 0 else 0.0
+    if DISP <= 1.0001:
+        import math
+        p = math.exp(-l)
+        for i in range(1, k + 1):
+            p = p * l / i
+        return p
+    r = l / (DISP - 1)
+    q = l / (r + l)
+    pb = (r / (r + l)) ** r
+    for j in range(1, k + 1):
+        pb = pb * (j - 1 + r) / j * q
+    return pb
+
+
+def matriz(la, lh, fn):
+    """Suma la probabilidad conjunta de todas las combinaciones (x carreras
+    visita, y carreras local) donde fn(x,y) es verdadero."""
+    A = [pmf(i, la) for i in range(26)]
+    H = [pmf(i, lh) for i in range(26)]
+    s = 0.0
+    for x in range(26):
+        if A[x] < 1e-12:
+            continue
+        for y in range(26):
+            if fn(x, y):
+                s += A[x] * H[y]
+    return s
 
 _LIGA_ERA_CACHE = {}
 
@@ -270,7 +348,7 @@ def cuota_justa_americana(chance):
 
 def juegos_de_hoy(fecha=None):
     fecha = fecha or datetime.now().strftime("%Y-%m-%d")
-    url = f"{MLB_API}/schedule?sportId=1&date={fecha}&hydrate=probablePitcher,team,linescore"
+    url = f"{MLB_API}/schedule?sportId=1&date={fecha}&hydrate=probablePitcher,team,linescore,venue"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
     data = r.json()
@@ -287,6 +365,8 @@ def juegos_de_hoy(fecha=None):
                 "away_name": g["teams"]["away"]["team"]["name"],
                 "home_pitcher": g["teams"]["home"].get("probablePitcher"),
                 "away_pitcher": g["teams"]["away"].get("probablePitcher"),
+                "venue_id": (g.get("venue") or {}).get("id"),
+                "venue_name": (g.get("venue") or {}).get("name"),
             })
     return juegos
 
@@ -345,6 +425,70 @@ def analizar_juego(juego, season):
     chance_home = max(PISO_CHANCE, min(TECHO_CHANCE, chance_home))
     chance_away = 1 - chance_home
 
+    # ---------- total, handicap y F5 ----------
+    LRG = liga_rg(season)
+    perm_h = (era_h * 6 / 9 + bp_h["era"] * 3 / 9) * 1.08
+    perm_a = (era_a * 6 / 9 + bp_a["era"] * 3 / 9) * 1.08
+    crudo_a = max(1.5, min(9.0, rg_a_final * perm_h / LRG))
+    crudo_h = max(1.5, min(9.0, rg_h_final * perm_a / LRG))
+    t_base = crudo_a + crudo_h
+
+    pk = PARK.get(juego.get("venue_id"))
+    pfv = pk[1] if pk else 1.00
+    # clima pendiente (Open-Meteo + orientacion de parque): fTemp y fWind en 1
+    bruto = pfv * 1.0 * 1.0
+    f_suave = 1 + (bruto - 1) * SUAVE
+    t9 = t_base * f_suave
+    t_crudo = t9 + EXTRAS
+    m_liga = LRG * 2 + EXTRAS
+    t_total = m_liga + (t_crudo - m_liga) * ENCOGE
+
+    def pois_pct_local(d):
+        lh_ = max(0.3, (t9 + d) / 2)
+        la_ = max(0.3, (t9 - d) / 2)
+        empate = matriz(la_, lh_, lambda x, y: x == y)
+        gana_local = matriz(la_, lh_, lambda x, y: y > x)
+        return (gana_local + empate / 2) * 100
+
+    lo, hi = -t9 * 0.9, t9 * 0.9
+    d_ef = 0.0
+    pct_objetivo = chance_home * 100
+    for _ in range(22):
+        d_ef = (lo + hi) / 2
+        if pois_pct_local(d_ef) < pct_objetivo:
+            lo = d_ef
+        else:
+            hi = d_ef
+    d_ef = (lo + hi) / 2
+
+    lam_h = max(0.5, (t9 + d_ef) / 2)
+    lam_a = max(0.5, (t9 - d_ef) / 2)
+
+    a_por2 = matriz(lam_a, lam_h, lambda x, y: x - y >= 2)
+    h_por2 = matriz(lam_a, lam_h, lambda x, y: y - x >= 2)
+
+    t9e = max(0.6, t_total - EXTRAS)
+    lam_he = max(0.3, (t9e + d_ef) / 2)
+    lam_ae = max(0.3, (t9e - d_ef) / 2)
+    lam_at = lam_ae + EXTRAS / 2
+    lam_ht = lam_he + EXTRAS / 2
+    lam_a5 = lam_ae * F5_FRAC
+    lam_h5 = lam_he * F5_FRAC
+
+    total_obj = {
+        "esperado": round(t_total, 2),
+        "esperado_crudo": round(t_crudo, 2),
+        "parque": {"venue_id": juego.get("venue_id"), "nombre": juego.get("venue_name"),
+                    "factor": pfv, "en_tabla": pk is not None},
+        "carreras_esperadas": {"home": round(lam_ht, 2), "away": round(lam_at, 2)},
+        "carreras_esperadas_f5": {"home": round(lam_h5, 2), "away": round(lam_a5, 2)},
+        "handicap": {
+            "home_gana_por_2_mas": round(h_por2 * 100, 1),
+            "away_gana_por_2_mas": round(a_por2 * 100, 1),
+        },
+        "nota": "sin ajuste de clima todavia (pendiente)",
+    }
+
     return {
         "gamePk": juego["gamePk"],
         "estado": "listo",
@@ -377,4 +521,5 @@ def analizar_juego(juego, season):
             "bullpen_aprox": bp_a["aprox"],
         },
         "f5_frac": F5_FRAC,
+        "total": total_obj,
     }
