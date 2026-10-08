@@ -97,7 +97,7 @@ jobs:
             const v=Object.values(j).filter(x=>x&&typeof x==='object'&&x.fixtureId); return v;
           }
 
-          const DIAG={faltan:[],parecidas:[],disponibles:[],porCasa:{},razones:{total:0,empezado:0,lejos:0,estado:0,sinPinnacle:0,pinSuspendido:0,sinPrecio:0,ok:0}};
+          const DIAG={faltan:[],errores:[],muestra:{},parecidas:[],disponibles:[],porCasa:{},razones:{total:0,empezado:0,lejos:0,estado:0,sinPinnacle:0,pinSuspendido:0,sinPrecio:0,ok:0}};
           /* ---------- casas y torneo ---------- */
           async function resolverLibros(){
             const j=await op('/bookmakers',{}, {cache:true});
@@ -153,7 +153,7 @@ jobs:
               const fila={t:t,n:[nom(f,1),nom(f,2)],fair:fair,pinEdad:isFinite(a.t)?Math.round((ahora-a.t)/60000):null,casas:{}};
               libros.forEach(sl=>{
                 const D=DIAG.porCasa[sl]||(DIAG.porCasa[sl]={salen:0,conPrecio:0,suspendido:0}); if(bk0(bo,sl)) D.salen++;
-                const bk=bo[sl]; if(!bk){return;} if(bk.suspended){D.suspendido++;return;}
+                const bk=bo[sl]; if(bk&&!DIAG.muestra[sl]){ try{ DIAG.muestra[sl]=JSON.stringify(bk).replace(KEY,'***').slice(0,500); }catch(x){} } if(!bk){return;} if(bk.suspended){D.suspendido++;return;}
                 const x=precio(bk,'131','131'), y=precio(bk,'131','132'); if(!x||!y) return; D.conPrecio++;
                 const e1=efectivo(sl,x.d), e2=efectivo(sl,y.d);
                 const ev=[fair[0]*e1-1,fair[1]*e2-1];
@@ -197,6 +197,8 @@ jobs:
             const R=DIAG.razones;
             L.push('- Juegos que OddsPapi devolvió: '+R.total+' · ya empezados o por empezar en menos de 5 min: '+R.empezado+' · más allá de '+HORAS+' h: '+R.lejos+' · otro estado: '+R.estado+' · sin Pinnacle: '+R.sinPinnacle+' · Pinnacle suspendido: '+R.pinSuspendido+' · sin precio ganador: '+R.sinPrecio+' · **usables: '+R.ok+'**');
             Object.keys(DIAG.porCasa).forEach(sl=>{ const D=DIAG.porCasa[sl]; L.push('- '+sl+': con precio en '+D.conPrecio+' de '+R.ok+' juegos usables'+(D.suspendido?(' · suspendido en '+D.suspendido):'')); });
+            DIAG.errores.forEach(e=>L.push('- ❌ Error trayendo '+e));
+            Object.keys(DIAG.muestra).forEach(sl=>{ if(!DIAG.porCasa[sl]||!DIAG.porCasa[sl].conPrecio) L.push('- Cómo viene '+sl+' (muestra): `'+DIAG.muestra[sl].replace(/`/g,"'")+'`'); });
             if(DIAG.faltan.length) L.push('- ⚠️ OddsPapi no tiene (con ese nombre) estas casas: **'+DIAG.faltan.join(', ')+'**. Casas parecidas que sí tiene: '+(DIAG.parecidas.join(', ')||'ninguna')+'.');
             L.push('- Casas disponibles en OddsPapi que podrías comparar: '+(DIAG.disponibles.filter(x=>/bovada|draftkings|fanduel|betmgm|caesars|betrivers|espn|fanatics|hardrock|bet365|polymarket|kalshi|novig|prophet|betonline|mybookie|bookmaker/.test(x)).join(', ')||'(ninguna conocida)'));
             L.push('');
@@ -251,7 +253,7 @@ jobs:
                 try{ l=await bajarCasa(torneo,slug); }
                 catch(e){
                   if(slug==='pinnacle') throw e;
-                  P('  No pude traer '+slug+': '+String(e.message).replace(KEY,'***')); if(e.tope) break; continue;
+                  DIAG.errores.push(slug+': '+String(e.message).replace(KEY,'***').slice(0,300)); P('  No pude traer '+slug+': '+String(e.message).replace(KEY,'***')); if(e.tope) break; continue;
                 }
                 P('  '+slug+': '+l.length+' juegos');
                 if(slug!=='pinnacle') libros.push(slug);
