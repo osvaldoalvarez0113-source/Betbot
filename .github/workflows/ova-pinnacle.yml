@@ -1,0 +1,684 @@
+name: OVA vs Pinnacle
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "sonda = prueba de 2 llamadas / completo = prueba grande"
+        type: choice
+        options:
+          - sonda
+          - completo
+        default: sonda
+      max_calls:
+        description: "Tope de llamadas NUEVAS a OddsPapi (solo modo completo)"
+        default: "150"
+jobs:
+  prueba:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/cache/restore@v4
+        with:
+          path: .cache
+          key: oddspapi-${{ github.run_id }}
+          restore-keys: oddspapi-
+      - name: Escribir el script
+        run: |
+          cat > ovapinnacle.js <<'FINDELSCRIPT'
+          /* Backtest de playoffs para OVA. Replica la formula de index.html (v46) tal como
+             corre en octubre: estadisticas de TEMPORADA REGULAR (gameType=R), ERA mezclado
+             70/30 con regresion hacia la liga, ofensiva 70/30 con 14 dias, ERA de bullpen
+             con el split real de relevistas, localia 0.59, multiplicador 6, tope 22-78%.
+             NO replica (a proposito, por costo): splits zurdo/derecho del lineup (tope +-10%
+             en carreras por juego) ni la penalizacion de bullpen quemado. */
+          var BT=(function(){
+           var API='https://statsapi.mlb.com/api/v1';
+           var ERR=0, C={};
+           var BASE={w:[0.65,0.5,0.25],bono:0.59,mult:6};
+
+           function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
+           function jget(url,tries){
+            tries=(tries==null?3:tries);
+            return fetch(url).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+             .catch(function(e){
+               if(tries>1) return sleep(350).then(function(){ return jget(url,tries-1); });
+               ERR++; throw e;
+             });
+           }
+           function memo(name,key,fn){ var c=C[name]||(C[name]={}); if(!c[key]) c[key]=fn(); return c[key]; }
+           function mapLimit(items,n,fn,onTick){
+            var i=0,done=0,res=new Array(items.length);
+            return new Promise(function(ok){
+             if(!items.length) return ok(res);
+             function next(){
+              if(i>=items.length) return;
+              var k=i++;
+              Promise.resolve().then(function(){ return fn(items[k],k); })
+               .then(function(v){ res[k]=v; },function(){ res[k]=null; })
+               .then(function(){ done++; if(onTick) onTick(done,items.length);
+                  if(done===items.length) ok(res); else next(); });
+             }
+             for(var w=0;w<Math.min(n,items.length);w++) next();
+            });
+           }
+           function ipToNum(ip){
+            if(ip==null) return 0;
+            var n=parseFloat(String(ip)); if(!isFinite(n)) return 0;
+            var dec=Math.round((n-Math.trunc(n))*10);
+            return Math.trunc(n)+(dec===1?1/3:dec===2?2/3:0);
+           }
+           function ymd(dt){ var p=function(n){ return String(n).padStart(2,'0'); };
+            return dt.getUTCFullYear()+'-'+p(dt.getUTCMonth()+1)+'-'+p(dt.getUTCDate()); }
+           function diaBase(s){ var pt=String(s).split('-'); return new Date(Date.UTC(+pt[0],+pt[1]-1,+pt[2],12,0,0)); }
+
+           /* ---------- formula (copiada de index.html) ---------- */
+           function reg(era,ip,prior,ancla,L0){
+            if(era==null||!isFinite(era)) return null;
+            var L=(ancla!=null&&isFinite(ancla))?ancla:(L0!=null?L0:4.10);
+            return (era*ip + L*prior)/(ip+prior);
+           }
+           function eraUsado(se,l5,LIGA){
+            var PRIOR=40, anc=null;
+            if(se.fip!=null&&isFinite(se.fip)&&se.ip>0){
+             var L=(LIGA!=null?LIGA:4.10);
+             anc=(se.fip*se.ip + L*30)/(se.ip+30);
+            }
+            var s=reg(se.era,se.ip,PRIOR,anc,LIGA), l=reg(l5.era,l5.ip,PRIOR*0.625,anc,LIGA);
+            if(s!=null&&l!=null) return s*0.70+l*0.30;
+            return s!=null?s:l;
+           }
+           function rgMix(o,o14){
+            if(!o14||o14.rg==null) return o.rg;
+            if(o.rg==null) return o14.rg;
+            return o.rg*0.70+o14.rg*0.30;
+           }
+           function pctLocal(dE,dR,dB,w,bono,mult){
+            var d=w[0]*dE+w[1]*dR+w[2]*dB+bono;
+            return Math.max(22,Math.min(78,50+d*mult));
+           }
+
+           /* ---------- datos ---------- */
+           function parseSched(d){
+            var out=[];
+            (d.dates||[]).forEach(function(dd){ (dd.games||[]).forEach(function(g){
+             if(!g.status||g.status.abstractGameState!=='Final') return;
+             if('FDLW'.indexOf(g.gameType)<0) return;
+             var T=g.teams; if(!T||!T.home||!T.away||!T.home.team||!T.away.team) return;
+             if(T.home.score==null||T.away.score==null||T.home.score===T.away.score) return;
+             out.push({pk:g.gamePk,f:g.officialDate||dd.date,tipo:g.gameType,
+              h:{id:T.home.team.id,n:T.home.team.abbreviation||T.home.team.name},
+              a:{id:T.away.team.id,n:T.away.team.abbreviation||T.away.team.name},
+              y:T.home.score>T.away.score?1:0,rh:T.home.score,ra:T.away.score});
+            }); });
+            return out;
+           }
+           function dedupe(a){ var v={}; return a.filter(function(g){ if(v[g.pk]) return false; v[g.pk]=1; return true; }); }
+           function schedule(year){
+            var base=API+'/schedule?sportId=1&startDate='+year+'-09-20&endDate='+year+'-11-20&hydrate=team&gameType=';
+            return jget(base+'F,D,L,W').then(parseSched).then(function(g){
+             if(g.length) return dedupe(g);
+             return Promise.all(['F','D','L','W'].map(function(t){
+               return jget(base+t).then(parseSched).catch(function(){ return []; });
+             })).then(function(a){ return dedupe([].concat.apply([],a)); });
+            });
+           }
+           function startersDe(b){
+            var h=b&&b.teams&&b.teams.home&&b.teams.home.pitchers, a=b&&b.teams&&b.teams.away&&b.teams.away.pitchers;
+            return (h&&h.length&&a&&a.length)?{h:h[0],a:a[0]}:null;
+           }
+           function starters(pk){
+            return jget(API+'/game/'+pk+'/boxscore?fields=teams,home,away,pitchers').then(function(b){
+             var s=startersDe(b); if(s) return s; throw new Error('vacio');
+            }).catch(function(){
+             return jget(API+'/game/'+pk+'/boxscore').then(startersDe);
+            });
+           }
+           function temporada(id,y){ return memo('sea',id+'-'+y,function(){
+            return jget(API+'/people/'+id+'/stats?stats=season&group=pitching&season='+y+'&gameType=R').then(function(d){
+             var s=d.stats&&d.stats[0]&&d.stats[0].splits&&d.stats[0].splits[0];
+             if(!s) return {era:null,ip:0,fip:null};
+             var st=s.stat, ip=ipToNum(st.inningsPitched);
+             var era=(st.era!=null&&isFinite(parseFloat(st.era)))?parseFloat(st.era):null;
+             var hr=+(st.homeRuns||0),bb=+(st.baseOnBalls||0),hbp=+(st.hitByPitch||0),so=+(st.strikeOuts||0);
+             return {era:era,ip:ip,fip:ip>=10?(13*hr+3*(bb+hbp)-2*so)/ip+3.15:null};
+            }).catch(function(){ return {era:null,ip:0,fip:null}; });
+           }); }
+           function ultimas5(id,y){ return memo('l5',id+'-'+y,function(){
+            return jget(API+'/people/'+id+'/stats?stats=gameLog&group=pitching&season='+y+'&gameType=R').then(function(d){
+             var sp=(d.stats&&d.stats[0]&&d.stats[0].splits)||[];
+             var sal=sp.filter(function(s){ return +(s.stat.gamesStarted||0)===1; });
+             var use=(sal.length?sal:sp).slice(-5), er=0, ip=0;
+             use.forEach(function(s){ er+=+(s.stat.earnedRuns||0); ip+=ipToNum(s.stat.inningsPitched); });
+             return {era:ip>0?er*9/ip:null,ip:ip,n:use.length};
+            }).catch(function(){ return {era:null,ip:0,n:0}; });
+           }); }
+           function teamHit(id,y){ return memo('hit',id+'-'+y,function(){
+            return jget(API+'/teams/'+id+'/stats?stats=season&group=hitting&season='+y+'&gameType=R').then(function(d){
+             var s=d.stats&&d.stats[0]&&d.stats[0].splits&&d.stats[0].splits[0], st=s?s.stat:{};
+             var g=+(st.gamesPlayed||0), r=+(st.runs||0);
+             return {rg:g>0?r/g:null,g:g};
+            }).catch(function(){ return {rg:null,g:0}; });
+           }); }
+           function rg14(id,fecha,y){ return memo('o14',id+'-'+fecha,function(){
+            var b=diaBase(fecha);
+            var ini=ymd(new Date(b.getTime()-14*86400000)), fin=ymd(new Date(b.getTime()-86400000));
+            return jget(API+'/teams/'+id+'/stats?stats=byDateRange&startDate='+ini+'&endDate='+fin+
+              '&group=hitting&season='+y+'&gameType=R').then(function(d){
+             var s=d.stats&&d.stats[0]&&d.stats[0].splits&&d.stats[0].splits[0], st=s?s.stat:{};
+             var g=+(st.gamesPlayed||0), r=+(st.runs||0);
+             return {rg:g>=5?r/g:null,g:g};
+            }).catch(function(){ return {rg:null,g:0}; });
+           }); }
+           function teamPen(id,y){ return memo('pen',id+'-'+y,function(){
+            return jget(API+'/teams/'+id+'/stats?stats=statSplits&sitCodes=rp&group=pitching&season='+y+'&gameType=R').then(function(d){
+             var s=d.stats&&d.stats[0]&&d.stats[0].splits&&d.stats[0].splits[0];
+             if(s&&s.stat&&s.stat.era!=null&&isFinite(parseFloat(s.stat.era))) return {era:parseFloat(s.stat.era),aprox:false};
+             throw new Error('sin split');
+            }).catch(function(){
+             return jget(API+'/teams/'+id+'/stats?stats=season&group=pitching&season='+y+'&gameType=R').then(function(d){
+              var s=d.stats&&d.stats[0]&&d.stats[0].splits&&d.stats[0].splits[0];
+              return {era:(s&&s.stat&&s.stat.era!=null)?parseFloat(s.stat.era):null,aprox:true};
+             }).catch(function(){ return {era:null,aprox:true}; });
+            });
+           }); }
+           function ligaEra(y){ return memo('liga',String(y),function(){
+            return jget(API+'/teams/stats?stats=season&group=pitching&season='+y+'&sportIds=1&gameType=R').then(function(d){
+             var sp=(d.stats&&d.stats[0]&&d.stats[0].splits)||[], er=0, ip=0;
+             sp.forEach(function(s){ er+=+(s.stat.earnedRuns||0); ip+=ipToNum(s.stat.inningsPitched); });
+             return ip>0?er*9/ip:4.10;
+            }).catch(function(){ return 4.10; });
+           }); }
+
+           function prep(g){
+            var y=+String(g.f).slice(0,4);
+            return starters(g.pk).then(function(st){
+             if(!st) return {skip:'sin abridores en el boxscore',g:g};
+             return Promise.all([temporada(st.a,y),temporada(st.h,y),ultimas5(st.a,y),ultimas5(st.h,y),
+               teamHit(g.a.id,y),teamHit(g.h.id,y),teamPen(g.a.id,y),teamPen(g.h.id,y),
+               rg14(g.a.id,g.f,y),rg14(g.h.id,g.f,y),ligaEra(y)]).then(function(r){
+              var L=r[10];
+              var eA=eraUsado(r[0],r[2],L), eH=eraUsado(r[1],r[3],L);
+              var rgA=rgMix(r[4],r[8]), rgH=rgMix(r[5],r[9]);
+              var bA=r[6].era, bH=r[7].era;
+              if(eA==null||eH==null||rgA==null||rgH==null||bA==null||bH==null||
+                 !isFinite(bA)||!isFinite(bH)) return {skip:'faltan datos de temporada',g:g};
+              return {g:g,y:y,f:g.f,dE:eA-eH,dR:rgH-rgA,dB:bA-bH,out:g.y};
+             });
+            });
+           }
+
+           /* ---------- analisis ---------- */
+           function pBase(r){ return pctLocal(r.dE,r.dR,r.dB,BASE.w,BASE.bono,BASE.mult)/100; }
+           function brier(rows,pf){ var s=0; rows.forEach(function(r){ var e=pf(r)-r.out; s+=e*e; }); return rows.length?s/rows.length:null; }
+           function paired(rows,pA,pB){
+            var d=[], by={};
+            rows.forEach(function(r){
+             var ea=pA(r)-r.out, eb=pB(r)-r.out, x=ea*ea-eb*eb;
+             d.push(x);
+             var o=by[r.y]||(by[r.y]={n:0,s:0}); o.n++; o.s+=x;
+            });
+            var n=d.length; if(n<2) return {n:n,dif:null,t:null,anios:by};
+            var m=d.reduce(function(a,b){ return a+b; },0)/n;
+            var v=d.reduce(function(a,b){ return a+(b-m)*(b-m); },0)/(n-1);
+            var se=Math.sqrt(v/n);
+            return {n:n,dif:m,t:se>0?m/se:null,anios:by};
+           }
+           function experimentos(){
+            var sh=function(s){ return function(r){ return 0.5+(pBase(r)-0.5)*s; }; };
+            var wt=function(w,b,m){ return function(r){ return pctLocal(r.dE,r.dR,r.dB,w,b,m||BASE.mult)/100; }; };
+            return [
+             {id:'s80',nom:'Encoger 20% hacia 50%',f:sh(0.8)},
+             {id:'s60',nom:'Encoger 40% hacia 50%',f:sh(0.6)},
+             {id:'s40',nom:'Encoger 60% hacia 50%',f:sh(0.4)},
+             {id:'s20',nom:'Encoger 80% hacia 50%',f:sh(0.2)},
+             {id:'bp40',nom:'Bullpen 0.40 (antes 0.25)',f:wt([0.65,0.5,0.40],0.59)},
+             {id:'bp40ab',nom:'Bullpen 0.40 y abridor 0.45',f:wt([0.45,0.5,0.40],0.59)},
+             {id:'ab40',nom:'Abridor 0.40, bullpen 0.30',f:wt([0.40,0.5,0.30],0.59)},
+             {id:'of30',nom:'Ofensiva 0.30 (antes 0.50)',f:wt([0.65,0.30,0.25],0.59)},
+             {id:'lo12',nom:'Localía 0.12 (antes 0.59)',f:wt(BASE.w,0.12)},
+             {id:'lo30',nom:'Localía 0.30',f:wt(BASE.w,0.30)},
+             {id:'comb',nom:'Bullpen 0.40 + abridor 0.45 + encoger 40%',f:function(r){ return 0.5+(pctLocal(r.dE,r.dR,r.dB,[0.45,0.5,0.40],0.59,6)/100-0.5)*0.6; }}
+            ];
+           }
+           function calib(rows){
+            var tr=[['50-55%',50,55],['55-60%',55,60],['60% o más',60,101]];
+            return tr.map(function(t){
+             var g=rows.filter(function(r){ var c=Math.max(pBase(r),1-pBase(r))*100; return c>=t[1]&&c<t[2]; });
+             if(!g.length) return {t:t[0],n:0};
+             var hit=0, dicho=0;
+             g.forEach(function(r){ var p=pBase(r), fav=p>=0.5?1:0; dicho+=Math.max(p,1-p); if(r.out===fav) hit++; });
+             return {t:t[0],n:g.length,dicho:dicho/g.length*100,real:hit/g.length*100};
+            });
+           }
+           function porAnio(rows){
+            var ys={}; rows.forEach(function(r){ (ys[r.y]||(ys[r.y]=[])).push(r); });
+            return Object.keys(ys).sort().map(function(y){
+             var g=ys[y], hit=0, dicho=0, home=0;
+             g.forEach(function(r){ var p=pBase(r); dicho+=Math.max(p,1-p); if(r.out===(p>=0.5?1:0)) hit++; home+=r.out; });
+             return {y:y,n:g.length,hit:hit/g.length*100,dicho:dicho/g.length*100,brier:brier(g,pBase),home:home/g.length*100};
+            });
+           }
+           /* Poisson-binomial: probabilidad de exactamente k aciertos */
+           function pb(ps){ var d=[1]; ps.forEach(function(p){ var n=new Array(d.length+1).fill(0);
+             for(var k=0;k<d.length;k++){ n[k]+=d[k]*(1-p); n[k+1]+=d[k]*p; } d=n; }); return d; }
+           function topDia(rows,topN){
+            var dias={}; rows.forEach(function(r){ (dias[r.f]||(dias[r.f]=[])).push(r); });
+            var out={dias:0,aciertos:0,esperados:0,pocos:0,pocosEsp:0,hist:{}};
+            Object.keys(dias).forEach(function(f){
+             var g=dias[f].map(function(r){ var p=pBase(r); return {c:Math.max(p,1-p),ok:r.out===(p>=0.5?1:0)}; })
+               .sort(function(a,b){ return b.c-a.c; });
+             if(g.length<topN) return;
+             var t=g.slice(0,topN), ok=t.filter(function(x){ return x.ok; }).length, ps=t.map(function(x){ return x.c; });
+             var d=pb(ps), esp=ps.reduce(function(a,b){ return a+b; },0);
+             out.dias++; out.aciertos+=ok; out.esperados+=esp; out.hist[ok]=(out.hist[ok]||0)+1;
+             if(ok<=1){ out.pocos++; }
+             out.pocosEsp+=d[0]+(d[1]||0);
+            });
+            return out;
+           }
+           function analizar(rows){
+            var base={brier:brier(rows,pBase),azar:0.25};
+            var home=rows.reduce(function(a,r){ return a+r.out; },0)/(rows.length||1);
+            base.constante=brier(rows,function(){ return home; });
+            base.home=home*100;
+            var ex=experimentos().map(function(e){
+             var p=paired(rows,pBase,e.f);
+             var anios=Object.keys(p.anios).filter(function(y){ return p.anios[y].n>=15; });
+             var mej=anios.filter(function(y){ return p.anios[y].s>0; }).length;
+             return {id:e.id,nom:e.nom,brier:brier(rows,e.f),dif:p.dif,t:p.t,mej:mej,elig:anios.length,
+               pasa:(p.dif!=null&&p.dif>0&&p.t!=null&&p.t>=2&&mej>=anios.length-1&&anios.length>=3)};
+            });
+            return {n:rows.length,base:base,anios:porAnio(rows),calib:calib(rows),ex:ex,top3:topDia(rows,3),top4:topDia(rows,4)};
+           }
+
+           function run(years,ui){
+            ui=ui||{};
+            var log=ui.log||function(){}, tick=ui.tick||function(){};
+            ERR=0;
+            return mapLimit(years,3,function(y){ return schedule(y); }).then(function(sc){
+             var games=[]; years.forEach(function(y,i){ log('Año '+y+': '+((sc[i]||[]).length)+' juegos de playoffs terminados'); games=games.concat(sc[i]||[]); });
+             if(!games.length) throw new Error('No se bajó ningún juego de playoffs. Revisa la conexión.');
+             log('Bajando datos de '+games.length+' juegos…');
+             return mapLimit(games,6,prep,function(d,n){ tick(d,n); });
+            }).then(function(res){
+             var rows=[], skip={}, nulos=0;
+             res.forEach(function(r){ if(!r){ nulos++; return; } if(r.skip){ skip[r.skip]=(skip[r.skip]||0)+1; return; } rows.push(r); });
+             return {rows:rows,skip:skip,nulos:nulos,errores:ERR,analisis:analizar(rows)};
+            });
+           }
+           return {run:run,analizar:analizar,eraUsado:eraUsado,reg:reg,rgMix:rgMix,pctLocal:pctLocal,pBase:pBase,
+             paired:paired,brier:brier,topDia:topDia,calib:calib,prep:prep,schedule:schedule,mapLimit:mapLimit,pb:pb,BASE:BASE,starters:starters};
+          })();
+          if(typeof module!=='undefined') module.exports=BT;
+
+          /* ===================================================================
+             OVA vs PINNACLE  (corre en GitHub Actions con Node 20+)
+             Compara el % de OVA contra la linea de CIERRE de Pinnacle (sin margen)
+             en juegos ya jugados de la temporada regular, con datos A LA FECHA de
+             cada juego (sin mirar el futuro).
+             MODO=sonda    -> 2 llamadas a OddsPapi. Solo verifica que todo conecta.
+             MODO=completo -> usa hasta MAX_CALLS llamadas y saca el veredicto.
+             =================================================================== */
+          const fs=require('fs');
+          const ENV=process.env;
+          const KEY=ENV.ODDSPAPI_KEY||'';
+          const MODO=(ENV.MODO||'sonda').toLowerCase();
+          const MAXC=Math.max(1,parseInt(ENV.MAX_CALLS||'150',10)||150);
+          const DESDE=ENV.DESDE||'2026-08-01';
+          const HASTA=ENV.HASTA||'2026-09-30';
+          const OP='https://api.oddspapi.io/v4';
+          const MLBAPI='https://statsapi.mlb.com/api/v1';
+          const CDIR='.cache', CF=CDIR+'/oddspapi.json';
+          const T0=Date.now(), LIMITE_MS=45*60*1000;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const out=[]; const P=(...a)=>{ const s=a.join(' '); out.push(s); console.log(s); };
+
+          /* ---------- OddsPapi con cache en disco, tope de llamadas y esperas ---------- */
+          let cache={data:{}};
+          try{ cache=JSON.parse(fs.readFileSync(CF,'utf8')); if(!cache.data) cache={data:{}}; }catch(e){}
+          function guardar(){ try{ fs.mkdirSync(CDIR,{recursive:true}); fs.writeFileSync(CF,JSON.stringify(cache)); }catch(e){} }
+          let nuevas=0, deCache=0; const ultimo={};
+          const ESC=parseFloat(ENV.COOL_ESC||'1');   /* solo para pruebas locales */
+          const COOL={'/fixtures':2300*ESC,'/historical-odds':5500*ESC};
+          async function op(path,params){
+            const q=new URLSearchParams(params); const k=path+'?'+q.toString();
+            if(cache.data[k]){ deCache++; return cache.data[k]; }
+            for(let intento=0;intento<2;intento++){
+              if(nuevas>=MAXC){ const e=new Error('tope de llamadas'); e.tope=true; throw e; }
+              if(Date.now()-T0>LIMITE_MS){ const e=new Error('tiempo maximo'); e.tope=true; throw e; }
+              const esp=(COOL[path]||2300*ESC)-(Date.now()-(ultimo[path]||0)); if(esp>0) await sleep(esp);
+              ultimo[path]=Date.now(); nuevas++;
+              const u=new URLSearchParams(params); u.set('apiKey',KEY);
+              const r=await fetch(OP+path+'?'+u.toString());
+              if(r.status===429 && intento===0){ await sleep(8000*ESC); continue; }
+              if(!r.ok){
+                const t=(await r.text().catch(()=>'')).slice(0,160).replace(KEY,'***');
+                const e=new Error('OddsPapi '+path+' HTTP '+r.status+' '+t); e.status=r.status; throw e;
+              }
+              const j=await r.json(); cache.data[k]=j; guardar(); return j;
+            }
+          }
+
+          /* ---------- MLB ---------- */
+          async function mj(url,tries){
+            tries=tries||3;
+            for(let i=0;i<tries;i++){
+              try{ const r=await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status); return await r.json(); }
+              catch(e){ if(i===tries-1) throw e; await sleep(350); }
+            }
+          }
+          const pad=n=>String(n).padStart(2,'0');
+          const ymd=d=>d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate());
+          const dBase=s=>{ const p=s.split('-'); return new Date(Date.UTC(+p[0],+p[1]-1,+p[2],12,0,0)); };
+          const sumDias=(s,n)=>ymd(new Date(dBase(s).getTime()+n*86400000));
+          function ipN(ip){ if(ip==null) return 0; const n=parseFloat(String(ip)); if(!isFinite(n)) return 0;
+            const dec=Math.round((n-Math.trunc(n))*10); return Math.trunc(n)+(dec===1?1/3:dec===2?2/3:0); }
+          const memo={}; function M(n,k,fn){ const c=memo[n]||(memo[n]={}); if(!c[k]) c[k]=fn(); return c[k]; }
+
+          async function mlbJuegos(desde,hasta){
+            const d=await mj(MLBAPI+'/schedule?sportId=1&startDate='+desde+'&endDate='+hasta+'&gameType=R&hydrate=team');
+            const o=[];
+            (d.dates||[]).forEach(dd=>(dd.games||[]).forEach(g=>{
+              if(!g.status||g.status.abstractGameState!=='Final') return;
+              const T=g.teams; if(!T||!T.home||!T.away||!T.home.team||!T.away.team) return;
+              if(T.home.score==null||T.away.score==null||T.home.score===T.away.score) return;
+              o.push({pk:g.gamePk,f:g.officialDate||dd.date,gt:Date.parse(g.gameDate),
+                h:{id:T.home.team.id,name:T.home.team.name||T.home.team.teamName||''},
+                a:{id:T.away.team.id,name:T.away.team.name||T.away.team.teamName||''},
+                y:T.home.score>T.away.score?1:0});
+            }));
+            return o;
+          }
+          /* historial de un abridor: UNA llamada, y de ahi sale temporada y ultimas 5 A LA FECHA */
+          function glog(id,y){ return M('gl',id+'-'+y,async()=>{
+            const d=await mj(MLBAPI+'/people/'+id+'/stats?stats=gameLog&group=pitching&season='+y+'&gameType=R');
+            const sp=(d.stats&&d.stats[0]&&d.stats[0].splits)||[];
+            return sp.map(s=>({date:s.date||'',gs:+(s.stat.gamesStarted||0),ip:ipN(s.stat.inningsPitched),
+              er:+(s.stat.earnedRuns||0),hr:+(s.stat.homeRuns||0),bb:+(s.stat.baseOnBalls||0),
+              hbp:+(s.stat.hitByPitch||0),so:+(s.stat.strikeOuts||0)})).sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
+          }); }
+          function pitAlDia(log,fecha){
+            const prev=log.filter(x=>x.date&&x.date<fecha);
+            let ip=0,er=0,hr=0,bb=0,hbp=0,so=0;
+            prev.forEach(x=>{ ip+=x.ip; er+=x.er; hr+=x.hr; bb+=x.bb; hbp+=x.hbp; so+=x.so; });
+            const sal=prev.filter(x=>x.gs===1), use=(sal.length?sal:prev).slice(-5);
+            let ip5=0,er5=0; use.forEach(x=>{ ip5+=x.ip; er5+=x.er; });
+            return {se:{era:ip>0?er*9/ip:null,ip:ip,fip:ip>=10?(13*hr+3*(bb+hbp)-2*so)/ip+3.15:null},
+                    l5:{era:ip5>0?er5*9/ip5:null,ip:ip5,n:use.length}};
+          }
+          function rango(grupo,id,ini,fin,y){ return M('rg'+grupo,id+'|'+ini+'|'+fin,async()=>{
+            const d=await mj(MLBAPI+'/teams/'+id+'/stats?stats=byDateRange&startDate='+ini+'&endDate='+fin+'&group='+grupo+'&season='+y+'&gameType=R');
+            const s=d.stats&&d.stats[0]&&d.stats[0].splits&&d.stats[0].splits[0];
+            return s?s.stat:{};
+          }).catch(()=>({})); }
+          function ligaEra(y){ return M('liga',String(y),async()=>{
+            const d=await mj(MLBAPI+'/teams/stats?stats=season&group=pitching&season='+y+'&sportIds=1&gameType=R');
+            const sp=(d.stats&&d.stats[0]&&d.stats[0].splits)||[]; let er=0,ip=0;
+            sp.forEach(s=>{ er+=+(s.stat.earnedRuns||0); ip+=ipN(s.stat.inningsPitched); });
+            return ip>0?er*9/ip:4.10;
+          }).catch(()=>4.10); }
+
+          /* OVA "al dia": mismo calculo de la app, pero con lo que se sabia ANTES del juego */
+          async function ovaAlDia(g){
+            const y=+String(g.f).slice(0,4);
+            const st=await BT.starters(g.pk).catch(()=>null);
+            if(!st) return {skip:'sin abridores en el boxscore'};
+            const ayer=sumDias(g.f,-1), ini14=sumDias(g.f,-14), ini=y+'-03-01';
+            const [la,lh,hA,hH,h14A,h14H,pA,pH,L]=await Promise.all([
+              glog(st.a,y),glog(st.h,y),
+              rango('hitting',g.a.id,ini,ayer,y),rango('hitting',g.h.id,ini,ayer,y),
+              rango('hitting',g.a.id,ini14,ayer,y),rango('hitting',g.h.id,ini14,ayer,y),
+              rango('pitching',g.a.id,ini,ayer,y),rango('pitching',g.h.id,ini,ayer,y),ligaEra(y)]);
+            if(!la.length||!lh.length||!la.some(x=>x.date)||!lh.some(x=>x.date)) return {skip:'sin historial de abridor'};
+            const a=pitAlDia(la,g.f), h=pitAlDia(lh,g.f);
+            const eA=BT.eraUsado(a.se,a.l5,L), eH=BT.eraUsado(h.se,h.l5,L);
+            const rgS=s=>{ const gp=+(s.gamesPlayed||0), r=+(s.runs||0); return gp>0?{rg:r/gp,g:gp}:{rg:null,g:0}; };
+            const rg14=s=>{ const x=rgS(s); return x.g>=5?x:{rg:null,g:x.g}; };
+            const rgA=BT.rgMix(rgS(hA),rg14(h14A)), rgH=BT.rgMix(rgS(hH),rg14(h14H));
+            const bA=parseFloat(pA.era), bH=parseFloat(pH.era);   /* ERA del cuerpo de pitcheo a la fecha (aprox. del bullpen) */
+            if(eA==null||eH==null||rgA==null||rgH==null||!isFinite(bA)||!isFinite(bH)) return {skip:'faltan datos a la fecha'};
+            const dE=eA-eH, dR=rgH-rgA, dB=bA-bH;
+            return {pO:BT.pctLocal(dE,dR,dB,BT.BASE.w,BT.BASE.bono,BT.BASE.mult)/100};
+          }
+
+          /* ---------- emparejar juegos MLB con fixtures de OddsPapi ---------- */
+          const norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z ]/g,' ').replace(/\s+/g,' ').trim();
+          function nick(name){ const n=norm(name); for(const k of ['red sox','white sox','blue jays']) if(n.endsWith(k)) return k;
+            const p=n.split(' '); return p[p.length-1]; }
+          const igual=(oddsName,mlbName)=>{ const k=nick(mlbName); return !!k && (' '+norm(oddsName)+' ').includes(' '+k+' '); };
+          function tms(x){ if(typeof x==='number') return x<1e12?x*1000:x; return Date.parse(x); }
+          function listaFix(j){
+            let a=Array.isArray(j)?j:null;
+            if(!a&&j) for(const k of ['fixtures','data','results','items']) if(Array.isArray(j[k])){ a=j[k]; break; }
+            return (a||[]).map(f=>({id:f.fixtureId||f.id,n1:f.participant1Name,n2:f.participant2Name,t:tms(f.startTime)}))
+              .filter(f=>f.id&&f.n1&&f.n2&&isFinite(f.t));
+          }
+          function emparejar(juegos,fixs){
+            const res=[], usados=new Set();
+            juegos.forEach(g=>{
+              let best=null,bd=1e18;
+              fixs.forEach(f=>{
+                if(usados.has(f.id)) return;
+                const ok=(igual(f.n1,g.h.name)&&igual(f.n2,g.a.name))||(igual(f.n1,g.a.name)&&igual(f.n2,g.h.name));
+                if(!ok) return;
+                const d=Math.abs(f.t-g.gt); if(d<=4*3600e3&&d<bd){ best=f; bd=d; }
+              });
+              if(best){ usados.add(best.id); res.push({g:g,f:best,p1Local:igual(best.n1,g.h.name)}); }
+            });
+            return res;
+          }
+          function dec(x){ x=+x; if(!isFinite(x)) return NaN; if(x>=100) return 1+x/100; if(x<=-100) return 1+100/(-x); return x; }
+          function precios(hist,kick){
+            const bk=hist&&hist.bookmakers&&hist.bookmakers.pinnacle; if(!bk) return {err:'sin Pinnacle'};
+            const mk=bk.markets&&bk.markets['131']; if(!mk) return {err:'sin mercado 131'};
+            const o1=mk.outcomes&&mk.outcomes['131'], o2=mk.outcomes&&mk.outcomes['132']; if(!o1||!o2) return {err:'sin resultados 131/132'};
+            const serie=o=>{ const pl=o.players||{}; const arr=pl['0']||pl[Object.keys(pl)[0]]||[];
+              return arr.map(x=>({t:Date.parse(x.createdAt),p:dec(x.price)})).filter(x=>isFinite(x.t)&&x.p>1).sort((a,b)=>a.t-b.t); };
+            const s1=serie(o1), s2=serie(o2);
+            const cerca=s=>{ let r=null; s.forEach(x=>{ if(x.t<=kick) r=x; }); return r; };
+            const c1=cerca(s1), c2=cerca(s2); if(!c1||!c2) return {err:'sin precio antes del inicio'};
+            if(kick-Math.max(c1.t,c2.t)>3*3600e3) return {err:'cierre con mas de 3 horas de antiguedad'};
+            const nv=(x,y)=>(1/x)/((1/x)+(1/y));
+            return {cierre:nv(c1.p,c2.p),apertura:nv(s1[0].p,s2[0].p),snaps:s1.length,min:Math.round((kick-Math.max(c1.t,c2.t))/60000),
+                    c1:c1.p,c2:c2.p};
+          }
+
+          /* ---------- analisis ---------- */
+          function pd(rows,fa,fb){   /* media de (errorA^2 - errorB^2): positivo = B mejor que A */
+            const d=rows.map(r=>{ const ea=fa(r)-r.out, eb=fb(r)-r.out; return ea*ea-eb*eb; });
+            const n=d.length; if(n<2) return {n:n,dif:null,se:null,t:null};
+            const m=d.reduce((a,b)=>a+b,0)/n, v=d.reduce((a,b)=>a+(b-m)*(b-m),0)/(n-1), se=Math.sqrt(v/n);
+            return {n:n,dif:m,se:se,t:se>0?m/se:null};
+          }
+          const f4=x=>x==null?'—':x.toFixed(4), f1=x=>x==null?'—':x.toFixed(1), f2=x=>x==null?'—':x.toFixed(2);
+          function analizar(rows){
+            const pO=r=>r.pO, pC=r=>r.pC, pA=r=>r.pA;
+            const R={n:rows.length};
+            R.bO=BT.brier(rows,pO); R.bC=BT.brier(rows,pC); R.bA=BT.brier(rows,pA);
+            const loc=rows.reduce((a,r)=>a+r.out,0)/rows.length; R.bK=BT.brier(rows,()=>loc);
+            R.dOP=pd(rows,pC,pO);      /* positivo = OVA mejor que Pinnacle */
+            R.mezclas=[0.15,0.30,0.50].map(w=>({w:w,b:BT.brier(rows,r=>w*r.pO+(1-w)*r.pC),
+              cmp:pd(rows,pC,r=>w*r.pO+(1-w)*r.pC)}));
+            R.dAC=pd(rows,pA,pC);      /* positivo = el cierre mejor que la apertura */
+            const favHit=f=>rows.filter(r=>(f(r)>=0.5?1:0)===r.out).length/rows.length*100;
+            R.hitO=favHit(pO); R.hitC=favHit(pC);
+            R.confO=rows.reduce((a,r)=>a+Math.abs(r.pO-0.5),0)/rows.length*100;
+            R.confC=rows.reduce((a,r)=>a+Math.abs(r.pC-0.5),0)/rows.length*100;
+            const dis=rows.filter(r=>Math.abs(r.pO-r.pC)>=0.04);
+            let real=0,esp=0,vr=0;
+            dis.forEach(r=>{ const lado=r.pO>r.pC?1:0; const gana=(r.out===lado)?1:0; real+=gana;
+              const q=lado===1?r.pC:1-r.pC; esp+=q; vr+=q*(1-q); });
+            R.dis={n:dis.length,real:real,esp:esp,sd:Math.sqrt(vr)};
+            R.mdd=pd(rows,pC,pO).se!=null?2.8*pd(rows,pC,pO).se:null;
+            return R;
+          }
+          function reporte(R,info){
+            const L=[];
+            L.push('# OVA contra Pinnacle');
+            L.push('');
+            L.push('Juegos comparados: **'+R.n+'** (de '+info.desde+' a '+info.hasta+', temporada regular 2026).');
+            L.push('Llamadas nuevas a OddsPapi en esta corrida: '+info.nuevas+' · tomadas del cache: '+info.deCache+'.');
+            L.push('');
+            L.push('## Brier (más bajo = mejor)');
+            L.push('- Siempre el 50% / % de local: '+f4(R.bK));
+            L.push('- Pinnacle apertura: '+f4(R.bA));
+            L.push('- **Pinnacle cierre: '+f4(R.bC)+'**');
+            L.push('- **OVA: '+f4(R.bO)+'**');
+            L.push('');
+            L.push('Diferencia OVA vs Pinnacle cierre: '+(R.dOP.dif==null?'—':(R.dOP.dif>0?'OVA mejor por ':'Pinnacle mejor por ')+Math.abs(R.dOP.dif).toFixed(4))+
+              ' (t = '+f2(R.dOP.t)+').');
+            L.push('Con '+R.n+' juegos solo se notarían diferencias mayores a unos ±'+f4(R.mdd)+' de Brier. Diferencias más chicas se pierden en el ruido.');
+            L.push('');
+            L.push('## ¿OVA le agrega algo al mercado?');
+            L.push('Mezclar un poco de OVA con Pinnacle. Positivo = la mezcla mejora a Pinnacle solo.');
+            R.mezclas.forEach(m=>L.push('- '+Math.round(m.w*100)+'% OVA + '+Math.round((1-m.w)*100)+'% Pinnacle: Brier '+f4(m.b)+' · mejora '+
+              (m.cmp.dif==null?'—':(m.cmp.dif*1000).toFixed(2)+' milésimas')+' (t = '+f2(m.cmp.t)+')'));
+            L.push('');
+            L.push('## Cuando OVA y Pinnacle no coinciden (4 puntos o más)');
+            L.push('- Juegos: '+R.dis.n);
+            L.push('- Veces que ganó el lado que OVA prefería: '+R.dis.real+' · esperado si Pinnacle tiene razón: '+f1(R.dis.esp)+' (± '+f1(R.dis.sd)+')');
+            L.push('');
+            L.push('## Otros datos');
+            L.push('- El favorito de OVA ganó '+f1(R.hitO)+'% · el favorito de Pinnacle ganó '+f1(R.hitC)+'%');
+            L.push('- Confianza media (distancia al 50%): OVA '+f1(R.confO)+' puntos · Pinnacle '+f1(R.confC)+' puntos');
+            L.push('- El cierre le gana a la apertura por '+(R.dAC.dif==null?'—':(R.dAC.dif*1000).toFixed(2)+' milésimas')+' (el mercado aprende durante el día).');
+            L.push('');
+            L.push('## Veredicto');
+            const sospecha=R.bC>0.27;
+            if(sospecha){
+              L.push('**Revisar el mapeo.** El Brier de Pinnacle salió peor que tirar una moneda, lo que casi seguro significa que los equipos quedaron al revés (local/visitante). No tomes estos números como válidos todavía.');
+            } else if(R.n<60){
+              L.push('**Muy pocos juegos ('+R.n+').** No alcanza para concluir nada. Corre de nuevo con más llamadas.');
+            } else if(R.dOP.t!=null && R.dOP.t<=-2){
+              L.push('**El mercado le gana claramente a OVA.** Usar OVA sola contra la línea de Pinnacle no tiene ventaja. Sirve como análisis, no como forma de ganarle a la casa.');
+            } else if(R.mezclas[1].cmp.t!=null && R.mezclas[1].cmp.t>=2 && R.mezclas[1].cmp.dif>0){
+              L.push('**OVA aporta algo sobre el mercado.** Mezclar 30% OVA con Pinnacle mejora a Pinnacle solo de forma significativa. Vale la pena seguir con el registro en vivo.');
+            } else {
+              L.push('**No se puede distinguir.** Con '+R.n+' juegos, OVA y Pinnacle quedan en rangos parecidos y no hay señal de que OVA le aporte al mercado. Lo más probable es que Pinnacle sea igual o mejor. Para decidir hacen falta más juegos (el registro en vivo con CLV los va acumulando).');
+            }
+            L.push('');
+            L.push('_Notas: OVA se calculó con datos disponibles antes de cada juego. El bullpen se aproxima con el ERA del cuerpo de pitcheo completo a la fecha, no se incluyen los ajustes de zurdo/derecho ni de bullpen quemado, y se usa el abridor que realmente lanzó._');
+            return L.join('\n');
+          }
+
+          /* ---------- flujo principal ---------- */
+          function ventanas(desde,hasta){
+            const v=[]; let a=desde;
+            while(a<=hasta){ let b=sumDias(a,8); if(b>hasta) b=hasta; v.push([a,b]); a=sumDias(b,1); }
+            return v;
+          }
+          function resumen(txt){
+            try{ fs.writeFileSync('resultado.md',txt); if(ENV.GITHUB_STEP_SUMMARY) fs.appendFileSync(ENV.GITHUB_STEP_SUMMARY,txt+'\n'); }catch(e){}
+          }
+          async function bajarFixtures(desde,hasta){
+            const fx=[]; const vs=ventanas(desde,hasta);
+            for(let i=0;i<vs.length;i++){
+              const j=await op('/fixtures',{sportId:'13',from:vs[i][0]+'T00:00:00Z',to:vs[i][1]+'T23:59:59Z',statusId:'2',hasOdds:'true',bookmakers:'pinnacle'});
+              const l=listaFix(j); P('  ventana '+vs[i][0]+' a '+vs[i][1]+': '+l.length+' fixtures');
+              if(!l.length) P('  (respuesta sin fixtures; forma recibida: '+JSON.stringify(j).slice(0,300).replace(KEY,'***')+')');
+              l.forEach(x=>fx.push(x));
+            }
+            return fx;
+          }
+
+          async function sonda(){
+            const desde=ENV.SONDA_DESDE||'2026-09-22', hasta=ENV.SONDA_HASTA||'2026-09-24';   /* fechas dentro de la temporada regular */
+            P('SONDA: revisando '+desde+' a '+hasta+' (2 llamadas a OddsPapi como máximo)');
+            const juegos=await mlbJuegos(desde,hasta); P('Juegos MLB terminados en esas fechas:',juegos.length);
+            const fx=await bajarFixtures(desde,hasta);
+            P('Fixtures de OddsPapi (béisbol con Pinnacle):',fx.length);
+            if(fx.length) P('  ejemplo:',fx[0].n1,'vs',fx[0].n2,'|',new Date(fx[0].t).toISOString());
+            const em=emparejar(juegos,fx);
+            P('Emparejados con juegos de MLB:',em.length,'de',juegos.length);
+            if(!em.length){ P('\nNO SE PUDO EMPAREJAR. Pega este resultado completo en el chat para ajustar los nombres.');
+              juegos.slice(0,3).forEach(g=>P('  MLB:',g.h.name,'vs',g.a.name)); return false; }
+            const e=em[0];
+            const h=await op('/historical-odds',{fixtureId:String(e.f.id),bookmakers:'pinnacle'});
+            const bk=h&&h.bookmakers||{}; P('Casas en la respuesta:',Object.keys(bk).join(', ')||'ninguna');
+            const mk=bk.pinnacle&&bk.pinnacle.markets||{}; P('Mercados de Pinnacle:',Object.keys(mk).slice(0,12).join(', ')||'ninguno');
+            const m1=mk['131']; if(m1){ Object.keys(m1.outcomes||{}).forEach(o=>{
+              const pl=m1.outcomes[o].players||{}; const arr=(pl['0']||pl[Object.keys(pl)[0]]||[]).slice().sort((a,b)=>Date.parse(a.createdAt)-Date.parse(b.createdAt));
+              P('  resultado '+o+': '+arr.length+' cambios de precio; más viejo '+(arr.length?JSON.stringify([arr[0].createdAt,arr[0].price]):'—')+
+                ' · más nuevo '+(arr.length?JSON.stringify([arr[arr.length-1].createdAt,arr[arr.length-1].price]):'—')); }); }
+            const pr=precios(h,e.f.t);
+            P('Partido:',e.f.n1,'(participante 1) vs',e.f.n2,'| local en MLB:',e.g.h.name,'| participante 1 es local:',e.p1Local);
+            if(pr.err){ P('No se pudo sacar el precio de cierre:',pr.err); return false; }
+            const pLoc=e.p1Local?pr.cierre:1-pr.cierre;
+            P('Cierre sin margen: participante 1 =',(pr.cierre*100).toFixed(1)+'%','| local =',(pLoc*100).toFixed(1)+'%','| apertura p1 =',(pr.apertura*100).toFixed(1)+'%','| último precio',pr.min,'min antes del inicio');
+            P('Resultado real: ganó el '+(e.g.y?'local':'visitante'));
+            const o=await ovaAlDia(e.g); P('OVA al día para ese juego:',o.skip?('omitido ('+o.skip+')'):((o.pO*100).toFixed(1)+'% local'));
+            P('\nSONDA COMPLETA. Si todo lo de arriba se ve normal, corre el modo "completo".');
+            return true;
+          }
+
+          async function completo(){
+            P('MODO COMPLETO: hasta '+MAXC+' llamadas nuevas a OddsPapi. Rango '+DESDE+' a '+HASTA);
+            const juegos=await mlbJuegos(DESDE,HASTA); P('Juegos MLB terminados:',juegos.length);
+            let fx=[]; try{ fx=await bajarFixtures(DESDE,HASTA); }catch(e){ if(!e.tope) throw e; P('Se alcanzó el tope mientras se bajaban fixtures.'); }
+            const em=emparejar(juegos,fx);
+            P('Fixtures:',fx.length,'· emparejados con MLB:',em.length);
+            if(!em.length) throw new Error('No se emparejó ningún juego. Corre primero el modo sonda.');
+            /* muestra al azar (semilla fija) de lo que alcance el presupuesto */
+            let s=12345; const rnd=()=>{ s=(s*1664525+1013904223)%4294967296; return s/4294967296; };
+            const arr=em.slice(); for(let i=arr.length-1;i>0;i--){ const j=Math.floor(rnd()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; }
+            /* los ya guardados en cache salen primero, no cuestan */
+            arr.sort((a,b)=>(cache.data['/historical-odds?'+new URLSearchParams({fixtureId:String(b.f.id),bookmakers:'pinnacle'})]?1:0)-
+                            (cache.data['/historical-odds?'+new URLSearchParams({fixtureId:String(a.f.id),bookmakers:'pinnacle'})]?1:0));
+            const filas=[], skip={}; let paro=false;
+            for(let i=0;i<arr.length;i++){
+              const e=arr[i];
+              let h;
+              try{ h=await op('/historical-odds',{fixtureId:String(e.f.id),bookmakers:'pinnacle'}); }
+              catch(err){ if(err.tope){ paro=true; break; } if(err.status===401||err.status===403||err.status===429){ P('OddsPapi dijo: '+err.message); paro=true; break; } skip['error de OddsPapi']=(skip['error de OddsPapi']||0)+1; continue; }
+              const pr=precios(h,e.f.t); if(pr.err){ skip[pr.err]=(skip[pr.err]||0)+1; continue; }
+              const loc=x=>e.p1Local?x:1-x;
+              filas.push({g:e.g,y:2026,out:e.g.y,pC:loc(pr.cierre),pA:loc(pr.apertura)});
+              if(filas.length%20===0) P('  '+filas.length+' juegos con precio de Pinnacle…');
+            }
+            P('Con precio de Pinnacle utilizable:',filas.length,paro?'(se detuvo por tope/tiempo)':'');
+            Object.keys(skip).forEach(k=>P('  omitidos por "'+k+'":',skip[k]));
+            P('Calculando OVA al día para cada juego (API de MLB, gratis)…');
+            const res=await BT.mapLimit(filas,6,f=>ovaAlDia(f.g));
+            const rows=[], sk2={};
+            res.forEach((r,i)=>{ if(!r||r.skip){ const k=r?r.skip:'error'; sk2[k]=(sk2[k]||0)+1; return; } rows.push(Object.assign({},filas[i],{pO:r.pO})); });
+            Object.keys(sk2).forEach(k=>P('  OVA omitido por "'+k+'":',sk2[k]));
+            if(rows.length<10) throw new Error('Quedaron solo '+rows.length+' juegos utilizables.');
+            const R=analizar(rows);
+            const txt=reporte(R,{desde:DESDE,hasta:HASTA,nuevas:nuevas,deCache:deCache});
+            P('\n'+txt);
+            resumen(txt);
+          }
+
+          (async()=>{
+            if(!KEY){ P('Falta el secreto ODDSPAPI_KEY en GitHub (Settings → Secrets and variables → Actions).'); process.exit(1); }
+            try{
+              if(MODO==='completo') await completo(); else { const ok=await sonda(); resumen('# Sonda\n```\n'+out.join('\n')+'\n```'); if(!ok) process.exitCode=0; }
+              P('\nLlamadas nuevas a OddsPapi en esta corrida:',nuevas,'· del cache:',deCache);
+            }catch(e){
+              P('ERROR:',String(e&&e.message||e).replace(KEY,'***'));
+              resumen('# Error\n'+String(e&&e.message||e).replace(KEY,'***'));
+              process.exitCode=1;
+            }
+          })();
+
+          FINDELSCRIPT
+      - name: Correr la prueba
+        env:
+          ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
+          MODO: ${{ inputs.modo }}
+          MAX_CALLS: ${{ inputs.max_calls }}
+        run: node ovapinnacle.js
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: .cache
+          key: oddspapi-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resultado
+          path: resultado.md
+          if-no-files-found: ignore
