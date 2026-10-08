@@ -2,9 +2,8 @@ name: Valor vs Pinnacle
 on:
   workflow_dispatch:
   schedule:
-    - cron: "30 16 * * *"
-    - cron: "30 19 * * *"
-    - cron: "30 22 * * *"
+    - cron: "30 17 * * *"
+    - cron: "30 21 * * *"
 jobs:
   escaner:
     runs-on: ubuntu-latest
@@ -28,7 +27,7 @@ jobs:
              2) Compara con los precios de Kalshi / Bovada (u otras casas que se configuren)
                 y marca donde pagan MAS de lo justo (EV positivo).
              3) Te manda al telefono (ntfy) los juegos con valor y los favoritos mas claros.
-             Una sola llamada a OddsPapi trae todos los juegos de MLB.
+             Una llamada a OddsPapi por casa (Pinnacle + las tuyas) trae todos los juegos de MLB.
              =================================================================== */
           const fs=require('fs');
           const ENV=process.env;
@@ -211,14 +210,41 @@ jobs:
             return o;
           }
 
+          async function bajarCasa(torneo,slug){
+            const variantes=[{tournamentIds:torneo,bookmaker:slug},{tournamentId:torneo,bookmaker:slug}];
+            let ult=null;
+            for(const p of variantes){
+              try{ return listaFix(await op('/odds-by-tournaments',p)); }
+              catch(e){ ult=e; if(e.status===400&&/tournament/i.test(e.message)) continue; throw e; }
+            }
+            throw ult;
+          }
+
           (async()=>{
             if(!KEY){ P('Falta el secreto ODDSPAPI_KEY en GitHub.'); process.exit(1); }
             try{
-              const libros=await resolverLibros();
-              P('Casas a comparar con Pinnacle:',libros.join(', '));
+              const quiero=await resolverLibros();
+              P('Casas a comparar con Pinnacle:',quiero.join(', '));
               const torneo=await ubicarTorneo();
-              const j=await op('/odds-by-tournaments',{tournamentIds:torneo,bookmakers:['pinnacle'].concat(libros).join(',')});
-              const fixs=listaFix(j);
+              /* OddsPapi pide UNA casa por llamada: se junta todo por juego */
+              const mapa={}, libros=[];
+              for(const slug of ['pinnacle'].concat(quiero)){
+                let l;
+                try{ l=await bajarCasa(torneo,slug); }
+                catch(e){
+                  if(slug==='pinnacle') throw e;
+                  P('  No pude traer '+slug+': '+String(e.message).replace(KEY,'***')); if(e.tope) break; continue;
+                }
+                P('  '+slug+': '+l.length+' juegos');
+                if(slug!=='pinnacle') libros.push(slug);
+                l.forEach(f=>{
+                  const id=f.fixtureId; if(!id) return;
+                  const b=mapa[id]||(mapa[id]=Object.assign({},f,{bookmakerOdds:{}}));
+                  Object.assign(b.bookmakerOdds,f.bookmakerOdds||{});
+                  ['participant1Name','participant2Name','startTime','statusId'].forEach(k=>{ if(f[k]!=null) b[k]=f[k]; });
+                });
+              }
+              const fixs=Object.values(mapa);
               P('Juegos recibidos de OddsPapi:',fixs.length);
               await completarNombres(fixs,torneo);
               const filas=analizar(fixs,libros);
