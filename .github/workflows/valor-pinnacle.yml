@@ -58,10 +58,15 @@ jobs:
             if(opts.cache && k in cache.data) return cache.data[k];
             const gasta=!opts.libre;
             if(gasta && (cache.uso[mes]||0)>=MAX_MES){ const e=new Error('tope mensual de este escaner ('+MAX_MES+' llamadas)'); e.tope=true; throw e; }
-            const esp=1100*ESC-(Date.now()-ultimo); if(esp>0) await sleep(esp);
+            const gap=(/odds-by-tournaments/.test(path)?6000:1100)*ESC; const esp=gap-(Date.now()-ultimo); if(esp>0) await sleep(esp);
             ultimo=Date.now(); if(gasta){ nuevas++; cache.uso[mes]=(cache.uso[mes]||0)+1; }
             const u=new URLSearchParams(params||{}); u.set('apiKey',KEY);
-            const r=await fetch(OP+path+'?'+u.toString());
+            let r=await fetch(OP+path+'?'+u.toString());
+            if(r.status===429 && !opts.reintento){                /* demasiado rapido: espera lo que pide y repite una vez */
+              const t=await r.text().catch(()=>''); const m=/wait ([0-9.]+) seconds/.exec(t); const w=Math.min(15,(m?parseFloat(m[1]):2)+2);
+              P('  (429: espero '+w.toFixed(1)+' s y repito)'); await sleep(w*1000*ESC);
+              return op(path,params,Object.assign({},opts,{reintento:true}));
+            }
             if(r.status===404){ guardar(); return null; }
             if(!r.ok){ const t=(await r.text().catch(()=>'')).slice(0,200).replace(KEY,'***');
               const e=new Error('OddsPapi '+path+' HTTP '+r.status+' '+t); e.status=r.status; throw e; }
