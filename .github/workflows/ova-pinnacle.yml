@@ -3,23 +3,23 @@ on:
   workflow_dispatch:
     inputs:
       modo:
-        description: "sonda = prueba de 2 llamadas / completo = prueba grande"
+        description: "sonda = prueba corta / completo = prueba grande"
         type: choice
         options:
           - sonda
           - completo
         default: sonda
-      max_calls:
-        description: "Tope de llamadas NUEVAS a OddsPapi (solo modo completo)"
-        default: "150"
+      max_juegos:
+        description: "Juegos con precio de Pinnacle a traer (modo completo)"
+        default: "500"
 jobs:
   prueba:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
       - uses: actions/cache/restore@v4
         with:
           path: .cache
@@ -319,46 +319,60 @@ jobs:
              Compara el % de OVA contra la linea de CIERRE de Pinnacle (sin margen)
              en juegos ya jugados de la temporada regular, con datos A LA FECHA de
              cada juego (sin mirar el futuro).
-             MODO=sonda    -> 2 llamadas a OddsPapi. Solo verifica que todo conecta.
-             MODO=completo -> usa hasta MAX_CALLS llamadas y saca el veredicto.
+             MODO=sonda    -> unas pocas llamadas. Solo verifica que todo conecta y que se encuentran los juegos.
+             MODO=completo -> trae precios de hasta MAX_JUEGOS juegos y saca el veredicto.
              =================================================================== */
           const fs=require('fs');
           const ENV=process.env;
           const KEY=ENV.ODDSPAPI_KEY||'';
           const MODO=(ENV.MODO||'sonda').toLowerCase();
-          const MAXC=Math.max(1,parseInt(ENV.MAX_CALLS||'150',10)||150);
+          const MAXC=Math.max(1,parseInt(ENV.MAX_CALLS||'60',10)||60);        /* llamadas que SI gastan cuota (lista de juegos) */
+          const MAXJ=Math.max(1,parseInt(ENV.MAX_JUEGOS||'500',10)||500);     /* precios historicos: no gastan cuota, pero esperan 5 s c/u */
+          const VENT=Math.max(1,parseInt(ENV.VENT_DIAS||'3',10)||3);          /* dias por ventana de busqueda */
           const DESDE=ENV.DESDE||'2026-08-01';
           const HASTA=ENV.HASTA||'2026-09-30';
           const OP='https://api.oddspapi.io/v4';
           const MLBAPI='https://statsapi.mlb.com/api/v1';
           const CDIR='.cache', CF=CDIR+'/oddspapi.json';
-          const T0=Date.now(), LIMITE_MS=45*60*1000;
+          const T0=Date.now(), LIMITE_MS=(parseInt(ENV.MAX_MIN||'100',10)||100)*60*1000;
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           const out=[]; const P=(...a)=>{ const s=a.join(' '); out.push(s); console.log(s); };
 
-          /* ---------- OddsPapi con cache en disco, tope de llamadas y esperas ---------- */
+          /* ---------- OddsPapi con cache en disco, topes y esperas ---------- */
           let cache={data:{}};
           try{ cache=JSON.parse(fs.readFileSync(CF,'utf8')); if(!cache.data) cache={data:{}}; }catch(e){}
-          function guardar(){ try{ fs.mkdirSync(CDIR,{recursive:true}); fs.writeFileSync(CF,JSON.stringify(cache)); }catch(e){} }
-          let nuevas=0, deCache=0; const ultimo={};
+          let sucio=0;
+          function guardar(){ try{ fs.mkdirSync(CDIR,{recursive:true}); fs.writeFileSync(CF,JSON.stringify(cache)); sucio=0; }catch(e){} }
+          function guardarPronto(){ if(++sucio>=15) guardar(); }
+          let nuevas=0, nuevasH=0, deCache=0; const ultimo={};
           const ESC=parseFloat(ENV.COOL_ESC||'1');   /* solo para pruebas locales */
-          const COOL={'/fixtures':2300*ESC,'/historical-odds':5500*ESC};
+          const COOL={'/fixtures':2300*ESC,'/tournaments':2300*ESC,'/historical-odds':5500*ESC};
+          /* deja solo lo necesario del historial (mercado 131 de Pinnacle) para que el cache sea chico */
+          function recortar(j){
+            const bk=j&&j.bookmakers&&j.bookmakers.pinnacle, mk=bk&&bk.markets||{};
+            const o={fixtureId:j&&j.fixtureId,_mk:Object.keys(mk),bookmakers:{}};
+            if(mk['131']) o.bookmakers.pinnacle={markets:{'131':mk['131']}};
+            return o;
+          }
           async function op(path,params){
             const q=new URLSearchParams(params); const k=path+'?'+q.toString();
-            if(cache.data[k]){ deCache++; return cache.data[k]; }
+            if(k in cache.data){ deCache++; return cache.data[k]; }
+            const hist=(path==='/historical-odds');
             for(let intento=0;intento<2;intento++){
-              if(nuevas>=MAXC){ const e=new Error('tope de llamadas'); e.tope=true; throw e; }
+              if((!hist&&nuevas>=MAXC)||(hist&&nuevasH>=MAXJ)){ const e=new Error(hist?'tope de juegos':'tope de llamadas'); e.tope=true; throw e; }
               if(Date.now()-T0>LIMITE_MS){ const e=new Error('tiempo maximo'); e.tope=true; throw e; }
               const esp=(COOL[path]||2300*ESC)-(Date.now()-(ultimo[path]||0)); if(esp>0) await sleep(esp);
-              ultimo[path]=Date.now(); nuevas++;
+              ultimo[path]=Date.now(); if(hist) nuevasH++; else nuevas++;
               const u=new URLSearchParams(params); u.set('apiKey',KEY);
               const r=await fetch(OP+path+'?'+u.toString());
               if(r.status===429 && intento===0){ await sleep(8000*ESC); continue; }
+              if(r.status===404){ cache.data[k]=null; guardarPronto(); return null; }   /* "no hay resultados" */
               if(!r.ok){
                 const t=(await r.text().catch(()=>'')).slice(0,160).replace(KEY,'***');
                 const e=new Error('OddsPapi '+path+' HTTP '+r.status+' '+t); e.status=r.status; throw e;
               }
-              const j=await r.json(); cache.data[k]=j; guardar(); return j;
+              let j=await r.json(); if(hist) j=recortar(j);
+              cache.data[k]=j; guardarPronto(); return j;
             }
           }
 
@@ -453,7 +467,7 @@ jobs:
           function listaFix(j){
             let a=Array.isArray(j)?j:null;
             if(!a&&j) for(const k of ['fixtures','data','results','items']) if(Array.isArray(j[k])){ a=j[k]; break; }
-            return (a||[]).map(f=>({id:f.fixtureId||f.id,n1:f.participant1Name,n2:f.participant2Name,t:tms(f.startTime)}))
+            return (a||[]).map(f=>({id:f.fixtureId||f.id,n1:f.participant1Name,n2:f.participant2Name,t:tms(f.startTime),tn:f.tournamentName,tid:f.tournamentId}))
               .filter(f=>f.id&&f.n1&&f.n2&&isFinite(f.t));
           }
           function emparejar(juegos,fixs){
@@ -520,7 +534,7 @@ jobs:
             L.push('# OVA contra Pinnacle');
             L.push('');
             L.push('Juegos comparados: **'+R.n+'** (de '+info.desde+' a '+info.hasta+', temporada regular 2026).');
-            L.push('Llamadas nuevas a OddsPapi en esta corrida: '+info.nuevas+' · tomadas del cache: '+info.deCache+'.');
+            L.push('Llamadas que gastan cuota: '+info.nuevas+' · precios históricos consultados: '+info.nuevasH+' (no gastan cuota) · del cache: '+info.deCache+'.');
             L.push('');
             L.push('## Brier (más bajo = mejor)');
             L.push('- Siempre el 50% / % de local: '+f4(R.bK));
@@ -565,41 +579,102 @@ jobs:
           }
 
           /* ---------- flujo principal ---------- */
-          function ventanas(desde,hasta){
+          function ventanas(desde,hasta,n){
             const v=[]; let a=desde;
-            while(a<=hasta){ let b=sumDias(a,8); if(b>hasta) b=hasta; v.push([a,b]); a=sumDias(b,1); }
+            while(a<=hasta){ let b=sumDias(a,n-1); if(b>hasta) b=hasta; v.push([a,b]); a=sumDias(b,1); }
             return v;
           }
           function resumen(txt){
             try{ fs.writeFileSync('resultado.md',txt); if(ENV.GITHUB_STEP_SUMMARY) fs.appendFileSync(ENV.GITHUB_STEP_SUMMARY,txt+'\n'); }catch(e){}
           }
+          const ctx={torneo:null,variante:null};
+          function listaTorneos(j){
+            let a=Array.isArray(j)?j:null;
+            if(!a&&j) for(const k of ['tournaments','data','results','items']) if(Array.isArray(j[k])){ a=j[k]; break; }
+            return a||[];
+          }
+          async function buscarMLB(){
+            const a=listaTorneos(await op('/tournaments',{sportId:'13'}));
+            const nom=t=>String(t.tournamentName||t.name||'');
+            const cand=a.filter(t=>/\bmlb\b|major league baseball/i.test(nom(t)+' '+(t.tournamentSlug||t.slug||'')))
+              .map(t=>({id:t.tournamentId||t.id,nombre:nom(t),cat:String(t.categoryName||t.categorySlug||'')}));
+            return {total:a.length,cand:cand};
+          }
+          function elegir(c){
+            if(!c.length) return null;
+            return c.find(x=>/^(mlb|major league baseball)$/i.test(x.nombre.trim()))||c.find(x=>/usa|united states/i.test(x.cat))||c[0];
+          }
+          function variantes(a,b){
+            const from=a, to=sumDias(b,1), v=[];
+            if(ctx.torneo){
+              v.push({n:'torneo+terminados',p:{tournamentId:String(ctx.torneo),from:from,to:to,statusId:'2'}});
+              v.push({n:'torneo',p:{tournamentId:String(ctx.torneo),from:from,to:to}});
+            }
+            v.push({n:'deporte+terminados',p:{sportId:'13',from:from,to:to,statusId:'2'}});
+            v.push({n:'deporte',p:{sportId:'13',from:from,to:to}});
+            return v;
+          }
+          async function fixVentana(a,b){
+            const vs=variantes(a,b), orden=ctx.variante?vs.filter(x=>x.n===ctx.variante):vs;
+            for(const v of orden){
+              const l=listaFix(await op('/fixtures',v.p));
+              if(l.length){
+                if(!ctx.variante){ ctx.variante=v.n; P('  (la búsqueda "'+v.n+'" funciona; se usará esa)'); }
+                if(l.length>=95) P('  AVISO: '+l.length+' juegos en una ventana; puede haber un tope por respuesta. Si faltan juegos, usa VENT_DIAS más chico.');
+                return l;
+              }
+              P('  sin resultados con la búsqueda "'+v.n+'" ('+a+' a '+b+')');
+            }
+            return [];
+          }
           async function bajarFixtures(desde,hasta){
-            const fx=[]; const vs=ventanas(desde,hasta);
+            const fx=[], vistos=new Set(), vs=ventanas(desde,hasta,VENT);
             for(let i=0;i<vs.length;i++){
-              const j=await op('/fixtures',{sportId:'13',from:vs[i][0]+'T00:00:00Z',to:vs[i][1]+'T23:59:59Z',statusId:'2',hasOdds:'true',bookmakers:'pinnacle'});
-              const l=listaFix(j); P('  ventana '+vs[i][0]+' a '+vs[i][1]+': '+l.length+' fixtures');
-              if(!l.length) P('  (respuesta sin fixtures; forma recibida: '+JSON.stringify(j).slice(0,300).replace(KEY,'***')+')');
-              l.forEach(x=>fx.push(x));
+              const l=await fixVentana(vs[i][0],vs[i][1]);
+              P('  ventana '+vs[i][0]+' a '+vs[i][1]+': '+l.length+' fixtures');
+              l.forEach(x=>{ if(!vistos.has(x.id)){ vistos.add(x.id); fx.push(x); } });
             }
             return fx;
+          }
+          async function ubicarTorneo(){
+            try{
+              const t=await buscarMLB();
+              P('Torneos de béisbol en OddsPapi:',t.total,'· que parecen MLB:',t.cand.length);
+              t.cand.slice(0,8).forEach(c=>P('  candidato:',c.id,'|',c.nombre,'|',c.cat));
+              const el=elegir(t.cand);
+              if(el){ ctx.torneo=el.id; P('Uso el torneo',el.id,'('+el.nombre+')'); }
+              else P('No encontré un torneo "MLB"; se buscará por deporte completo.');
+            }catch(e){ if(e.status===401||e.status===403) throw e; P('No pude listar torneos ('+e.message+'); se buscará por deporte completo.'); }
           }
 
           async function sonda(){
             const desde=ENV.SONDA_DESDE||'2026-09-22', hasta=ENV.SONDA_HASTA||'2026-09-24';   /* fechas dentro de la temporada regular */
-            P('SONDA: revisando '+desde+' a '+hasta+' (2 llamadas a OddsPapi como máximo)');
+            P('SONDA: revisando '+desde+' a '+hasta);
             const juegos=await mlbJuegos(desde,hasta); P('Juegos MLB terminados en esas fechas:',juegos.length);
+            await ubicarTorneo();
             const fx=await bajarFixtures(desde,hasta);
-            P('Fixtures de OddsPapi (béisbol con Pinnacle):',fx.length);
-            if(fx.length) P('  ejemplo:',fx[0].n1,'vs',fx[0].n2,'|',new Date(fx[0].t).toISOString());
+            P('Fixtures encontrados:',fx.length);
+            if(!fx.length){
+              P('Ninguna búsqueda devolvió juegos de esas fechas. Probando fechas recientes para saber si OddsPapi entrega juegos pasados…');
+              const r=listaFix(await op('/fixtures',{sportId:'13',from:'2026-10-05',to:'2026-10-08'}));
+              P('  fixtures recientes (sin filtros):',r.length);
+              r.slice(0,3).forEach(f=>P('   ',f.n1,'vs',f.n2,new Date(f.t).toISOString(),f.tn||''));
+              P('\nSONDA INCOMPLETA. Pega este resultado completo en el chat.');
+              return false;
+            }
+            const torneos={}; fx.forEach(f=>{ const k=(f.tn||'?')+' (id '+f.tid+')'; torneos[k]=(torneos[k]||0)+1; });
+            Object.keys(torneos).sort((a,b)=>torneos[b]-torneos[a]).slice(0,5).forEach(k=>P('  torneo en los fixtures:',k,'→',torneos[k]));
+            P('  ejemplo:',fx[0].n1,'vs',fx[0].n2,'|',new Date(fx[0].t).toISOString());
             const em=emparejar(juegos,fx);
             P('Emparejados con juegos de MLB:',em.length,'de',juegos.length);
             if(!em.length){ P('\nNO SE PUDO EMPAREJAR. Pega este resultado completo en el chat para ajustar los nombres.');
               juegos.slice(0,3).forEach(g=>P('  MLB:',g.h.name,'vs',g.a.name)); return false; }
             const e=em[0];
             const h=await op('/historical-odds',{fixtureId:String(e.f.id),bookmakers:'pinnacle'});
-            const bk=h&&h.bookmakers||{}; P('Casas en la respuesta:',Object.keys(bk).join(', ')||'ninguna');
-            const mk=bk.pinnacle&&bk.pinnacle.markets||{}; P('Mercados de Pinnacle:',Object.keys(mk).slice(0,12).join(', ')||'ninguno');
-            const m1=mk['131']; if(m1){ Object.keys(m1.outcomes||{}).forEach(o=>{
+            if(!h){ P('El historial de precios de ese juego no existe (404). Pega este resultado en el chat.'); return false; }
+            P('Mercados de Pinnacle en ese juego:',(h._mk||[]).slice(0,12).join(', ')||'ninguno');
+            const m1=h.bookmakers.pinnacle&&h.bookmakers.pinnacle.markets['131'];
+            if(m1){ Object.keys(m1.outcomes||{}).forEach(o=>{
               const pl=m1.outcomes[o].players||{}; const arr=(pl['0']||pl[Object.keys(pl)[0]]||[]).slice().sort((a,b)=>Date.parse(a.createdAt)-Date.parse(b.createdAt));
               P('  resultado '+o+': '+arr.length+' cambios de precio; más viejo '+(arr.length?JSON.stringify([arr[0].createdAt,arr[0].price]):'—')+
                 ' · más nuevo '+(arr.length?JSON.stringify([arr[arr.length-1].createdAt,arr[arr.length-1].price]):'—')); }); }
@@ -615,29 +690,34 @@ jobs:
           }
 
           async function completo(){
-            P('MODO COMPLETO: hasta '+MAXC+' llamadas nuevas a OddsPapi. Rango '+DESDE+' a '+HASTA);
+            P('MODO COMPLETO: hasta '+MAXJ+' juegos con precio de Pinnacle y '+MAXC+' llamadas que gastan cuota. Rango '+DESDE+' a '+HASTA);
             const juegos=await mlbJuegos(DESDE,HASTA); P('Juegos MLB terminados:',juegos.length);
-            let fx=[]; try{ fx=await bajarFixtures(DESDE,HASTA); }catch(e){ if(!e.tope) throw e; P('Se alcanzó el tope mientras se bajaban fixtures.'); }
+            await ubicarTorneo();
+            let fx=[]; try{ fx=await bajarFixtures(DESDE,HASTA); }catch(e){ if(!e.tope) throw e; P('Se alcanzó el tope de llamadas mientras se buscaban juegos; sigo con lo que se encontró.'); }
             const em=emparejar(juegos,fx);
             P('Fixtures:',fx.length,'· emparejados con MLB:',em.length);
             if(!em.length) throw new Error('No se emparejó ningún juego. Corre primero el modo sonda.');
-            /* muestra al azar (semilla fija) de lo que alcance el presupuesto */
             let s=12345; const rnd=()=>{ s=(s*1664525+1013904223)%4294967296; return s/4294967296; };
             const arr=em.slice(); for(let i=arr.length-1;i>0;i--){ const j=Math.floor(rnd()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; }
-            /* los ya guardados en cache salen primero, no cuestan */
-            arr.sort((a,b)=>(cache.data['/historical-odds?'+new URLSearchParams({fixtureId:String(b.f.id),bookmakers:'pinnacle'})]?1:0)-
-                            (cache.data['/historical-odds?'+new URLSearchParams({fixtureId:String(a.f.id),bookmakers:'pinnacle'})]?1:0));
+            const kh=e=>'/historical-odds?'+new URLSearchParams({fixtureId:String(e.f.id),bookmakers:'pinnacle'});
+            arr.sort((a,b)=>((kh(b) in cache.data)?1:0)-((kh(a) in cache.data)?1:0));
             const filas=[], skip={}; let paro=false;
             for(let i=0;i<arr.length;i++){
               const e=arr[i];
               let h;
               try{ h=await op('/historical-odds',{fixtureId:String(e.f.id),bookmakers:'pinnacle'}); }
-              catch(err){ if(err.tope){ paro=true; break; } if(err.status===401||err.status===403||err.status===429){ P('OddsPapi dijo: '+err.message); paro=true; break; } skip['error de OddsPapi']=(skip['error de OddsPapi']||0)+1; continue; }
+              catch(err){
+                if(err.tope){ paro=true; P('Se detuvo: '+err.message); break; }
+                if(err.status===401||err.status===403||err.status===429){ P('OddsPapi dijo: '+err.message); paro=true; break; }
+                skip['error de OddsPapi']=(skip['error de OddsPapi']||0)+1; continue;
+              }
+              if(!h){ skip['sin historial de precios']=(skip['sin historial de precios']||0)+1; continue; }
               const pr=precios(h,e.f.t); if(pr.err){ skip[pr.err]=(skip[pr.err]||0)+1; continue; }
               const loc=x=>e.p1Local?x:1-x;
               filas.push({g:e.g,y:2026,out:e.g.y,pC:loc(pr.cierre),pA:loc(pr.apertura)});
-              if(filas.length%20===0) P('  '+filas.length+' juegos con precio de Pinnacle…');
+              if(filas.length%25===0) P('  '+filas.length+' juegos con precio de Pinnacle…');
             }
+            guardar();
             P('Con precio de Pinnacle utilizable:',filas.length,paro?'(se detuvo por tope/tiempo)':'');
             Object.keys(skip).forEach(k=>P('  omitidos por "'+k+'":',skip[k]));
             P('Calculando OVA al día para cada juego (API de MLB, gratis)…');
@@ -647,7 +727,7 @@ jobs:
             Object.keys(sk2).forEach(k=>P('  OVA omitido por "'+k+'":',sk2[k]));
             if(rows.length<10) throw new Error('Quedaron solo '+rows.length+' juegos utilizables.');
             const R=analizar(rows);
-            const txt=reporte(R,{desde:DESDE,hasta:HASTA,nuevas:nuevas,deCache:deCache});
+            const txt=reporte(R,{desde:DESDE,hasta:HASTA,nuevas:nuevas,nuevasH:nuevasH,deCache:deCache});
             P('\n'+txt);
             resumen(txt);
           }
@@ -656,12 +736,12 @@ jobs:
             if(!KEY){ P('Falta el secreto ODDSPAPI_KEY en GitHub (Settings → Secrets and variables → Actions).'); process.exit(1); }
             try{
               if(MODO==='completo') await completo(); else { const ok=await sonda(); resumen('# Sonda\n```\n'+out.join('\n')+'\n```'); if(!ok) process.exitCode=0; }
-              P('\nLlamadas nuevas a OddsPapi en esta corrida:',nuevas,'· del cache:',deCache);
+              P('\nLlamadas que gastaron cuota en esta corrida:',nuevas,'· precios históricos pedidos:',nuevasH,'· del cache:',deCache);
             }catch(e){
               P('ERROR:',String(e&&e.message||e).replace(KEY,'***'));
-              resumen('# Error\n'+String(e&&e.message||e).replace(KEY,'***'));
+              resumen('# Error\n'+out.join('\n')+'\n\n'+String(e&&e.message||e).replace(KEY,'***'));
               process.exitCode=1;
-            }
+            }finally{ guardar(); }
           })();
 
           FINDELSCRIPT
@@ -669,7 +749,9 @@ jobs:
         env:
           ODDSPAPI_KEY: ${{ secrets.ODDSPAPI_KEY }}
           MODO: ${{ inputs.modo }}
-          MAX_CALLS: ${{ inputs.max_calls }}
+          MAX_JUEGOS: ${{ inputs.max_juegos }}
+          MAX_CALLS: "60"
+          MAX_MIN: "100"
         run: node ovapinnacle.js
       - uses: actions/cache/save@v4
         if: always()
