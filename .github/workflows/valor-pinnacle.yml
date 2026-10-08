@@ -76,6 +76,10 @@ jobs:
             if(!/kalshi/.test(slug)) return d;
             const p=1/d, fee=KFEE*p*(1-p); return 1/(p+fee);
           }
+          function kalshiTope(fair){            /* precio maximo (centavos) en Kalshi para tener EV >= MIN_EV con su comision */
+            let lo=0.01,hi=0.99; for(let i=0;i<40;i++){ const c=(lo+hi)/2; const ev=fair/(c+KFEE*c*(1-c))-1; if(ev>=MIN_EV) lo=c; else hi=c; }
+            return Math.floor(lo*100);
+          }
           const pct=x=>(x*100).toFixed(1)+'%';
           function hora(t){ return new Date(t).toLocaleTimeString('es-US',{timeZone:'America/Chicago',hour:'numeric',minute:'2-digit'}); }
           function precio(book,mk,out){
@@ -93,15 +97,18 @@ jobs:
             const v=Object.values(j).filter(x=>x&&typeof x==='object'&&x.fixtureId); return v;
           }
 
+          const DIAG={faltan:[],parecidas:[],disponibles:[],porCasa:{},razones:{total:0,empezado:0,lejos:0,estado:0,sinPinnacle:0,pinSuspendido:0,sinPrecio:0,ok:0}};
           /* ---------- casas y torneo ---------- */
           async function resolverLibros(){
             const j=await op('/bookmakers',{}, {cache:true});
             const lista=Array.isArray(j)?j:[];
             const slugs=lista.map(b=>({slug:String(b.slug||'').toLowerCase(),nombre:String(b.bookmakerName||'')}));
             const res=[];
+            DIAG.disponibles=slugs.map(x=>x.slug);
+            DIAG.parecidas=slugs.filter(x=>/kalshi|polymarket|predict|exchange|novig|prophet/.test(x.slug+' '+x.nombre.toLowerCase())).map(x=>x.slug);
             QUIERO.forEach(q=>{
               const x=slugs.find(s=>s.slug===q)||slugs.find(s=>s.slug.includes(q)||s.nombre.toLowerCase().includes(q));
-              if(x&&!res.includes(x.slug)) res.push(x.slug); else P('  (OddsPapi no tiene una casa llamada "'+q+'")');
+              if(x&&!res.includes(x.slug)) res.push(x.slug); else { DIAG.faltan.push(q); P('  (OddsPapi no tiene una casa llamada "'+q+'")'); }
             });
             if(!slugs.find(s=>s.slug==='pinnacle')) throw new Error('OddsPapi no lista a Pinnacle');
             if(!res.length){
@@ -132,19 +139,22 @@ jobs:
           }
           const nom=(f,i)=>f['participant'+i+'Name']||cache.nombres[f['participant'+i+'Id']]||('Equipo '+f['participant'+i+'Id']);
 
+          const bk0=(bo,sl)=>!!bo[sl];
           /* ---------- analisis ---------- */
           function analizar(fixs,libros){
             const ahora=Date.now(), lim=ahora+HORAS*3600e3, filas=[];
             fixs.forEach(f=>{
-              const t=Date.parse(f.startTime); if(!isFinite(t)||t<ahora+5*60e3||t>lim) return;   /* solo juegos que no han empezado */
-              if(f.statusId!=null&&+f.statusId!==0) return;
-              const bo=f.bookmakerOdds||{}; const pin=bo.pinnacle; if(!pin||pin.suspended) return;
-              const a=precio(pin,'131','131'), b=precio(pin,'131','132'); if(!a||!b) return;
+              const R=DIAG.razones; R.total++;
+              const t=Date.parse(f.startTime); if(!isFinite(t)||t<ahora+5*60e3){R.empezado++;return;} if(t>lim){R.lejos++;return;}   /* solo juegos que no han empezado */
+              if(f.statusId!=null&&+f.statusId!==0){R.estado++;return;}
+              const bo=f.bookmakerOdds||{}; const pin=bo.pinnacle; if(!pin){R.sinPinnacle++;return;} if(pin.suspended){R.pinSuspendido++;return;}
+              const a=precio(pin,'131','131'), b=precio(pin,'131','132'); if(!a||!b){R.sinPrecio++;return;} R.ok++;
               const fair=noVig(a.d,b.d);
               const fila={t:t,n:[nom(f,1),nom(f,2)],fair:fair,pinEdad:isFinite(a.t)?Math.round((ahora-a.t)/60000):null,casas:{}};
               libros.forEach(sl=>{
-                const bk=bo[sl]; if(!bk||bk.suspended) return;
-                const x=precio(bk,'131','131'), y=precio(bk,'131','132'); if(!x||!y) return;
+                const D=DIAG.porCasa[sl]||(DIAG.porCasa[sl]={salen:0,conPrecio:0,suspendido:0}); if(bk0(bo,sl)) D.salen++;
+                const bk=bo[sl]; if(!bk){return;} if(bk.suspended){D.suspendido++;return;}
+                const x=precio(bk,'131','131'), y=precio(bk,'131','132'); if(!x||!y) return; D.conPrecio++;
                 const e1=efectivo(sl,x.d), e2=efectivo(sl,y.d);
                 const ev=[fair[0]*e1-1,fair[1]*e2-1];
                 const i=ev[0]>=ev[1]?0:1;
@@ -171,8 +181,9 @@ jobs:
             valor.forEach(v=>L.push('- **'+v.eq+'** en **'+v.sl+'** a '+amer(v.c.precio)+' · justo según Pinnacle '+pct(v.fair)+' · EV '+(v.c.evMejor*100).toFixed(1)+'% · '+v.f.n[0]+' vs '+v.f.n[1]+' ('+hora(v.f.t)+')'));
             L.push('');
             L.push('## Favoritos más claros del mercado (Pinnacle, sin margen)');
+            if(DIAG.faltan.includes('kalshi')) L.push('_Kalshi no está en OddsPapi: revisa el precio en la app de Kalshi. Si el equipo cuesta menos que el tope de abajo, hay ventaja de '+(MIN_EV*100).toFixed(0)+'% o más después de la comisión._');
             if(!favs.length) L.push('No hay juegos por empezar en la ventana.');
-            favs.slice(0,6).forEach(v=>L.push('- '+v.eq+' '+pct(v.p)+' · '+v.f.n[0]+' vs '+v.f.n[1]+' ('+hora(v.f.t)+')'));
+            favs.slice(0,6).forEach(v=>L.push('- '+v.eq+' '+pct(v.p)+' · '+v.f.n[0]+' vs '+v.f.n[1]+' ('+hora(v.f.t)+') · **en Kalshi compra solo si cuesta '+kalshiTope(v.p)+'¢ o menos**'));
             L.push('');
             L.push('## Todos los juegos');
             L.push('| Hora | Juego | Pinnacle justo | '+libros.map(l=>l).join(' | ')+' |');
@@ -181,6 +192,13 @@ jobs:
               const cs=libros.map(sl=>{ const c=f.casas[sl]; return c?(f.n[c.mejor].split(' ').pop()+' '+amer(c.precio)+' ('+(c.evMejor*100).toFixed(1)+'%)'):'—'; });
               L.push('| '+hora(f.t)+' | '+f.n[0]+' vs '+f.n[1]+' | '+f.n[0].split(' ').pop()+' '+pct(f.fair[0])+' | '+cs.join(' | ')+' |');
             });
+            L.push('');
+            L.push('## Diagnóstico (para saber qué está viendo el escáner)');
+            const R=DIAG.razones;
+            L.push('- Juegos que OddsPapi devolvió: '+R.total+' · ya empezados o por empezar en menos de 5 min: '+R.empezado+' · más allá de '+HORAS+' h: '+R.lejos+' · otro estado: '+R.estado+' · sin Pinnacle: '+R.sinPinnacle+' · Pinnacle suspendido: '+R.pinSuspendido+' · sin precio ganador: '+R.sinPrecio+' · **usables: '+R.ok+'**');
+            Object.keys(DIAG.porCasa).forEach(sl=>{ const D=DIAG.porCasa[sl]; L.push('- '+sl+': con precio en '+D.conPrecio+' de '+R.ok+' juegos usables'+(D.suspendido?(' · suspendido en '+D.suspendido):'')); });
+            if(DIAG.faltan.length) L.push('- ⚠️ OddsPapi no tiene (con ese nombre) estas casas: **'+DIAG.faltan.join(', ')+'**. Casas parecidas que sí tiene: '+(DIAG.parecidas.join(', ')||'ninguna')+'.');
+            L.push('- Casas disponibles en OddsPapi que podrías comparar: '+(DIAG.disponibles.filter(x=>/bovada|draftkings|fanduel|betmgm|caesars|betrivers|espn|fanatics|hardrock|bet365|polymarket|kalshi|novig|prophet|betonline|mybookie|bookmaker/.test(x)).join(', ')||'(ninguna conocida)'));
             L.push('');
             L.push('_EV = ganancia esperada por cada dólar apostado si la probabilidad de Pinnacle es la correcta. Kalshi incluye una comisión estimada. El precio puede cambiar en minutos: confirma en la app antes de apostar. Un EV de 3-5% es una ventaja pequeña que solo se nota en muchos picks._');
             return {md:L.join('\n'),valor:valor,favs:favs};
@@ -194,7 +212,7 @@ jobs:
             if(r.favs.length){
               L.push('');
               L.push('Favoritos más claros (Pinnacle):');
-              r.favs.slice(0,3).forEach(v=>L.push('• '+v.eq+' '+pct(v.p)+' | '+hora(v.f.t)));
+              r.favs.slice(0,3).forEach(v=>L.push('• '+v.eq+' '+pct(v.p)+' | '+hora(v.f.t)+' | Kalshi: max '+kalshiTope(v.p)+'c'));
             }
             return L.join('\n');
           }
@@ -262,7 +280,6 @@ jobs:
               process.exitCode=1;
             }finally{ guardar(); }
           })();
-
           FINDELSCRIPT
       - name: Revisar el mercado
         env:
